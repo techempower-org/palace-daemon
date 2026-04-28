@@ -226,9 +226,20 @@ async def _exclusive_palace():
 # ── Pending-writes queue (held during rebuild) ───────────────────────────────
 
 def _pending_writes_path() -> str:
-    """Location of the jsonl queue that holds silent-saves during rebuild."""
+    """Location of the jsonl queue that holds silent-saves during rebuild.
+
+    Respects PALACE_PENDING_WRITES_PATH env var so container deployments can
+    place the file inside the palace volume rather than the container root.
+    """
+    env_path = os.getenv("PALACE_PENDING_WRITES_PATH")
+    if env_path:
+        return env_path
     palace_path = _mp._config.palace_path
-    parent = os.path.dirname(palace_path.rstrip("/")) or os.path.expanduser("~")
+    parent = os.path.dirname(palace_path.rstrip("/"))
+    # dirname("/palace") == "/" in containers — fall back inside the palace dir
+    if not parent or parent == os.sep:
+        parent = palace_path.rstrip("/")
+    parent = parent or os.path.expanduser("~")
     return os.path.join(parent, "palace-daemon-pending.jsonl")
 
 

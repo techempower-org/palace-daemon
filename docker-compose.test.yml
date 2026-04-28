@@ -1,0 +1,30 @@
+# docker-compose.test.yml — isolated test palace on port 8086
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml up -d --build
+#   docker compose -f docker-compose.test.yml down
+#   bash scripts/reset-test-palace.sh --start --seed
+
+services:
+  palace-test:
+    build: .
+    container_name: palace-test
+    ports:
+      - "8086:8085"
+    volumes:
+      - ${TEST_PALACE_PATH:-/home/radu/.mempalace/test_palace}:/palace:rw
+    environment:
+      # Set before Python starts so mempalace picks it up at import time.
+      - MEMPALACE_PALACE_PATH=/palace
+      - PALACE_API_KEY=${PALACE_API_KEY:-}
+      - PALACE_MAX_CONCURRENCY=2
+      - PALACE_MAX_READ_CONCURRENCY=2
+      - PALACE_MAX_WRITE_CONCURRENCY=1
+      - PALACE_PENDING_WRITES_PATH=/palace/daemon-pending.jsonl
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8085/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
