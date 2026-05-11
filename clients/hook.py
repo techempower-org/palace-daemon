@@ -29,6 +29,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -195,6 +196,14 @@ def _get_mine_dir() -> str:
     return ""
 
 
+def _request_headers() -> dict:
+    headers = {"Content-Type": "application/json"}
+    api_key = os.environ.get("PALACE_API_KEY", "").strip()
+    if api_key:
+        headers["X-API-Key"] = api_key
+    return headers
+
+
 def _post_mcp(daemon_url: str, tool_name: str, params: dict) -> bool:
     payload = {
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -205,12 +214,16 @@ def _post_mcp(daemon_url: str, tool_name: str, params: dict) -> bool:
         req = urllib.request.Request(
             daemon_url.rstrip("/") + "/mcp",
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers=_request_headers(),
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             return resp.status == 200
-    except Exception:
+    except urllib.error.HTTPError as e:
+        _log(f"mcp via daemon rejected (HTTP {e.code}): {e.reason}")
+        return False
+    except Exception as e:
+        _log(f"mcp via daemon failed (network/transport): {e}")
         return False
 
 
@@ -221,13 +234,16 @@ def _post_mine(daemon_url: str, mine_dir: str, timeout: int = 60) -> bool:
         req = urllib.request.Request(
             daemon_url.rstrip("/") + "/mine",
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers=_request_headers(),
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status == 200
+    except urllib.error.HTTPError as e:
+        _log(f"mine via daemon rejected (HTTP {e.code} {e.reason}) — check PALACE_API_KEY")
+        return False
     except Exception as e:
-        _log(f"mine via daemon failed (daemon unreachable): {e}")
+        _log(f"mine via daemon failed (network/transport): {e}")
         return False
 
 
