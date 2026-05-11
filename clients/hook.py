@@ -180,6 +180,68 @@ def _count_human_messages(transcript_path: str) -> int:
     return count
 
 
+def _extract_messages(transcript_path: str, max_turns: int = 30) -> list:
+    """Extract last N user+assistant text turns from the session JSONL."""
+    path = _validate_transcript_path(transcript_path)
+    if path is None or not path.is_file():
+        return []
+    turns = []
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                    msg = entry.get("message", {})
+                    if not isinstance(msg, dict):
+                        continue
+                    role = msg.get("role")
+                    if role not in ("user", "assistant"):
+                        continue
+                    content = msg.get("content", "")
+                    if isinstance(content, str):
+                        text = content.strip()
+                    elif isinstance(content, list):
+                        text = " ".join(
+                            b.get("text", "").strip()
+                            for b in content
+                            if isinstance(b, dict) and b.get("type") == "text"
+                        ).strip()
+                    else:
+                        continue
+                    if not text or "<command-message>" in text:
+                        continue
+                    turns.append({"role": role, "text": text[:600]})
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+    except OSError:
+        return []
+    return turns[-max_turns:]
+
+
+def _post_digest(daemon_url: str, session_id: str, agent_name: str,
+                 harness: str, messages: list, exchange_count: int) -> bool:
+    payload = {
+        "session_id": session_id,
+        "agent_name": agent_name,
+        "harness": harness,
+        "messages": messages,
+        "exchange_count": exchange_count,
+        "topic": CHECKPOINT_TOPIC,
+    }
+    try:
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            daemon_url.rstrip("/") + "/digest",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status in (200, 202)
+    except Exception:
+        return False
+
+
 def _get_mine_dir() -> str:
     """Return mine directory from MEMPAL_DIR only. No transcript path fallback."""
     mempal_dir = os.environ.get("MEMPAL_DIR", "")
@@ -336,8 +398,14 @@ def hook_stop(data: dict, harness: str):
         return
 
     if silent:
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-        entry = f"AUTO-SAVE:{session_id}|{exchange_count}.msgs|{ts}|hook.{trigger}"
+        msgs = _extract_messages(transcript_path, max_turns=40)
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        if msgs:
+            user_turns = [m["text"][:200] for m in msgs if m["role"] == "user"]
+            bullets = "\n".join(f"- {t}" for t in user_turns[-10:])
+            entry = f"SESSION:{date_str}|{harness}+{exchange_count}msgs|★★★☆☆\n\n{bullets}"
+        else:
+            entry = f"SESSION:{date_str}|{harness}+{exchange_count}msgs|★★☆☆☆\n\n- (transcript unavailable)"
         ok = _post_mcp(daemon_url, "mempalace_diary_write", {
             "agent_name": harness,
             "entry": entry,

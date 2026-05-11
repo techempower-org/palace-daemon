@@ -28,6 +28,10 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
+try:
+    import anthropic as _anthropic
+except ImportError:
+    _anthropic = None
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
@@ -43,6 +47,7 @@ VERSION = "1.5.1"
 DEFAULT_HOST = os.getenv("PALACE_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.getenv("PALACE_PORT", "8085"))
 DEFAULT_PALACE = os.getenv("PALACE_PATH", "")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 API_KEY = os.getenv("PALACE_API_KEY", "")  # read at startup for argparse default; auth checks re-read from env dynamically
 PALACE_MAX_CONCURRENCY = int(os.getenv("PALACE_MAX_CONCURRENCY", "4"))
 PALACE_MAX_READ_CONCURRENCY = int(os.getenv("PALACE_MAX_READ_CONCURRENCY", str(PALACE_MAX_CONCURRENCY)))
@@ -707,6 +712,81 @@ async def silent_save(request: Request, x_api_key: str | None = Header(default=N
         detail=f"silent save failed: {result.get('error', 'unknown')}",
     )
 
+
+
+
+def _write_diary_sync(agent_name: str, entry: str, topic: str, wing: str) -> None:
+    from mempalace.mcp_server import tool_diary_write
+    tool_diary_write(agent_name=agent_name, entry=entry, topic=topic, wing=wing)
+
+
+async def _run_digest(payload: dict) -> None:
+    session_id = payload.get("session_id", "unknown")
+    agent_name = payload.get("agent_name", "session-hook")
+    topic     = payload.get("topic", "checkpoint") or "checkpoint"
+    wing      = payload.get("wing", "") or ""
+    messages  = payload.get("messages", [])
+    exchange_count = payload.get("exchange_count", 0)
+    date_str  = datetime.utcnow().strftime("%Y-%m-%d")
+
+    convo = "\n".join(
+        f"{m['role'].upper()}: {m['text'][:400]}"
+        for m in messages if isinstance(m, dict) and m.get("text", "").strip()
+    )
+    prompt = (
+        f"Write a MemPalace AAAK diary entry for this AI coding session from {date_str}.\n"
+        f"AAAK format example: SESSION:{date_str}|topic1+topic2|\u2605\u2605\u2605\u2606\u2606\n\n"
+        f"Then 4-8 compressed bullet facts (decisions, outcomes, key info). Max 600 chars total.\n"
+        f"Session ({exchange_count} exchanges):\n{convo}\n\nWrite only the AAAK entry, no preamble."
+    )
+    try:
+        if _anthropic is None:
+            raise RuntimeError("anthropic package not installed")
+        client = _anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        aaak_text = response.content[0].text.strip()
+    except Exception as exc:
+        logging.warning("digest: Claude API failed for %s: %s", session_id, exc)
+        aaak_text = f"AUTO-SAVE:{session_id}|{exchange_count}.msgs|{date_str}|digest-fallback"
+
+    async with _write_sem:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, _write_diary_sync, agent_name, aaak_text, topic, wing
+        )
+    logging.info("digest: wrote AAAK for %s (%d msgs)", session_id, exchange_count)
+
+
+@app.post("/digest", status_code=202)
+async def digest(request: Request, x_api_key: str | None = Header(default=None)):
+    """
+    Async AAAK summarisation. Accepts a transcript excerpt, fires a background
+    task that calls the Anthropic API and writes the result to the diary.
+    Returns 202 immediately — hook never waits for the Claude call.
+
+    Body: {
+      session_id, agent_name, harness,
+      messages: [{"role": "user"|"assistant", "text": str}],
+      exchange_count: int,
+      topic?: str,
+      wing?: str,
+    }
+    """
+    _check_auth(x_api_key)
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured on daemon")
+    if _anthropic is None:
+        raise HTTPException(status_code=503, detail="anthropic package not installed on daemon")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON")
+    asyncio.create_task(_run_digest(body))
+    return {"queued": True}
 
 @app.post("/repair")
 async def repair(request: Request, x_api_key: str | None = Header(default=None)):
