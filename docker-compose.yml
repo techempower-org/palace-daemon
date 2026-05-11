@@ -10,6 +10,7 @@ services:
       - ${PALACE_PATH:-~/.mempalace/palace}:/palace:rw
     environment:
       - PALACE_API_KEY=${PALACE_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - PALACE_MAX_CONCURRENCY=${PALACE_MAX_CONCURRENCY:-4}
     restart: unless-stopped
     healthcheck:

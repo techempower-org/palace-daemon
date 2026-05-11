@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.6.0] - 2026-05-11
 
 ### Added
 - **`POST /digest`** — async AAAK summarisation endpoint. Accepts a transcript excerpt
