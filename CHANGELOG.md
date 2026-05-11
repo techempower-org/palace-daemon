@@ -1,3 +1,10 @@
+## [Unreleased]
+
+### Maintenance
+- Upgraded mempalace to 3.3.5.  removed — retry-on-failure
+  with cache clearing and error logging landed upstream in 3.3.5 (#1377, #1396).
+   now exits clean with no patches to apply.
+
 # Changelog
 
 ## [1.6.0] - 2026-05-11
