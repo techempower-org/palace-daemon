@@ -2,8 +2,27 @@
 
 ## [Unreleased]
 
-### Maintenance
-- `mcp_server_get_collection.patch` — synced hunk offsets to mempalace 3.3.3; removed redundant `collection.modify()` re-application block since upstream now handles `hnsw:num_threads=1` enforcement via `_pin_hnsw_threads()`. Patch behaviour is unchanged.
+### Added
+- **`POST /digest`** — async AAAK summarisation endpoint. Accepts a transcript excerpt
+  (`session_id`, `agent_name`, `harness`, `messages`, `exchange_count`), fires a background
+  task that calls the Anthropic API (`claude-haiku-4-5`) and writes the result to the diary
+  via `tool_diary_write`. Returns 202 immediately. Requires `ANTHROPIC_API_KEY`; returns 503 gracefully when absent.
+- **`clients/backfill.py`** — one-shot script to retroactively index existing Claude Code
+  JSONL transcripts into the MemPalace diary. Reads all sessions under `~/.claude/projects/`,
+  extracts user turns, formats as AAAK, writes diary entries via the daemon.
+  Supports `--dry-run`, `--min-turns`, `--projects-dir`, `--harness`.
+
+### Changed
+- **`clients/hook.py` silent saves now write real AAAK content** — the `AUTO-SAVE:session_id|N.msgs|...`
+  stub is replaced by a `SESSION:date|harness+Nmsgs|★★★☆☆` entry containing the last 10 user
+  turns extracted from the session JSONL. No API key required; falls back to stub if the
+  transcript is unreadable or the daemon is unreachable.
+
+### Fixed
+- **`mcp_server_get_collection.patch` updated for mempalace 3.3.4** — upstream refactored
+  `get_or_create_collection` into a split get/create to avoid a Rust-binding SIGSEGV (#1262).
+  Patch rebased onto new code; retry logic, cache clearing, and error logging preserved.
+  `apply_patches.sh --check` now reports `[already applied]` on 3.3.4.
 
 ## [1.5.1] - 2026-04-26
 
