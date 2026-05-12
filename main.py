@@ -123,10 +123,18 @@ def _watchdog_interval() -> int:
 
 
 async def _watchdog_loop(interval_secs: int) -> None:
-    """Ping systemd watchdog at half the watchdog interval, only when palace is healthy."""
+    """Ping systemd watchdog at half the watchdog interval, only when palace is healthy.
+
+    Honor CancelledError so the lifespan shutdown can stop us cleanly —
+    otherwise uvicorn hangs on "Waiting for background tasks to complete"
+    until systemd SIGKILLs at TimeoutStopSec.
+    """
     tick = max(10, interval_secs // 2)
     while True:
-        await asyncio.sleep(tick)
+        try:
+            await asyncio.sleep(tick)
+        except asyncio.CancelledError:
+            return
         try:
             loop = asyncio.get_running_loop()
             col = await loop.run_in_executor(None, _mp._get_collection)
@@ -687,9 +695,12 @@ async def lifespan(app: FastAPI):
     _sd_notify("READY=1\n")
 
     # Start systemd watchdog loop if WatchdogSec is configured.
+    # Stash the task on app.state so shutdown can cancel it cleanly —
+    # otherwise uvicorn will wait on it until systemd SIGKILLs.
+    app.state.watchdog_task = None
     wdog_secs = _watchdog_interval()
     if wdog_secs > 0:
-        asyncio.create_task(_watchdog_loop(wdog_secs))
+        app.state.watchdog_task = asyncio.create_task(_watchdog_loop(wdog_secs))
         logger.info("Systemd watchdog active (interval=%ds, tick=%ds).", wdog_secs, max(10, wdog_secs // 2))
 
     # File-watcher service: mines configured directories on file change.
@@ -747,9 +758,16 @@ async def lifespan(app: FastAPI):
         logger.warning("File-watcher startup failed (non-fatal): %s", e)
 
     yield
-    
-    # --- Shutdown: Silent Save / Flush ---
+
+    # --- Shutdown: cancel background tasks first so uvicorn isn't blocked ---
     logger.info("Lifespan: shutting down, flushing memories...")
+    wdog_task = getattr(app.state, "watchdog_task", None)
+    if wdog_task is not None and not wdog_task.done():
+        wdog_task.cancel()
+        try:
+            await asyncio.wait_for(wdog_task, timeout=3.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
     try:
         watcher = getattr(app.state, "watcher", None)
         if watcher is not None:
@@ -767,6 +785,33 @@ async def lifespan(app: FastAPI):
         logger.info("Flush complete.")
     except Exception as e:
         logger.error("Error during shutdown flush: %s", e)
+
+    # --- Shutdown: explicit ChromaDB client teardown ---
+    # ChromaDB 1.5.x PersistentClient has no clean close() (chroma#5868).
+    # The flush above triggers a checkpoint; this block ensures the client
+    # is actually torn down — drop refs, force a GC pass, then sleep
+    # briefly so chromadb's background flush threads finish writing
+    # before the process exits. Without this, SIGTERM at the wrong
+    # millisecond leaves the HNSW segment in partial-flush corruption:
+    # data_level0.bin written, link_lists.bin not yet, the chromadb
+    # metadata file missing. The integrity gate then quarantines on
+    # next open and we burn cycles rebuilding the index every restart.
+    # See #8.
+    try:
+        _mp._collection_cache = None
+        _mp._client_cache = None
+        import gc
+        gc.collect()
+        # Two seconds is empirically enough on this palace; chromadb's
+        # internal flush thread completes its work in ~hundreds of ms
+        # after the refs are dropped. If your palace is much larger,
+        # consider raising this — but the daemon will be SIGKILLed at
+        # TimeoutStopSec (30s by default), so don't exceed that.
+        # asyncio.sleep, not time.sleep — we're still inside the event loop.
+        await asyncio.sleep(2.0)
+        logger.info("ChromaDB client torn down cleanly.")
+    except Exception as e:
+        logger.error("Error during chromadb teardown (non-fatal): %s", e)
 
 
 app = FastAPI(title="palace-daemon", lifespan=lifespan)
