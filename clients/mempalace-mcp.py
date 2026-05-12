@@ -88,6 +88,15 @@ def run_daemon_mode(daemon_url: str):
     def handle(request):
         try:
             return forward(daemon_url, request)
+        except urllib.error.HTTPError as e:
+            # 4xx/5xx from the daemon — auth failures, missing endpoints,
+            # etc. HTTPError is a subclass of URLError, so split it BEFORE
+            # the generic URLError handler. Otherwise a 401 silently
+            # surfaces as "Daemon unreachable" and the operator goes
+            # hunting for network gremlins. See palace-daemon#7.
+            return {"jsonrpc": "2.0", "id": request.get("id"),
+                    "error": {"code": -32000,
+                              "message": f"Daemon rejected request (HTTP {e.code} {e.reason})"}}
         except urllib.error.URLError as e:
             return {"jsonrpc": "2.0", "id": request.get("id"),
                     "error": {"code": -32000, "message": f"Daemon unreachable: {e}"}}
