@@ -2,6 +2,75 @@
 
 ## [Unreleased]
 
+### Fixed — 2026-05-11 / 2026-05-12 operational debugging session
+
+A long debugging session against the disks palace surfaced (and fixed)
+six structural issues in palace-daemon. Documented here grouped by issue
+number for easy navigation.
+
+- **`clients/hook.py` never sent `X-API-Key`** (1a843ca). Daemon was
+  configured with `PALACE_API_KEY` but the hook built every `/mcp` and
+  `/mine` request with only `Content-Type`. Every hook save 401'd while
+  the broad `except Exception` logged "daemon unreachable", actively
+  misdirecting diagnosis. Added `_request_headers()` helper that pulls
+  from env; split `HTTPError` from `URLError` so 4xx/auth failures
+  no longer impersonate transport failures.
+
+- **`#7` `clients/mempalace-mcp.py` had the same swallow pattern**
+  (009694b). Caught `urllib.error.URLError` as "Daemon unreachable" —
+  HTTPError is a subclass of URLError, so 401s silently surfaced as
+  "unreachable" via the same trap. Split into explicit HTTPError handler
+  with code+reason in the message.
+
+- **`#8` ChromaDB SIGTERM corruption** (e714c76). Chromadb 1.5.x
+  PersistentClient has no clean `close()` (chroma-core/chroma#5868).
+  systemd SIGTERM was killing the daemon mid-flush, leaving the HNSW
+  segment in partial-flush corruption (non-empty `data_level0.bin`,
+  missing index metadata file). Lifespan shutdown now: cancels the
+  watchdog task with timeout, drops cached client+collection refs,
+  `gc.collect()`, then `await asyncio.sleep(2.0)` to give chromadb
+  background flush threads a chance to finish before exit. Stop time
+  dropped from 30s SIGKILL to 2.3s clean shutdown.
+
+- **`#9` `/repair?mode=rebuild` deadlocked indefinitely** (053a36c).
+  `rebuild_index()` instantiates a fresh `ChromaBackend()` →
+  `PersistentClient` against the same palace path, but the daemon's
+  cached `PersistentClient` was still holding the sqlite filelock.
+  The new client waited forever. Cache is now cleared (with gc + 0.5s
+  sleep) BEFORE invoking `rebuild_index` so the new client can acquire
+  the filelock cleanly.
+
+- **`#10` Silent degradation when `hnswlib` is absent** (255cace).
+  ChromaDB has no error path for missing hnswlib — it falls back to
+  brute-force on in-memory batches with no log line, and the persistence
+  layer (which needs `hnswlib.Index.save_index`) becomes unreachable so
+  no segment files ever get written. We burned ~2 hours diagnosing
+  partial-flush symptoms before realizing the venv was missing the dep.
+  Added an import-time guard that exits with a clear install instruction
+  pointing at `chroma-hnswlib` (chroma's binary fork, easier to install
+  than the source-only `hnswlib`).
+
+- **`#11` Recursive `/mcp` self-call** (938dd2f). The daemon hosts
+  mempalace's MCP server in-process via `_call()`. When
+  `PALACE_DAEMON_URL` was present in the daemon's environment — which
+  routinely happens if `EnvironmentFile=` is shared with hook/client
+  tools that DO need it — mempalace's `_daemon_strict()` returned True
+  and forwarded every `/mcp` envelope back to the daemon. Recursive
+  self-call until `_DAEMON_FORWARD_TIMEOUT_DEFAULT=120` fired.
+  Pinned `Environment=PALACE_DAEMON_STRICT=0` in the unit so the
+  in-process path is taken regardless of what the EnvironmentFile
+  contains. `/health` dropped from 30-60s timeout to 280ms.
+
+### Test — 2026-05-12
+
+- **`#6` Regression tests for hook.py auth + error classification**
+  (058c268). `tests/test_hook_auth.py` — 9 unit tests covering
+  `_request_headers()` (env present/absent/whitespace), `_post_mcp` /
+  `_post_mine` outgoing headers, and the HTTPError-vs-URLError log
+  message split. Uses `unittest.mock` to intercept `urllib.request.urlopen`
+  and inspect captured Request objects. Locks in the post-`1a843ca` behavior
+  so the silent-auth-failure pattern can't regress.
+
 ### Maintenance
 - `patches/mcp_server_get_collection.patch` reduced to just the "log exception + retry once on cache failure" slice. The `hnsw:num_threads=1` enforcement portion landed upstream via `_pin_hnsw_threads()` in `mempalace/mcp_server.py` and is no longer carried locally. Daemon behaviour is unchanged. The remaining slice is filed upstream as [MemPalace/mempalace#1286](https://github.com/MemPalace/mempalace/pull/1286); once that merges the patch retires entirely.
 
