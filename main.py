@@ -31,6 +31,25 @@ import uvicorn
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+# Hard fail if hnswlib isn't importable. ChromaDB has no error path for
+# this — it silently degrades to brute-force on small in-memory batches,
+# and the persistence layer (hnswlib.Index.save_index) is unreachable so
+# nothing ever gets written to disk. Symptom is "segments stuck in
+# partial-flush shape forever" which is brutal to diagnose. See #10.
+try:
+    import hnswlib  # noqa: F401
+except ImportError as _hnsw_err:
+    print(
+        "FATAL: hnswlib is not importable in this venv. ChromaDB will silently\n"
+        "       degrade to brute-force search with NO HNSW persistence.\n"
+        "       Install the chroma-maintained binary fork:\n"
+        f"         {sys.executable.rsplit('/', 1)[0]}/pip install --no-deps chroma-hnswlib\n"
+        "       (Or with uv: uv pip install --python <venv-python> --no-deps chroma-hnswlib)\n"
+        f"       Underlying error: {_hnsw_err}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
 import mempalace.mcp_server as _mp
 from mempalace import repair as _mp_repair
 from mempalace.backends.chroma import quarantine_stale_hnsw
