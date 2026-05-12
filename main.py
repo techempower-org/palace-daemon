@@ -1568,9 +1568,22 @@ async def repair(request: Request, x_api_key: str | None = Header(default=None))
             async with _exclusive_palace():
                 loop = asyncio.get_running_loop()
                 palace_path = _mp._config.palace_path
-                await loop.run_in_executor(None, _mp_repair.rebuild_index, palace_path)
+                # Drop the cached PersistentClient + collection BEFORE
+                # rebuild_index opens its own. rebuild_index instantiates
+                # a fresh ChromaBackend() → new PersistentClient against
+                # the same palace_path. If our cache still holds the
+                # previous PersistentClient, the new one deadlocks
+                # waiting for the SQLite filelock the cached one is
+                # still holding. No timeout. See #9.
                 _mp._client_cache = None
                 _mp._collection_cache = None
+                import gc
+                gc.collect()
+                # Give chromadb background threads a beat to release
+                # their grip before we open a fresh client.
+                await asyncio.sleep(0.5)
+
+                await loop.run_in_executor(None, _mp_repair.rebuild_index, palace_path)
                 result = {"rebuilt": True}
             await _warn_if_hnsw_threads_unset()
 
