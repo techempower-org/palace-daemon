@@ -22,6 +22,14 @@ StandardError=journal
 Environment=PYTHONUNBUFFERED=1
 Environment=PALACE_MAX_READ_CONCURRENCY=4
 Environment=PALACE_MAX_WRITE_CONCURRENCY=1
+# CRITICAL: the daemon hosts mempalace's MCP server in-process. If
+# PALACE_DAEMON_URL leaks into this process (e.g. via a shared
+# EnvironmentFile that's also sourced by client tools), mempalace's
+# mcp_server detects it and forwards every /mcp call back to the
+# daemon — recursive self-call that deadlocks at the 120s timeout.
+# Setting STRICT=0 here forces the in-process path regardless of
+# whether DAEMON_URL leaks in. See palace-daemon#11.
+Environment=PALACE_DAEMON_STRICT=0
 
 [Install]
 WantedBy=multi-user.target
