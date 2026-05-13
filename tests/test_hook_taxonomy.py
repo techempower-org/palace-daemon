@@ -15,6 +15,7 @@ Run with::
 import json
 import os
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -325,6 +326,113 @@ class TestSessionStartMessage(unittest.TestCase):
         msg = hook._theme_session_start("wing_legacy_thing", resp)
         self.assertIn("wing:legacy_thing", msg)
         self.assertNotIn("wing:wing_legacy_thing", msg)
+
+
+class TestLastSaveRebase(unittest.TestCase):
+    """Self-heal when exchange_count goes backward.
+
+    Regression for the 2026-05-13 count-fix side effect: tightening the
+    'what counts as a human message' rule (filtering out tool_result
+    roundtrips) made counts drop ~11x. Existing state files held the
+    pre-fix inflated counts. Without a rebase, since_last goes negative
+    and all save triggers wedge.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.mkdtemp(prefix="hook-rebase-")
+        self._original_state_dir = hook.STATE_DIR
+        hook.STATE_DIR = Path(self._tmp)
+        hook.STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        import shutil
+        hook.STATE_DIR = self._original_state_dir
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _write_state(self, session_id, value):
+        (hook.STATE_DIR / f"{session_id}_last_save").write_text(str(value))
+        # Also seed last_save_ts to "now" so time_trigger doesn't fire
+        # in tests where we expect no save (an unseeded ts file makes
+        # time_since_last huge, triggering a time-based save).
+        (hook.STATE_DIR / f"{session_id}_last_save_ts").write_text(str(time.time()))
+
+    def _read_state(self, session_id):
+        return int((hook.STATE_DIR / f"{session_id}_last_save").read_text().strip())
+
+    def _write_transcript(self, n_real_user_turns):
+        # Build a transcript with N real human turns. Use tempfile because
+        # the production hook uses _validate_transcript_path which requires
+        # absolute path + .jsonl extension.
+        import tempfile
+        fd, path = tempfile.mkstemp(prefix="rebase-tr-", suffix=".jsonl")
+        os.close(fd)
+        entries = []
+        for i in range(n_real_user_turns):
+            entries.append({"message": {"role": "user", "content": f"turn {i}"}})
+            entries.append({"message": {"role": "assistant", "content": f"response {i}"}})
+        with open(path, "w") as f:
+            for e in entries:
+                f.write(json.dumps(e) + "\n")
+        return path
+
+    def _drive_hook_stop(self, session, transcript):
+        # Drive hook_stop with HTTP calls stubbed so the test is fast
+        # and deterministic. Stubs return failure-shaped tuples so the
+        # save path treats the daemon as unreachable; we only care about
+        # state-file mutations from the rebase logic.
+        import io
+        data = {"session_id": session, "stop_hook_active": False,
+                "transcript_path": transcript}
+        with patch.object(hook, "_post_mcp", return_value=(False, {"error": "stub"})), \
+             patch.object(hook, "_post_mine", return_value=(False, {"error": "stub"})), \
+             patch.object(hook, "_get_palace_stats", return_value={}), \
+             patch.object(hook, "_ingest_transcript_via_daemon"), \
+             patch("sys.stdout", new=io.StringIO()):
+            hook.hook_stop(data, "claude-code")
+
+    def test_rebase_when_last_save_exceeds_count(self):
+        # Pre-fix saved a count of 955 (inflated). Post-fix the same
+        # transcript counts as 87. Without rebase, since_last = -868.
+        session = "rebase-test"
+        self._write_state(session, 955)
+        transcript = self._write_transcript(87)
+        try:
+            self._drive_hook_stop(session, transcript)
+            self.assertEqual(self._read_state(session), 87,
+                             "state should rebase from 955 down to current count")
+        finally:
+            os.unlink(transcript)
+
+    def test_no_rebase_when_count_exceeds_last_save(self):
+        # Normal case — counter going forward, no trigger fires.
+        # last_save should not change.
+        session = "normal-test"
+        self._write_state(session, 5)
+        transcript = self._write_transcript(10)
+        try:
+            self._drive_hook_stop(session, transcript)
+            # since_last (5) < SAVE_INTERVAL (15), force_min_interval not met
+            # because last_save_ts is seeded to now → no trigger.
+            self.assertEqual(self._read_state(session), 5)
+        finally:
+            os.unlink(transcript)
+
+    def test_rebase_unblocks_save_triggers(self):
+        # End-to-end: pre-fix last_save 100, current count 10. Without
+        # rebase, since_last would be -90 and no trigger fires. With
+        # rebase, since_last becomes 0 — still no save this turn (good:
+        # we're at "fresh checkpoint"), but the path is unblocked for
+        # future fires.
+        session = "unblock-test"
+        self._write_state(session, 100)
+        transcript = self._write_transcript(10)
+        try:
+            self._drive_hook_stop(session, transcript)
+            # Rebased to 10; future calls have since_last >= 0 working again.
+            self.assertEqual(self._read_state(session), 10)
+        finally:
+            os.unlink(transcript)
 
 
 class TestHumanMessageCount(unittest.TestCase):

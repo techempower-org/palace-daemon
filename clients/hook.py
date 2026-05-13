@@ -858,6 +858,26 @@ def hook_stop(data: dict, harness: str):
         except (ValueError, OSError):
             last_save = 0
 
+    # Self-heal when the counter goes backward. Happens when the rules
+    # for "what counts as a human message" tighten — e.g. the 2026-05-13
+    # fix that stopped counting tool_result roundtrips dropped this
+    # session's count from ~955 to ~87. Without this rebase, since_last
+    # is negative, all three save triggers (count/time/force require
+    # since_last > 0) wedge, and saves silently stop on running sessions.
+    # Rebase the saved checkpoint to the current count: the next real
+    # exchange resumes normal trigger behavior; one save cycle skipped.
+    if last_save > exchange_count:
+        _log(
+            f"Session {session_id}: rebased stale last_save "
+            f"({last_save} → {exchange_count}) — counter went backward, "
+            f"likely after a count-rule change"
+        )
+        last_save = exchange_count
+        try:
+            last_save_file.write_text(str(exchange_count), encoding="utf-8")
+        except OSError:
+            pass
+
     since_last = exchange_count - last_save
     last_save_ts = _read_last_save_ts(session_id)
     time_since_last = time.time() - last_save_ts
