@@ -223,6 +223,69 @@ class TestThemedMineMessage(unittest.TestCase):
         self.assertIn("✘", msg)
 
 
+class TestSessionStartMessage(unittest.TestCase):
+    """Greeter rendering at session start — count-only, wing-scoped."""
+
+    def _make_list_drawers_response(self, total: int, count: int = 0):
+        # Shape of tool_list_drawers' MCP-wrapped reply, derived from a
+        # live daemon call against wing=familiar_realm_watch on
+        # 2026-05-13: total + drawers list (only content_preview, no
+        # filed_at — that was a planning-time assumption that didn't
+        # match reality, see _theme_session_start docstring).
+        inner = {
+            "drawers": [
+                {
+                    "drawer_id": f"diary_test_2026{i:02d}",
+                    "wing": "test",
+                    "room": "diary",
+                    "content_preview": "...",
+                } for i in range(count)
+            ],
+            "total": total,
+            "count": count,
+            "offset": 0,
+            "limit": max(count, 1),
+        }
+        return {"result": {"content": [{"type": "text", "text": json.dumps(inner)}]}}
+
+    def test_fresh_wing_message(self):
+        resp = self._make_list_drawers_response(total=0, count=0)
+        msg = hook._theme_session_start("brand_new_project", resp)
+        self.assertIn("✦ palace ready", msg)
+        self.assertIn("brand_new_project", msg)
+        self.assertIn("fresh wing", msg)
+
+    def test_populated_wing_pluralizes_correctly(self):
+        resp_many = self._make_list_drawers_response(total=47, count=1)
+        msg = hook._theme_session_start("familiar_realm_watch", resp_many)
+        self.assertIn("47 diary entries", msg)
+        self.assertIn("wing:familiar_realm_watch", msg)
+
+    def test_single_entry_singular(self):
+        resp_one = self._make_list_drawers_response(total=1, count=1)
+        msg = hook._theme_session_start("test", resp_one)
+        self.assertIn("1 diary entry", msg)
+        self.assertNotIn("entries", msg)  # singular form
+
+    def test_large_count_uses_thousands_separator(self):
+        resp = self._make_list_drawers_response(total=18203, count=1)
+        msg = hook._theme_session_start("mempalace", resp)
+        self.assertIn("18,203 diary entries", msg)
+
+    def test_malformed_response_falls_back_to_fresh(self):
+        # If the response can't be parsed, treat as zero entries rather
+        # than crash the session-start hook.
+        msg = hook._theme_session_start("wing_x", {"result": {"content": []}})
+        self.assertIn("fresh wing", msg)
+
+    def test_strips_legacy_wing_prefix_in_display(self):
+        # Read paths may surface legacy wing_X data; display must strip.
+        resp = self._make_list_drawers_response(total=3, count=1)
+        msg = hook._theme_session_start("wing_legacy_thing", resp)
+        self.assertIn("wing:legacy_thing", msg)
+        self.assertNotIn("wing:wing_legacy_thing", msg)
+
+
 class TestPrecompactSaveMessage(unittest.TestCase):
     """Boundary marker rendering."""
 

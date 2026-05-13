@@ -507,6 +507,35 @@ def _theme_mine(mine_dir: str, ok: bool, failure: dict, palace_count: str) -> st
     return f"✘ Pre-compact mine failed — source: {source} — {err}"
 
 
+def _theme_session_start(wing: str, response: dict) -> str:
+    """One-line palace greeting at session start.
+
+    Surfaces what mempalace already knows about the project this session
+    is operating on. Calls ``tool_list_drawers(wing, room=diary, limit=1)``
+    to get a wing-scoped count regardless of which agent wrote each entry.
+
+    Examples:
+      ✦ palace ready — wing:familiar_realm_watch holds 47 diary entries
+      ✦ palace ready — wing:new_project is a fresh wing
+    """
+    inner = {}
+    try:
+        content = response.get("result", {}).get("content", []) if isinstance(response, dict) else []
+        if content and isinstance(content[0], dict):
+            inner = json.loads(content[0].get("text", "{}"))
+    except Exception:
+        inner = {}
+
+    display = _display_wing(wing)
+    total = inner.get("total", 0) or 0
+
+    if total == 0:
+        return f"✦ palace ready — wing:{display} is a fresh wing"
+
+    plural = "entry" if total == 1 else "entries"
+    return f"✦ palace ready — wing:{display} holds {total:,} diary {plural}"
+
+
 def _theme_precompact_save(wing: str, response: dict, palace_count: str) -> str:
     """Themed message for the pre-compact diary save (context boundary marker).
 
@@ -567,11 +596,31 @@ def _prune_state_files(max_age_days: int = 7):
 def hook_session_start(data: dict, harness: str):
     parsed = _parse_harness_input(data, harness)
     session_id = parsed["session_id"]
+    transcript_path = parsed["transcript_path"]
     _log(f"SESSION START for session {session_id}")
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     _write_last_save_ts(session_id)   # seed so first-stop time_trigger doesn't fire immediately
     _prune_state_files()
-    _output({})
+
+    # Greet by surfacing palace state for the project this session is in.
+    # Read is non-fatal: if the daemon is unreachable, fail silent rather
+    # than block session startup with a transient error.
+    settings = _load_hook_settings()
+    daemon_url = settings.get("daemon_url", "http://localhost:8085")
+    wing = _project_wing(data, transcript_path)
+
+    ok, response = _post_mcp(daemon_url, "mempalace_list_drawers", {
+        "wing": wing,
+        "room": "diary",
+        "limit": 1,
+    })
+    if ok:
+        sys_msg = _theme_session_start(wing, response)
+        _log(f"SESSION GREETING: {sys_msg}")
+        _output({"systemMessage": sys_msg})
+    else:
+        _log(f"SESSION GREETING skipped (daemon unreachable for wing={wing})")
+        _output({})
 
 
 def hook_stop(data: dict, harness: str):
