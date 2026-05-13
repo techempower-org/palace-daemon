@@ -23,6 +23,8 @@ Settings: ~/.mempalace/hook_settings.json
 """
 
 import argparse
+import fcntl
+import hashlib
 import json
 import os
 import re
@@ -97,6 +99,43 @@ def _validate_transcript_path(transcript_path: str) -> Path:
 
 
 _state_dir_initialized = False
+_LOG_MAX_BYTES = 10 * 1024 * 1024  # rotate at 10 MB
+_LOG_KEEP = 3                       # hook.log.1 .. hook.log.3, then drop
+
+
+def _rotate_log_if_needed(log_path: Path):
+    """Size-gated rotation, run before each append.
+
+    When ``log_path`` exceeds _LOG_MAX_BYTES, shift .1→.2, .2→.3, drop the
+    oldest, rename current → .1, and let the next write start fresh.
+    Cheap to call every time: usually just a single ``stat`` syscall.
+    """
+    try:
+        if not log_path.exists() or log_path.stat().st_size < _LOG_MAX_BYTES:
+            return
+    except OSError:
+        return
+    try:
+        oldest = log_path.with_name(f"{log_path.name}.{_LOG_KEEP}")
+        if oldest.exists():
+            try:
+                oldest.unlink()
+            except OSError:
+                pass
+        for i in range(_LOG_KEEP - 1, 0, -1):
+            src = log_path.with_name(f"{log_path.name}.{i}")
+            dst = log_path.with_name(f"{log_path.name}.{i + 1}")
+            if src.exists():
+                try:
+                    src.rename(dst)
+                except OSError:
+                    pass
+        try:
+            log_path.rename(log_path.with_name(f"{log_path.name}.1"))
+        except OSError:
+            pass
+    except OSError:
+        pass
 
 
 def _log(message: str):
@@ -110,6 +149,7 @@ def _log(message: str):
                 pass
             _state_dir_initialized = True
         log_path = STATE_DIR / "hook.log"
+        _rotate_log_if_needed(log_path)
         is_new = not log_path.exists()
         timestamp = datetime.now().strftime("%H:%M:%S")
         with open(log_path, "a") as f:
@@ -630,6 +670,63 @@ def _prune_state_files(max_age_days: int = 7):
         pass
 
 
+def _mine_target_key(directory: str, mode: str, wing: str) -> str:
+    """Stable hash for a (dir, mode, wing) mine target.
+
+    Used as the filename of the per-target lock file so different targets
+    get independent slots while the same (dir, mode, wing) triple collapses
+    to a single slot — exactly the dedup semantics upstream's
+    ``hooks_cli._pid_file_for_cmd`` provides.
+    """
+    raw = f"{directory}|{mode}|{wing}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def _try_claim_mine_slot(directory: str, mode: str, wing: str):
+    """Try to acquire an exclusive lock on the (dir, mode, wing) target.
+
+    Returns the open file handle on success — the caller must keep it
+    alive (i.e. unclosed) for the duration of the ``/mine`` POST so the
+    lock stays held. Returns ``None`` if another hook process is already
+    mining the same target.
+
+    Uses ``fcntl.flock`` with ``LOCK_EX | LOCK_NB`` — fully atomic, no
+    races between check and claim. Auto-releases when the holding process
+    exits (even on crash), so stale locks from killed hooks never block.
+
+    The dedup window is bounded by how long the holding hook holds /mine
+    open: typically the request timeout (30s by default). After that the
+    hook process exits, the lock releases, and the next save can fire
+    another /mine. The daemon-side mine may still be running past that
+    point — mempalace's miner dedupes by file via ``prefetch_mined_set``,
+    so a duplicate fire just produces a "scan and skip" pass rather than
+    a redundant mining of the same source files.
+    """
+    slot_dir = STATE_DIR / "mine_slots"
+    try:
+        slot_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    key = _mine_target_key(directory, mode, wing)
+    slot_path = slot_dir / f"{key}.lock"
+    try:
+        fh = open(slot_path, "w")
+    except OSError:
+        return None
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        fh.close()
+        return None
+    # Stamp the slot for debugging — never read for logic.
+    try:
+        fh.write(f"pid={os.getpid()} dir={directory} mode={mode} wing={wing} ts={time.time()}\n")
+        fh.flush()
+    except OSError:
+        pass
+    return fh
+
+
 def _ingest_transcript_via_daemon(daemon_url: str, transcript_path: str, wing: str):
     """Restore the transcript-ingest step that mempalace's upstream
     ``hooks_cli._ingest_transcript`` does on every save and precompact.
@@ -649,8 +746,19 @@ def _ingest_transcript_via_daemon(daemon_url: str, transcript_path: str, wing: s
     settings = _load_hook_settings()
     if not settings.get("ingest_transcripts", True):
         return
+
+    mine_dir = str(path.parent)
+
+    # Per-target dedup: if another hook process is currently inside /mine
+    # for the same (dir, mode, wing), skip rather than queue a redundant
+    # fire. The lock auto-releases when the holding hook exits.
+    slot = _try_claim_mine_slot(mine_dir, "convos", wing)
+    if slot is None:
+        _log(f"Transcript ingest skipped (lock held): {path.name} wing={wing}")
+        return
+
     try:
-        ok, response = _post_mine(daemon_url, str(path.parent),
+        ok, response = _post_mine(daemon_url, mine_dir,
                                   timeout=settings.get("mine_timeout_s", 30),
                                   mode="convos", wing=wing)
         if ok:
@@ -660,6 +768,11 @@ def _ingest_transcript_via_daemon(daemon_url: str, transcript_path: str, wing: s
             _log(f"Transcript ingest failed: {err}")
     except Exception as e:
         _log(f"Transcript ingest exception (non-fatal): {e}")
+    finally:
+        try:
+            slot.close()
+        except OSError:
+            pass
 
 
 def hook_session_start(data: dict, harness: str):

@@ -327,6 +327,132 @@ class TestSessionStartMessage(unittest.TestCase):
         self.assertNotIn("wing:wing_legacy_thing", msg)
 
 
+class TestLogRotation(unittest.TestCase):
+    """Size-gated hook.log rotation."""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.mkdtemp(prefix="hook-log-rotate-")
+        self._original_state_dir = hook.STATE_DIR
+        hook.STATE_DIR = Path(self._tmp)
+
+    def tearDown(self):
+        import shutil
+        hook.STATE_DIR = self._original_state_dir
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_no_rotation_when_under_size(self):
+        log = hook.STATE_DIR / "hook.log"
+        log.write_text("tiny log\n")
+        hook._rotate_log_if_needed(log)
+        self.assertTrue(log.exists())
+        self.assertFalse((hook.STATE_DIR / "hook.log.1").exists())
+
+    def test_rotates_at_threshold(self):
+        log = hook.STATE_DIR / "hook.log"
+        # Use a small threshold for the test — keep production semantics
+        # by patching the constant rather than writing 10MB.
+        original = hook._LOG_MAX_BYTES
+        try:
+            hook._LOG_MAX_BYTES = 100
+            log.write_text("x" * 200)
+            hook._rotate_log_if_needed(log)
+            self.assertFalse(log.exists(), "current log should have rotated away")
+            self.assertTrue((hook.STATE_DIR / "hook.log.1").exists())
+        finally:
+            hook._LOG_MAX_BYTES = original
+
+    def test_shifts_existing_rotations(self):
+        original = hook._LOG_MAX_BYTES
+        try:
+            hook._LOG_MAX_BYTES = 100
+            log = hook.STATE_DIR / "hook.log"
+            (hook.STATE_DIR / "hook.log.1").write_text("first rotation")
+            (hook.STATE_DIR / "hook.log.2").write_text("second rotation")
+            log.write_text("x" * 200)
+            hook._rotate_log_if_needed(log)
+            self.assertEqual((hook.STATE_DIR / "hook.log.2").read_text(), "first rotation")
+            self.assertEqual((hook.STATE_DIR / "hook.log.3").read_text(), "second rotation")
+        finally:
+            hook._LOG_MAX_BYTES = original
+
+    def test_drops_oldest_beyond_keep_limit(self):
+        original = hook._LOG_MAX_BYTES
+        try:
+            hook._LOG_MAX_BYTES = 100
+            log = hook.STATE_DIR / "hook.log"
+            # All slots already filled (.1 .2 .3) — oldest must drop.
+            for i in range(1, hook._LOG_KEEP + 1):
+                (hook.STATE_DIR / f"hook.log.{i}").write_text(f"slot {i}")
+            old_3_content = (hook.STATE_DIR / f"hook.log.{hook._LOG_KEEP}").read_text()
+            log.write_text("x" * 200)
+            hook._rotate_log_if_needed(log)
+            # The old .3 (slot 3) is gone — it's not in .4 because we only keep 3.
+            self.assertEqual(
+                (hook.STATE_DIR / "hook.log.3").read_text(),
+                "slot 2",  # shifted from .2
+                "old slot 3 should have been dropped, slot 2 shifted in"
+            )
+        finally:
+            hook._LOG_MAX_BYTES = original
+
+
+class TestMineSlotDedup(unittest.TestCase):
+    """Lock-based per-target mine dedup.
+
+    Mirrors upstream's hooks_cli._claim_mine_slot semantics: two near-
+    simultaneous hook fires for the same (dir, mode, wing) target collapse
+    to one /mine POST; the second silently skips while the first holds
+    the slot. Different targets get independent slots and never block.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.mkdtemp(prefix="hook-mine-slot-")
+        self._original_state_dir = hook.STATE_DIR
+        hook.STATE_DIR = Path(self._tmp)
+
+    def tearDown(self):
+        import shutil
+        hook.STATE_DIR = self._original_state_dir
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_same_target_collapses_to_one_slot(self):
+        slot1 = hook._try_claim_mine_slot("/a", "convos", "wing_x")
+        self.assertIsNotNone(slot1, "first acquisition should succeed")
+        try:
+            slot2 = hook._try_claim_mine_slot("/a", "convos", "wing_x")
+            self.assertIsNone(slot2, "second acquisition for same target should fail")
+        finally:
+            slot1.close()
+        # After slot1 closes, a fresh claim should succeed again.
+        slot3 = hook._try_claim_mine_slot("/a", "convos", "wing_x")
+        self.assertIsNotNone(slot3, "claim should succeed after lock release")
+        slot3.close()
+
+    def test_different_targets_get_independent_slots(self):
+        s1 = hook._try_claim_mine_slot("/a", "convos", "wing_x")
+        s2 = hook._try_claim_mine_slot("/b", "convos", "wing_x")
+        s3 = hook._try_claim_mine_slot("/a", "convos", "wing_y")
+        s4 = hook._try_claim_mine_slot("/a", "projects", "wing_x")
+        try:
+            self.assertIsNotNone(s1)
+            self.assertIsNotNone(s2, "different dir = independent slot")
+            self.assertIsNotNone(s3, "different wing = independent slot")
+            self.assertIsNotNone(s4, "different mode = independent slot")
+        finally:
+            for s in (s1, s2, s3, s4):
+                if s is not None:
+                    s.close()
+
+    def test_key_is_stable_across_runs(self):
+        k1 = hook._mine_target_key("/a", "convos", "wing_x")
+        k2 = hook._mine_target_key("/a", "convos", "wing_x")
+        k3 = hook._mine_target_key("/a", "convos", "wing_y")
+        self.assertEqual(k1, k2)
+        self.assertNotEqual(k1, k3)
+
+
 class TestPostMineDefaults(unittest.TestCase):
     """Lock in the post-2026-05-13 _post_mine signature.
 
