@@ -114,6 +114,39 @@ class TestProjectWing(unittest.TestCase):
                          "Bare slug expected, no wing_ prefix per spec")
 
 
+class TestDrawerLabel(unittest.TestCase):
+    """Slug-style drawer label: <topic>@<HH:MM> from ISO timestamp.
+
+    The drawer ID itself stays opaque (sha256-derived for idempotency).
+    These tests cover only the human-display surface.
+    """
+
+    def test_topic_plus_hhmm(self):
+        self.assertEqual(
+            hook._drawer_label("checkpoint", "2026-05-13T08:48:16.427801"),
+            "checkpoint@08:48",
+        )
+
+    def test_topic_only_when_timestamp_missing(self):
+        self.assertEqual(hook._drawer_label("precompact", ""), "precompact")
+
+    def test_time_only_when_topic_missing(self):
+        self.assertEqual(
+            hook._drawer_label("", "2026-05-13T22:00:00"),
+            "@22:00",
+        )
+
+    def test_unknown_when_both_missing(self):
+        self.assertEqual(hook._drawer_label("", ""), "?")
+
+    def test_handles_malformed_timestamp(self):
+        # If timestamp doesn't have a T separator, fall back to topic only.
+        self.assertEqual(
+            hook._drawer_label("checkpoint", "not-an-iso-date"),
+            "checkpoint",
+        )
+
+
 class TestDisplayWing(unittest.TestCase):
     """Defensive prefix-stripping for any legacy wing_X data read back from chromadb."""
 
@@ -133,7 +166,8 @@ class TestDisplayWing(unittest.TestCase):
 class TestThemedSaveMessage(unittest.TestCase):
     """The systemMessage rendered in Claude Code UI on a save."""
 
-    def _make_response(self, entry_id="diary_wing_x_20260513_080000_abcd1234567f", topic="checkpoint"):
+    def _make_response(self, entry_id="diary_wing_x_20260513_080000_abcd1234567f",
+                       topic="checkpoint", timestamp="2026-05-13T08:48:16.427801"):
         # Mempalace returns the diary_write result nested as JSON inside
         # the MCP `content[0].text` slot.
         inner = {
@@ -141,6 +175,7 @@ class TestThemedSaveMessage(unittest.TestCase):
             "entry_id": entry_id,
             "agent": "claude-code",
             "topic": topic,
+            "timestamp": timestamp,
         }
         return {
             "result": {"content": [{"type": "text", "text": json.dumps(inner)}]}
@@ -171,13 +206,19 @@ class TestThemedSaveMessage(unittest.TestCase):
         )
         self.assertIn("room:diary", msg)
 
-    def test_drawer_id_truncated_to_last_8(self):
+    def test_drawer_label_uses_topic_and_time(self):
+        # Drawer display is a slug-style label built from topic + HH:MM,
+        # not the opaque content hash. The hash stays in metadata for
+        # search; this is just the rendering for humans.
         msg = hook._theme_save_ok(
             exchange_count=1, trigger="force",
-            response=self._make_response(entry_id="diary_wing_x_20260513_080000_DEADBEEF"),
+            response=self._make_response(topic="checkpoint",
+                                         timestamp="2026-05-13T14:22:09.123"),
             palace_count="", wing="test",
         )
-        self.assertIn("drawer:…DEADBEEF", msg)
+        self.assertIn("drawer:checkpoint@14:22", msg)
+        # Hash should NOT appear in the message — that was the old form.
+        self.assertNotIn("…", msg)
 
     def test_falls_back_to_agent_when_wing_missing(self):
         # Older code path: no wing passed in. We still render *something*
@@ -293,6 +334,8 @@ class TestPrecompactSaveMessage(unittest.TestCase):
         response = {
             "result": {"content": [{"type": "text", "text": json.dumps({
                 "entry_id": "diary_wing_x_20260513_080000_BOUNDARY1",
+                "topic": "precompact",
+                "timestamp": "2026-05-13T08:00:00",
             })}]}
         }
         msg = hook._theme_precompact_save(
@@ -303,7 +346,9 @@ class TestPrecompactSaveMessage(unittest.TestCase):
         # Different sigil from _theme_save_ok's ✦
         self.assertIn("◆", msg)
         self.assertIn("wing:familiar_realm_watch", msg)
-        self.assertIn("topic: precompact", msg)
+        # Drawer label now uses slug form, not the hash suffix.
+        self.assertIn("drawer:precompact@08:00", msg)
+        self.assertNotIn("…BOUNDARY1", msg)
 
 
 if __name__ == "__main__":

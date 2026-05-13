@@ -433,6 +433,35 @@ def _display_wing(wing: str) -> str:
     return wing[5:] if isinstance(wing, str) and wing.startswith("wing_") else wing or "?"
 
 
+def _drawer_label(topic: str, timestamp: str) -> str:
+    """Build a human-readable slug-style drawer label from topic + timestamp.
+
+    Drawer IDs themselves are opaque (content-hashed for idempotency and
+    collision-free generation) — see ``diary_write`` / ``add_drawer`` in
+    mempalace. They're storage handles, not navigation handles. The
+    themed message wants something a human can recognize at a glance,
+    so we synthesize ``<topic>@<HH:MM>`` from the metadata mempalace
+    already returns. The full drawer_id stays available via search /
+    list_drawers when the hash matters.
+
+    Examples:
+      _drawer_label("checkpoint", "2026-05-13T08:48:16.427801") → "checkpoint@08:48"
+      _drawer_label("precompact", "")                            → "precompact"
+      _drawer_label("", "")                                       → "?"
+    """
+    topic = (topic or "").strip()
+    if isinstance(timestamp, str) and "T" in timestamp:
+        # ISO-8601 ``YYYY-MM-DDTHH:MM:SS.fff``; we want ``HH:MM``.
+        try:
+            hhmm = timestamp.split("T", 1)[1][:5]
+            if topic:
+                return f"{topic}@{hhmm}"
+            return f"@{hhmm}"
+        except (IndexError, AttributeError):
+            pass
+    return topic or "?"
+
+
 def _theme_save_ok(exchange_count: int, trigger: str, response: dict, palace_count: str, wing: str = "") -> str:
     """Build the success themed message for a Stop-hook save.
 
@@ -461,21 +490,17 @@ def _theme_save_ok(exchange_count: int, trigger: str, response: dict, palace_cou
         inner = {}
 
     topic = inner.get("topic", "") or ""
-    entry_id = inner.get("entry_id", "")
-    drawer_short = f"…{entry_id[-8:]}" if entry_id else "?"
+    timestamp = inner.get("timestamp", "") or ""
+    drawer_label = _drawer_label(topic, timestamp)
 
     display = _display_wing(wing) if wing else _display_wing(inner.get("agent", ""))
     if display and display != "?":
-        chain = f"palace → wing:{display} → room:diary → drawer:{drawer_short}"
+        chain = f"palace → wing:{display} → room:diary → drawer:{drawer_label}"
         head = f"✦ {chain}"
     else:
         head = "✦ Memory woven into the palace"
 
-    tail_bits = []
-    if topic:
-        tail_bits.append(f"topic: {topic}")
-    tail_bits.append(f"exchange {exchange_count}")
-    tail_bits.append(f"trigger={trigger}")
+    tail_bits = [f"exchange {exchange_count}", f"trigger={trigger}"]
     if palace_count:
         tail_bits.append(f"palace now holds {palace_count}")
     return f"{head}  —  " + ", ".join(tail_bits)
@@ -549,11 +574,12 @@ def _theme_precompact_save(wing: str, response: dict, palace_count: str) -> str:
             inner = json.loads(content[0].get("text", "{}"))
     except Exception:
         inner = {}
-    entry_id = inner.get("entry_id", "")
-    drawer_short = f"…{entry_id[-8:]}" if entry_id else "?"
+    topic = inner.get("topic", "precompact") or "precompact"
+    timestamp = inner.get("timestamp", "") or ""
+    drawer_label = _drawer_label(topic, timestamp)
     display = _display_wing(wing)
-    chain = f"palace → wing:{display} → room:diary → drawer:{drawer_short}"
-    msg = f"◆ Pre-compact boundary save — {chain}, topic: precompact"
+    chain = f"palace → wing:{display} → room:diary → drawer:{drawer_label}"
+    msg = f"◆ Pre-compact boundary save — {chain}"
     if palace_count:
         msg += f", palace now holds {palace_count}"
     return msg
