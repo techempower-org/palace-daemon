@@ -327,6 +327,120 @@ class TestSessionStartMessage(unittest.TestCase):
         self.assertNotIn("wing:wing_legacy_thing", msg)
 
 
+class TestHumanMessageCount(unittest.TestCase):
+    """Regression for the tool_result inflation bug (mirrors upstream #549).
+
+    Claude Code's tool roundtrips arrive as role:user messages whose
+    content is a list of tool_result blocks. They aren't human exchanges
+    and must not count toward the save-interval trigger.
+    """
+
+    def setUp(self):
+        import tempfile
+        fd, self._path = tempfile.mkstemp(prefix="transcript-", suffix=".jsonl")
+        os.close(fd)
+
+    def tearDown(self):
+        try:
+            os.unlink(self._path)
+        except OSError:
+            pass
+
+    def _write(self, entries):
+        with open(self._path, "w") as f:
+            for e in entries:
+                f.write(json.dumps(e) + "\n")
+
+    def test_plain_string_user_message_counts(self):
+        self._write([{"message": {"role": "user", "content": "hello there"}}])
+        self.assertEqual(hook._count_human_messages(self._path), 1)
+
+    def test_list_of_text_blocks_counts(self):
+        self._write([{"message": {"role": "user", "content": [
+            {"type": "text", "text": "what does this code do?"}
+        ]}}])
+        self.assertEqual(hook._count_human_messages(self._path), 1)
+
+    def test_tool_result_only_does_not_count(self):
+        # The bug: this is a tool roundtrip, not a human turn.
+        self._write([{"message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "x", "content": "output"}
+        ]}}])
+        self.assertEqual(hook._count_human_messages(self._path), 0)
+
+    def test_multiple_tool_results_in_one_message_does_not_count(self):
+        self._write([{"message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "a", "content": "out1"},
+            {"type": "tool_result", "tool_use_id": "b", "content": "out2"},
+            {"type": "tool_result", "tool_use_id": "c", "content": "out3"},
+        ]}}])
+        self.assertEqual(hook._count_human_messages(self._path), 0)
+
+    def test_mixed_text_and_tool_result_counts_once(self):
+        # If Claude Code ever sends a user turn that delivers both text
+        # AND tool results in one message, count it as one human turn.
+        self._write([{"message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "x", "content": "output"},
+            {"type": "text", "text": "and also, can you do X?"},
+        ]}}])
+        self.assertEqual(hook._count_human_messages(self._path), 1)
+
+    def test_command_message_skipped(self):
+        self._write([
+            {"message": {"role": "user", "content": "<command-message>/save</command-message>"}},
+            {"message": {"role": "user", "content": [
+                {"type": "text", "text": "<command-message>/foo</command-message>"}
+            ]}},
+        ])
+        self.assertEqual(hook._count_human_messages(self._path), 0)
+
+    def test_empty_text_skipped(self):
+        self._write([
+            {"message": {"role": "user", "content": ""}},
+            {"message": {"role": "user", "content": [{"type": "text", "text": "  "}]}},
+        ])
+        self.assertEqual(hook._count_human_messages(self._path), 0)
+
+    def test_realistic_session_mix(self):
+        # Realistic shape: 3 real human turns interleaved with 8 tool roundtrips.
+        # Pre-fix this would count as 11; post-fix should be 3.
+        entries = [
+            {"message": {"role": "user", "content": "first question"}},
+            {"message": {"role": "assistant", "content": "let me check"}},
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "1", "content": "ls output"}
+            ]}},
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "2", "content": "grep output"}
+            ]}},
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "3", "content": "cat output"}
+            ]}},
+            {"message": {"role": "user", "content": "second question"}},
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "4", "content": "find output"}
+            ]}},
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "5", "content": "ps output"}
+            ]}},
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "6", "content": "df output"}
+            ]}},
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "7", "content": "du output"}
+            ]}},
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "8", "content": "wc output"}
+            ]}},
+            {"message": {"role": "user", "content": [
+                {"type": "text", "text": "third question"}
+            ]}},
+        ]
+        self._write(entries)
+        self.assertEqual(hook._count_human_messages(self._path), 3,
+                         "should count 3 real human turns, not 11 total user-role messages")
+
+
 class TestLogRotation(unittest.TestCase):
     """Size-gated hook.log rotation."""
 

@@ -191,6 +191,26 @@ def _load_hook_settings() -> dict:
 
 
 def _count_human_messages(transcript_path: str) -> int:
+    """Count real user turns in a transcript, excluding tool-result roundtrips.
+
+    Claude Code's messages API frames tool results as ``role: "user"``
+    messages whose content is a list of ``{type: "tool_result", ...}``
+    blocks — conceptually "the user delivering the tool's output back to
+    the model." These aren't human exchanges; counting them inflates
+    every save interval by 5–10×.
+
+    Mirrors upstream issue MemPalace/mempalace#549 — same bug in upstream's
+    ``hooks_cli._count_human_messages``. Fixed locally first per JP's
+    review-before-upstream policy.
+
+    Rules:
+      - ``role == "user"`` with string content → count (unless ``<command-message>``)
+      - ``role == "user"`` with list content → count only if it has at
+        least one ``type: "text"`` block (and that block isn't ``<command-message>``)
+      - Codex ``event_msg`` user_message branch unchanged (uses an
+        explicit user_message type, so it never has the tool-result
+        ambiguity)
+    """
     path = _validate_transcript_path(transcript_path)
     if path is None:
         return 0
@@ -206,15 +226,27 @@ def _count_human_messages(transcript_path: str) -> int:
                     if isinstance(msg, dict) and msg.get("role") == "user":
                         content = msg.get("content", "")
                         if isinstance(content, str):
+                            if not content.strip():
+                                continue
                             if "<command-message>" in content:
                                 continue
+                            count += 1
                         elif isinstance(content, list):
-                            text = " ".join(
-                                b.get("text", "") for b in content if isinstance(b, dict)
-                            )
-                            if "<command-message>" in text:
+                            # A real human turn has at least one text block.
+                            # All-tool_result content is a tool roundtrip,
+                            # not a human exchange — skip.
+                            text_blocks = [
+                                b for b in content
+                                if isinstance(b, dict) and b.get("type") == "text"
+                            ]
+                            if not text_blocks:
                                 continue
-                        count += 1
+                            joined = " ".join(b.get("text", "") for b in text_blocks)
+                            if not joined.strip():
+                                continue
+                            if "<command-message>" in joined:
+                                continue
+                            count += 1
                     elif entry.get("type") == "event_msg":
                         payload = entry.get("payload", {})
                         if isinstance(payload, dict) and payload.get("type") == "user_message":
