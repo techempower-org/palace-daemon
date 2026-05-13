@@ -226,7 +226,14 @@ def _post_mcp(daemon_url: str, tool_name: str, params: dict):
             headers=_request_headers(),
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        # 30s timeout (was 10s before 2026-05-13): the daemon serializes
+        # writes via PALACE_MAX_WRITE_CONCURRENCY=1 to avoid SIGSEGV from
+        # concurrent chromadb writers. Bursts of 3+ Stop hooks within ~10s
+        # would stair-step into queue waits and time out spuriously at 10s.
+        # 30s lets a queue of ~5-6 saves complete before we surface a
+        # "timed out" message. Real daemon hangs still surface; the wait
+        # is only displaced, not hidden.
+        with urllib.request.urlopen(req, timeout=30) as resp:
             if resp.status != 200:
                 return False, {"error": f"HTTP {resp.status}"}
             try:
