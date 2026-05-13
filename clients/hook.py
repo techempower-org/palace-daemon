@@ -322,24 +322,46 @@ def _format_palace_count(stats: dict) -> str:
 
 
 def _theme_save_ok(exchange_count: int, trigger: str, response: dict, palace_count: str) -> str:
-    """Build the success themed message for a Stop-hook save."""
-    entry_id = ""
+    """Build the success themed message for a Stop-hook save.
+
+    Unpacks the nested MCP result envelope to recover the drawer location
+    in the palace (wing/room from agent/topic), so operators see exactly
+    where their memory landed — not just "into the palace."
+    """
+    inner = {}
     try:
-        # Unpack the nested MCP result structure to find the diary_write payload
         content = response.get("result", {}).get("content", []) if isinstance(response, dict) else []
         if content and isinstance(content[0], dict):
             inner = json.loads(content[0].get("text", "{}"))
-            entry_id = inner.get("entry_id", "")
     except Exception:
-        entry_id = ""
-    bits = [f"✦ Memory woven into the palace"]
-    bits.append(f"exchange {exchange_count}")
-    bits.append(f"trigger={trigger}")
+        inner = {}
+
+    # mempalace_diary_write returns {agent, topic, entry_id, timestamp}.
+    # Agent name maps to wing in mempalace's storage convention; topic
+    # maps to room. The location is the user-visible "where".
+    wing = inner.get("agent", "")
+    room = inner.get("topic", "")
+    entry_id = inner.get("entry_id", "")
+
+    location = ""
+    if wing and room:
+        location = f"{wing}/{room}"
+    elif wing:
+        location = wing
+    elif room:
+        location = room
+
+    if location:
+        head = f"✦ Memory filed in {location}"
+    else:
+        head = "✦ Memory woven into the palace"
+
+    tail_bits = [f"exchange {exchange_count}", f"trigger={trigger}"]
     if palace_count:
-        bits.append(palace_count)
-    msg = " — ".join([bits[0], ", ".join(bits[1:])])
+        tail_bits.append(f"palace now holds {palace_count}")
+    msg = f"{head} — " + ", ".join(tail_bits)
     if entry_id:
-        msg += f" (id: {entry_id[-12:]})"
+        msg += f" (id: …{entry_id[-12:]})"
     return msg
 
 
