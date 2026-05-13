@@ -1842,6 +1842,23 @@ async def repair_status():
         response["progress"] = {
             k: v for k, v in progress.items() if k != "started_at_monotonic"
         }
+    # Surface quarantined segment dirs so operators don't have to grep
+    # journald to know a chromadb integrity gate fired (see
+    # docs/recovery/chromadb-metadata-dict-patch.md). Cheap — one glob,
+    # no expensive walk into the segment contents.
+    palace_path = _mp._config.palace_path
+    quarantined = []
+    try:
+        import glob
+        for pattern in ("*.corrupt-*", "*.drift-*", "*.quarantined-*"):
+            for path in glob.glob(os.path.join(palace_path, pattern)):
+                if os.path.isdir(path):
+                    quarantined.append(os.path.basename(path))
+    except Exception:
+        # Don't let a glob failure take down the status endpoint.
+        pass
+    response["quarantined_segments"] = sorted(quarantined)
+    response["quarantined_count"] = len(quarantined)
     return response
 
 
