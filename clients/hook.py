@@ -324,19 +324,24 @@ def _format_palace_count(stats: dict) -> str:
 def _theme_save_ok(exchange_count: int, trigger: str, response: dict, palace_count: str) -> str:
     """Build the success themed message for a Stop-hook save.
 
-    Unpacks the nested MCP result envelope to recover the drawer's
-    location in the palace per mempalace's wing → room → drawer model
-    (with `topic` as a tag attached to the drawer, NOT a room).
+    Renders the full chain a human-readable walk takes through the palace
+    to reach the drawer that was just filed:
 
-    For `mempalace_diary_write` specifically the daemon stores the
-    drawer at:
+        palace → wing:<name> → room:<name> → drawer:…<short-id>
+
+    For `mempalace_diary_write` specifically (per
+    mempalace.mcp_server.tool_diary_write):
         wing = "wing_<agent>"   (auto-derived from agent_name)
         room = "diary"          (constant for diary writes)
-        topic = <topic>         (a tag, often "checkpoint")
+        topic = <topic>         (tag attached to drawer; not a closet —
+                                 closets are an index layer built during
+                                 ``mempalace mine``, not by diary writes)
         drawer = <entry_id>     (the actual memory)
 
-    We render the location as ``<wing>/<room>`` (dropping the redundant
-    "wing_" prefix) and surface the topic separately as a tag.
+    Topic surfaces as a tag in parentheses after the chain — present but
+    not part of the path. We drop the "wing_" prefix from the wing name
+    for readability (it's mempalace's internal namespacing; humans see
+    "claude-code wing" naturally).
     """
     inner = {}
     try:
@@ -350,27 +355,26 @@ def _theme_save_ok(exchange_count: int, trigger: str, response: dict, palace_cou
     topic = inner.get("topic", "") or ""
     entry_id = inner.get("entry_id", "")
 
-    # Reconstruct the storage path mempalace stamped onto the drawer.
-    # tool_diary_write always uses room=diary and wing=wing_<agent>.
+    drawer_short = f"…{entry_id[-8:]}" if entry_id else "?"
+
     if agent:
-        wing_display = agent  # drop the redundant "wing_" prefix for readability
-        room = "diary"
-        location = f"{wing_display}/{room}"
-        head = f"✦ Drawer filed in {location}"
+        chain = (
+            f"palace → wing:{agent} → room:diary → drawer:{drawer_short}"
+        )
+        head = f"✦ {chain}"
     else:
+        # Fallback when we couldn't unpack the response — at least name
+        # the palace.
         head = "✦ Memory woven into the palace"
 
     tail_bits = []
     if topic:
-        tail_bits.append(f"topic={topic}")
+        tail_bits.append(f"topic: {topic}")
     tail_bits.append(f"exchange {exchange_count}")
     tail_bits.append(f"trigger={trigger}")
     if palace_count:
         tail_bits.append(f"palace now holds {palace_count}")
-    msg = f"{head} — " + ", ".join(tail_bits)
-    if entry_id:
-        msg += f" (id: …{entry_id[-12:]})"
-    return msg
+    return f"{head}  —  " + ", ".join(tail_bits)
 
 
 def _theme_save_fail(exchange_count: int, trigger: str, failure: dict) -> str:
