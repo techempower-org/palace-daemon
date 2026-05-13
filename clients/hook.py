@@ -196,6 +196,108 @@ def _get_mine_dir() -> str:
     return ""
 
 
+def _slugify_project(name: str) -> str:
+    """Lower snake_case slug. Dashes, dots, spaces collapse to underscores.
+    Anything else non-alnum is dropped. Per the room taxonomy spec
+    (familiar.realm.watch docs/superpowers/specs/2026-05-13-palace-room-taxonomy.md)
+    wing slugs are project-derived and use lower snake_case.
+    """
+    s = name.strip().lower()
+    s = re.sub(r"[-.\s]+", "_", s)
+    s = re.sub(r"[^a-z0-9_]", "", s)
+    return s.strip("_")
+
+
+def _decode_project_id(project_id: str) -> str:
+    """Best-effort decode of Claude Code's ~/.claude/projects/<id> directory name.
+
+    Claude Code encodes the project directory by replacing `/` and `.` with
+    `-`, which is destructive — we can't perfectly reconstruct the path.
+    But the *last* segment is what we want as the wing slug, and the
+    encoding is consistent: take everything after the last `Projects-`
+    marker. That sidesteps the path-vs-dotted-name ambiguity for anything
+    living under ~/Projects/.
+
+    Examples:
+      -home-jp-Projects-familiar-realm-watch → familiar-realm-watch
+      -home-jp-Projects-palace-daemon         → palace-daemon
+      -home-jp-Projects-memorypalace          → memorypalace
+    Fallback: return the raw segment after the leading dash.
+    """
+    if not project_id:
+        return ""
+    s = project_id.lstrip("-")
+    marker = "Projects-"
+    idx = s.find(marker)
+    if idx >= 0:
+        return s[idx + len(marker):]
+    return s
+
+
+def _project_wing(data: dict, transcript_path: str) -> str:
+    """Resolve the wing slug for this session's writes.
+
+    Per the room taxonomy (Project-Topic-Drawer model): wing = project,
+    not agent. The hook discovers the project by walking these sources
+    in order:
+
+      1. data["cwd"] — Claude Code 2.1+ passes the session cwd on stdin.
+      2. transcript_path filename — Claude Code encodes the project root
+         in the parent directory name under ~/.claude/projects/.
+      3. os.getcwd() — last resort, may be wherever the hook was spawned.
+
+    Returns the bare project slug (e.g. ``familiar_realm_watch``), NO
+    ``wing_`` prefix. The prefix is a docstring convention in mempalace
+    (mcp_server.py:727) that is *not* enforced by code, and adding it
+    here was perpetuating a mixed namespace — JP's palace already has
+    both ``wing_X`` and ``X`` flavors of the same projects. The spec
+    explicitly rejects the prefix:
+    ``familiar.realm.watch/docs/superpowers/specs/2026-05-13-palace-room-taxonomy.md``.
+
+    Fallback: ``personal`` if no project can be detected.
+    """
+    cwd = (data or {}).get("cwd", "")
+    if cwd:
+        try:
+            p = Path(cwd).expanduser().resolve()
+            home_projects = (Path.home() / "Projects").resolve()
+            if home_projects == p or home_projects in p.parents:
+                rel = p.relative_to(home_projects)
+                if rel.parts:
+                    return _slugify_project(rel.parts[0])
+            # Outside ~/Projects/ — use last segment
+            slug = _slugify_project(p.name)
+            if slug:
+                return slug
+        except (OSError, ValueError):
+            pass
+
+    # Fallback: decode the transcript_path parent directory
+    if transcript_path:
+        try:
+            parent = Path(transcript_path).parent.name  # e.g. -home-jp-Projects-X
+            slug = _slugify_project(_decode_project_id(parent))
+            if slug:
+                return slug
+        except (OSError, ValueError):
+            pass
+
+    # Last resort: cwd from the process. If it's $HOME itself, call it
+    # personal — the basename of $HOME is the username, not a project.
+    try:
+        here = Path(os.getcwd()).resolve()
+        home = Path.home().resolve()
+        if here == home:
+            return "personal"
+        slug = _slugify_project(here.name)
+        if slug:
+            return slug
+    except OSError:
+        pass
+
+    return "personal"
+
+
 def _request_headers() -> dict:
     headers = {"Content-Type": "application/json"}
     api_key = os.environ.get("PALACE_API_KEY", "").strip()
@@ -321,27 +423,34 @@ def _format_palace_count(stats: dict) -> str:
     return ""
 
 
-def _theme_save_ok(exchange_count: int, trigger: str, response: dict, palace_count: str) -> str:
+def _display_wing(wing: str) -> str:
+    """Drop the ``wing_`` prefix for human-readable rendering.
+
+    Per the palace room taxonomy spec, wing slugs are project-derived
+    (e.g. ``familiar_realm_watch``). mempalace's chromadb era prepends
+    ``wing_`` for namespacing; humans read the slug bare.
+    """
+    return wing[5:] if isinstance(wing, str) and wing.startswith("wing_") else wing or "?"
+
+
+def _theme_save_ok(exchange_count: int, trigger: str, response: dict, palace_count: str, wing: str = "") -> str:
     """Build the success themed message for a Stop-hook save.
 
     Renders the full chain a human-readable walk takes through the palace
     to reach the drawer that was just filed:
 
-        palace → wing:<name> → room:<name> → drawer:…<short-id>
+        palace → wing:<project> → room:diary → drawer:…<short-id>
 
-    For `mempalace_diary_write` specifically (per
-    mempalace.mcp_server.tool_diary_write):
-        wing = "wing_<agent>"   (auto-derived from agent_name)
-        room = "diary"          (constant for diary writes)
-        topic = <topic>         (tag attached to drawer; not a closet —
-                                 closets are an index layer built during
-                                 ``mempalace mine``, not by diary writes)
-        drawer = <entry_id>     (the actual memory)
+    Per the room taxonomy spec, the wing is the *project*, not the agent.
+    The agent identity lives in drawer metadata. Room remains ``diary``
+    today because ``tool_diary_write`` hardcodes it; post-pgvector
+    migration this becomes room=``sessions`` per the canonical 7-room
+    list. An upstream room-parameter feature request will follow once
+    the taxonomy has settled in our own pgvector schema.
 
-    Topic surfaces as a tag in parentheses after the chain — present but
-    not part of the path. We drop the "wing_" prefix from the wing name
-    for readability (it's mempalace's internal namespacing; humans see
-    "claude-code wing" naturally).
+    Topic surfaces as a tag after the chain — present but not part of
+    the path. Closets (the index layer) are auto-built by
+    ``mempalace mine`` and aren't addressable from a diary write.
     """
     inner = {}
     try:
@@ -351,20 +460,15 @@ def _theme_save_ok(exchange_count: int, trigger: str, response: dict, palace_cou
     except Exception:
         inner = {}
 
-    agent = inner.get("agent", "") or ""
     topic = inner.get("topic", "") or ""
     entry_id = inner.get("entry_id", "")
-
     drawer_short = f"…{entry_id[-8:]}" if entry_id else "?"
 
-    if agent:
-        chain = (
-            f"palace → wing:{agent} → room:diary → drawer:{drawer_short}"
-        )
+    display = _display_wing(wing) if wing else _display_wing(inner.get("agent", ""))
+    if display and display != "?":
+        chain = f"palace → wing:{display} → room:diary → drawer:{drawer_short}"
         head = f"✦ {chain}"
     else:
-        # Fallback when we couldn't unpack the response — at least name
-        # the palace.
         head = "✦ Memory woven into the palace"
 
     tail_bits = []
@@ -387,15 +491,43 @@ def _theme_save_fail(exchange_count: int, trigger: str, failure: dict) -> str:
 
 
 def _theme_mine(mine_dir: str, ok: bool, failure: dict, palace_count: str) -> str:
-    """Build a themed message for a Pre-compact mine event."""
-    wing = os.path.basename(mine_dir).strip("-") or "general"
+    """Build a themed message for a Pre-compact mine event.
+
+    Mining produces drawers across whatever wings the miner decides —
+    we don't get to claim a target wing here. The message names the
+    *source* directory (what we mined) rather than inventing a wing.
+    """
+    source = os.path.basename(mine_dir.rstrip("/")) or mine_dir
     if ok:
-        msg = f"◈ Pre-compact mine accepted — wing={wing}"
+        msg = f"◈ Mined into the palace — source: {source}"
         if palace_count:
             msg += f", {palace_count}"
         return msg
     err = (failure or {}).get("error", "unknown error")
-    return f"✘ Pre-compact mine failed — wing={wing} — {err}"
+    return f"✘ Pre-compact mine failed — source: {source} — {err}"
+
+
+def _theme_precompact_save(wing: str, response: dict, palace_count: str) -> str:
+    """Themed message for the pre-compact diary save (context boundary marker).
+
+    Distinct from _theme_save_ok so the operator sees this is a boundary
+    save (not a periodic checkpoint). Same chain shape, different sigil.
+    """
+    inner = {}
+    try:
+        content = response.get("result", {}).get("content", []) if isinstance(response, dict) else []
+        if content and isinstance(content[0], dict):
+            inner = json.loads(content[0].get("text", "{}"))
+    except Exception:
+        inner = {}
+    entry_id = inner.get("entry_id", "")
+    drawer_short = f"…{entry_id[-8:]}" if entry_id else "?"
+    display = _display_wing(wing)
+    chain = f"palace → wing:{display} → room:diary → drawer:{drawer_short}"
+    msg = f"◆ Pre-compact boundary save — {chain}, topic: precompact"
+    if palace_count:
+        msg += f", palace now holds {palace_count}"
+    return msg
 
 
 def _desktop_notify(title: str, body: str) -> None:
@@ -512,12 +644,15 @@ def hook_stop(data: dict, harness: str):
     if silent:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         entry = f"AUTO-SAVE:{session_id}|{exchange_count}.msgs|{ts}|hook.{trigger}"
+        wing = _project_wing(data, transcript_path)
         ok, response = _post_mcp(daemon_url, "mempalace_diary_write", {
             "agent_name": harness,
             "entry": entry,
             "topic": CHECKPOINT_TOPIC,
+            "wing": wing,
+            "session_id": session_id,
         })
-        _log(f"Silent save {'OK' if ok else 'FAILED (daemon unreachable)'} at exchange {exchange_count}")
+        _log(f"Silent save {'OK' if ok else 'FAILED (daemon unreachable)'} at exchange {exchange_count} → {wing}")
         if toast:
             _desktop_notify("MemPalace", f"Auto-saved at {exchange_count} msgs ({trigger})")
         # Themed feedback — surfaced in Claude Code UI via the systemMessage
@@ -526,7 +661,7 @@ def hook_stop(data: dict, harness: str):
         # failure suppress the message itself.
         if ok:
             palace_count = _format_palace_count(_get_palace_stats(daemon_url))
-            sys_msg = _theme_save_ok(exchange_count, trigger, response, palace_count)
+            sys_msg = _theme_save_ok(exchange_count, trigger, response, palace_count, wing)
         else:
             sys_msg = _theme_save_fail(exchange_count, trigger, response)
         _output({"systemMessage": sys_msg})
@@ -536,35 +671,63 @@ def hook_stop(data: dict, harness: str):
         _output({"decision": "block", "reason": STOP_BLOCK_REASON})
 
 
+PRECOMPACT_TOPIC = "precompact"
+
+
 def hook_precompact(data: dict, harness: str):
     parsed = _parse_harness_input(data, harness)
     session_id = parsed["session_id"]
+    transcript_path = parsed["transcript_path"]
     _log(f"PRE-COMPACT triggered for session {session_id}")
 
     settings = _load_hook_settings()
     daemon_url = settings.get("daemon_url", "http://localhost:8085")
     toast = settings.get("desktop_toast", False)
 
+    # Always file a context-boundary diary marker, regardless of mine config.
+    # Pre-compact is a load-bearing moment — the next turn loses ~all
+    # detail — so leaving a drawer pointer is the minimum the hook owes
+    # the operator. Was previously only done if MEMPAL_DIR was set, which
+    # silently no-op'd in most setups.
+    wing = _project_wing(data, transcript_path)
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    boundary_entry = (
+        f"PRE-COMPACT BOUNDARY:{session_id}|{ts}|"
+        f"context about to be compressed — next turn starts with summary only"
+    )
+    save_ok, save_response = _post_mcp(daemon_url, "mempalace_diary_write", {
+        "agent_name": harness,
+        "entry": boundary_entry,
+        "topic": PRECOMPACT_TOPIC,
+        "wing": wing,
+        "session_id": session_id,
+    })
+    _log(f"Pre-compact boundary save {'OK' if save_ok else 'FAILED'} → {wing}")
+
+    sys_msgs = []
+    if save_ok:
+        palace_count = _format_palace_count(_get_palace_stats(daemon_url))
+        sys_msgs.append(_theme_precompact_save(wing, save_response, palace_count))
+    else:
+        err = (save_response or {}).get("error", "unknown error")
+        sys_msgs.append(f"✘ Pre-compact boundary save failed — {err}")
+
     mine_dir = _get_mine_dir()
-    sys_msg = None
     if mine_dir:
         _log(f"Precompact mine via daemon: {mine_dir}")
-        ok, response = _post_mine(daemon_url, mine_dir, timeout=60)
+        ok, mine_response = _post_mine(daemon_url, mine_dir, timeout=60)
         _log(f"Precompact mine {'OK' if ok else 'skipped (daemon unreachable)'}")
         palace_count = _format_palace_count(_get_palace_stats(daemon_url)) if ok else ""
-        sys_msg = _theme_mine(mine_dir, ok, response, palace_count)
+        sys_msgs.append(_theme_mine(mine_dir, ok, mine_response, palace_count))
     else:
         _log("Precompact mine skipped: MEMPAL_DIR not set")
-        # Silent on this branch — MEMPAL_DIR being unset is operator config,
-        # not a runtime event worth surfacing every pre-compact.
 
     if toast:
         _desktop_notify("MemPalace", "Pre-compaction checkpoint triggered")
 
-    if sys_msg:
-        _output({"systemMessage": sys_msg})
-    else:
-        _output({})
+    # Concatenate multiple themed lines with newline so both events
+    # surface in the Claude Code UI.
+    _output({"systemMessage": "\n".join(sys_msgs)} if sys_msgs else {})
 
 
 def run_hook(hook_name: str, harness: str):

@@ -76,7 +76,7 @@ class TestPostMcpAuth(unittest.TestCase):
 
         with patch.dict(os.environ, {"PALACE_API_KEY": "the-key"}, clear=True), \
              patch.object(hook.urllib.request, "urlopen", side_effect=fake_urlopen):
-            ok = hook._post_mcp("http://daemon:8085", "some_tool", {})
+            ok, _ = hook._post_mcp("http://daemon:8085", "some_tool", {})
 
         self.assertTrue(ok)
         # urllib.request.Request stores headers with title-case keys.
@@ -93,7 +93,7 @@ class TestPostMcpAuth(unittest.TestCase):
         with patch.dict(os.environ, {"PALACE_API_KEY": "wrong-key"}, clear=True), \
              patch.object(hook.urllib.request, "urlopen", side_effect=http_err), \
              patch.object(hook, "_log", side_effect=log_messages.append):
-            ok = hook._post_mcp("http://daemon:8085", "some_tool", {})
+            ok, _ = hook._post_mcp("http://daemon:8085", "some_tool", {})
 
         self.assertFalse(ok)
         # At least one log line should mention the HTTP code, NOT
@@ -109,7 +109,7 @@ class TestPostMcpAuth(unittest.TestCase):
         with patch.dict(os.environ, {"PALACE_API_KEY": "the-key"}, clear=True), \
              patch.object(hook.urllib.request, "urlopen", side_effect=url_err), \
              patch.object(hook, "_log", side_effect=log_messages.append):
-            ok = hook._post_mcp("http://daemon:8085", "some_tool", {})
+            ok, _ = hook._post_mcp("http://daemon:8085", "some_tool", {})
 
         self.assertFalse(ok)
         joined = " ".join(log_messages).lower()
@@ -138,7 +138,7 @@ class TestPostMineAuth(unittest.TestCase):
 
         with patch.dict(os.environ, {"PALACE_API_KEY": "the-key"}, clear=True), \
              patch.object(hook.urllib.request, "urlopen", side_effect=fake_urlopen):
-            ok = hook._post_mine("http://daemon:8085", "/some/dir")
+            ok, _ = hook._post_mine("http://daemon:8085", "/some/dir")
 
         self.assertTrue(ok)
         self.assertEqual(captured["req"].get_header("X-api-key"), "the-key")
@@ -155,7 +155,7 @@ class TestPostMineAuth(unittest.TestCase):
         with patch.dict(os.environ, {"PALACE_API_KEY": "wrong"}, clear=True), \
              patch.object(hook.urllib.request, "urlopen", side_effect=http_err), \
              patch.object(hook, "_log", side_effect=log_messages.append):
-            ok = hook._post_mine("http://daemon:8085", "/some/dir")
+            ok, _ = hook._post_mine("http://daemon:8085", "/some/dir")
 
         self.assertFalse(ok)
         joined = " ".join(log_messages)
