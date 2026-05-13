@@ -204,7 +204,16 @@ def _request_headers() -> dict:
     return headers
 
 
-def _post_mcp(daemon_url: str, tool_name: str, params: dict) -> bool:
+def _post_mcp(daemon_url: str, tool_name: str, params: dict):
+    """POST a JSON-RPC tool call to /mcp.
+
+    Returns ``(ok, response_dict_or_failure_reason)`` so callers can render
+    themed feedback based on what actually happened — not just yes/no.
+
+    - On success: ``(True, <parsed JSON-RPC response>)``
+    - On HTTP error: ``(False, {"error": "HTTP <code>: <reason>"})``
+    - On network/transport error: ``(False, {"error": "<exception>"})``
+    """
     payload = {
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {"name": tool_name, "arguments": params},
@@ -218,17 +227,23 @@ def _post_mcp(daemon_url: str, tool_name: str, params: dict) -> bool:
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.status == 200
+            if resp.status != 200:
+                return False, {"error": f"HTTP {resp.status}"}
+            try:
+                body = json.loads(resp.read().decode("utf-8"))
+            except Exception:
+                body = None
+            return True, body
     except urllib.error.HTTPError as e:
         _log(f"mcp via daemon rejected (HTTP {e.code}): {e.reason}")
-        return False
+        return False, {"error": f"HTTP {e.code} {e.reason}"}
     except Exception as e:
         _log(f"mcp via daemon failed (network/transport): {e}")
-        return False
+        return False, {"error": f"network/transport: {e}"}
 
 
-def _post_mine(daemon_url: str, mine_dir: str, timeout: int = 60) -> bool:
-    """POST /mine to daemon. No subprocess fallback — if daemon down, returns False."""
+def _post_mine(daemon_url: str, mine_dir: str, timeout: int = 60):
+    """POST /mine to daemon. Returns (ok, response_or_failure_reason)."""
     payload = json.dumps({"dir": mine_dir, "mode": "auto"}).encode()
     try:
         req = urllib.request.Request(
@@ -238,13 +253,108 @@ def _post_mine(daemon_url: str, mine_dir: str, timeout: int = 60) -> bool:
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status == 200
+            if resp.status != 200:
+                return False, {"error": f"HTTP {resp.status}"}
+            try:
+                body = json.loads(resp.read().decode("utf-8"))
+            except Exception:
+                body = None
+            return True, body
     except urllib.error.HTTPError as e:
         _log(f"mine via daemon rejected (HTTP {e.code} {e.reason}) — check PALACE_API_KEY")
-        return False
+        return False, {"error": f"HTTP {e.code} {e.reason}"}
     except Exception as e:
         _log(f"mine via daemon failed (network/transport): {e}")
-        return False
+        return False, {"error": f"network/transport: {e}"}
+
+
+def _get_palace_stats(daemon_url: str) -> dict:
+    """Quick-query the daemon's /stats endpoint to enrich themed messages.
+
+    Returns the parsed stats dict (with drawer_count etc) or an empty dict
+    on any failure — never raises. Used as a *garnish* on save/mine feedback;
+    the hook proceeds even if the stats call fails.
+
+    Short timeout (2s) because /stats touches the chromadb collection and
+    can be slow under load. Themed feedback is nice-to-have; we'd rather
+    skip the drawer count than make the user wait on the hook.
+    """
+    try:
+        req = urllib.request.Request(
+            daemon_url.rstrip("/") + "/stats",
+            headers=_request_headers(),
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            if resp.status != 200:
+                return {}
+            return json.loads(resp.read().decode("utf-8")) or {}
+    except Exception:
+        return {}
+
+
+def _format_palace_count(stats: dict) -> str:
+    """Render the palace drawer count for inline messaging.
+
+    Tolerates different shapes of /stats since the daemon's response may evolve.
+    Returns an empty string when no useful count is available.
+    """
+    if not stats:
+        return ""
+    # Try several plausible keys before giving up
+    for key in ("drawer_count", "drawers", "total", "count", "elements"):
+        if key in stats and isinstance(stats[key], int):
+            return f"{stats[key]:,} drawers"
+    # /stats might nest counts under a per-collection breakdown
+    by_col = stats.get("collections") or {}
+    if isinstance(by_col, dict):
+        drawers = by_col.get("mempalace_drawers")
+        if isinstance(drawers, dict) and isinstance(drawers.get("count"), int):
+            return f"{drawers['count']:,} drawers"
+    return ""
+
+
+def _theme_save_ok(exchange_count: int, trigger: str, response: dict, palace_count: str) -> str:
+    """Build the success themed message for a Stop-hook save."""
+    entry_id = ""
+    try:
+        # Unpack the nested MCP result structure to find the diary_write payload
+        content = response.get("result", {}).get("content", []) if isinstance(response, dict) else []
+        if content and isinstance(content[0], dict):
+            inner = json.loads(content[0].get("text", "{}"))
+            entry_id = inner.get("entry_id", "")
+    except Exception:
+        entry_id = ""
+    bits = [f"✦ Memory woven into the palace"]
+    bits.append(f"exchange {exchange_count}")
+    bits.append(f"trigger={trigger}")
+    if palace_count:
+        bits.append(palace_count)
+    msg = " — ".join([bits[0], ", ".join(bits[1:])])
+    if entry_id:
+        msg += f" (id: {entry_id[-12:]})"
+    return msg
+
+
+def _theme_save_fail(exchange_count: int, trigger: str, failure: dict) -> str:
+    """Build the failure themed message for a Stop-hook save."""
+    err = (failure or {}).get("error", "unknown error")
+    return (
+        f"✘ Memory save failed at exchange {exchange_count} "
+        f"(trigger={trigger}) — {err}"
+    )
+
+
+def _theme_mine(mine_dir: str, ok: bool, failure: dict, palace_count: str) -> str:
+    """Build a themed message for a Pre-compact mine event."""
+    wing = os.path.basename(mine_dir).strip("-") or "general"
+    if ok:
+        msg = f"◈ Pre-compact mine accepted — wing={wing}"
+        if palace_count:
+            msg += f", {palace_count}"
+        return msg
+    err = (failure or {}).get("error", "unknown error")
+    return f"✘ Pre-compact mine failed — wing={wing} — {err}"
 
 
 def _desktop_notify(title: str, body: str) -> None:
@@ -361,7 +471,7 @@ def hook_stop(data: dict, harness: str):
     if silent:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         entry = f"AUTO-SAVE:{session_id}|{exchange_count}.msgs|{ts}|hook.{trigger}"
-        ok = _post_mcp(daemon_url, "mempalace_diary_write", {
+        ok, response = _post_mcp(daemon_url, "mempalace_diary_write", {
             "agent_name": harness,
             "entry": entry,
             "topic": CHECKPOINT_TOPIC,
@@ -369,7 +479,16 @@ def hook_stop(data: dict, harness: str):
         _log(f"Silent save {'OK' if ok else 'FAILED (daemon unreachable)'} at exchange {exchange_count}")
         if toast:
             _desktop_notify("MemPalace", f"Auto-saved at {exchange_count} msgs ({trigger})")
-        _output({})
+        # Themed feedback — surfaced in Claude Code UI via the systemMessage
+        # field. Query the daemon's /stats after the write for richer
+        # context (current drawer count), but never let that round-trip
+        # failure suppress the message itself.
+        if ok:
+            palace_count = _format_palace_count(_get_palace_stats(daemon_url))
+            sys_msg = _theme_save_ok(exchange_count, trigger, response, palace_count)
+        else:
+            sys_msg = _theme_save_fail(exchange_count, trigger, response)
+        _output({"systemMessage": sys_msg})
     else:
         if toast:
             _desktop_notify("MemPalace checkpoint", "Save requested — check Claude")
@@ -386,17 +505,25 @@ def hook_precompact(data: dict, harness: str):
     toast = settings.get("desktop_toast", False)
 
     mine_dir = _get_mine_dir()
+    sys_msg = None
     if mine_dir:
         _log(f"Precompact mine via daemon: {mine_dir}")
-        ok = _post_mine(daemon_url, mine_dir, timeout=60)
+        ok, response = _post_mine(daemon_url, mine_dir, timeout=60)
         _log(f"Precompact mine {'OK' if ok else 'skipped (daemon unreachable)'}")
+        palace_count = _format_palace_count(_get_palace_stats(daemon_url)) if ok else ""
+        sys_msg = _theme_mine(mine_dir, ok, response, palace_count)
     else:
         _log("Precompact mine skipped: MEMPAL_DIR not set")
+        # Silent on this branch — MEMPAL_DIR being unset is operator config,
+        # not a runtime event worth surfacing every pre-compact.
 
     if toast:
         _desktop_notify("MemPalace", "Pre-compaction checkpoint triggered")
 
-    _output({})
+    if sys_msg:
+        _output({"systemMessage": sys_msg})
+    else:
+        _output({})
 
 
 def run_hook(hook_name: str, harness: str):
