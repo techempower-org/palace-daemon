@@ -327,6 +327,51 @@ class TestSessionStartMessage(unittest.TestCase):
         self.assertNotIn("wing:wing_legacy_thing", msg)
 
 
+class TestPostMineDefaults(unittest.TestCase):
+    """Lock in the post-2026-05-13 _post_mine signature.
+
+    Pre-fix, _post_mine hardcoded mode=\"auto\" which the daemon would 400
+    (its valid modes are {convos, projects}). Now: mode defaults to
+    \"convos\", and an optional wing forwards to the daemon when truthy.
+    """
+
+    def _make_response(self, status=200):
+        from unittest.mock import MagicMock
+        resp = MagicMock()
+        resp.status = status
+        resp.__enter__ = MagicMock(return_value=resp)
+        resp.__exit__ = MagicMock(return_value=False)
+        resp.read = MagicMock(return_value=b'{}')
+        return resp
+
+    def test_default_mode_is_convos(self):
+        captured = {}
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = req.data
+            return self._make_response(200)
+        with patch.dict(os.environ, {"PALACE_API_KEY": "k"}, clear=True), \
+             patch.object(hook.urllib.request, "urlopen", side_effect=fake_urlopen):
+            ok, _ = hook._post_mine("http://daemon:8085", "/tmp/foo")
+        self.assertTrue(ok)
+        body = json.loads(captured["body"])
+        self.assertEqual(body["mode"], "convos")
+        # No wing key when not supplied — daemon's default "general" applies.
+        self.assertNotIn("wing", body)
+
+    def test_wing_forwarded_when_provided(self):
+        captured = {}
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = req.data
+            return self._make_response(200)
+        with patch.dict(os.environ, {"PALACE_API_KEY": "k"}, clear=True), \
+             patch.object(hook.urllib.request, "urlopen", side_effect=fake_urlopen):
+            ok, _ = hook._post_mine("http://daemon:8085", "/tmp/foo",
+                                    mode="convos", wing="familiar_realm_watch")
+        self.assertTrue(ok)
+        body = json.loads(captured["body"])
+        self.assertEqual(body["wing"], "familiar_realm_watch")
+
+
 class TestPrecompactSaveMessage(unittest.TestCase):
     """Boundary marker rendering."""
 

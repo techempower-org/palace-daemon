@@ -75,7 +75,7 @@ def _mine_approval_reason(mine_dir: str, daemon_url: str) -> str:
         f"AUTO-INGEST requested (MemPalace).\n"
         f"Target directory: {mine_dir}\n\n"
         f"Show the user this directory and ask them to approve or deny mining it into the palace.\n"
-        f"  Approve → POST {{\"dir\": \"{mine_dir}\", \"mode\": \"auto\"}} to {daemon_url}/mine\n"
+        f"  Approve → POST {{\"dir\": \"{mine_dir}\", \"mode\": \"convos\"}} to {daemon_url}/mine\n"
         f"  Deny    → inform user, continue."
     )
 
@@ -351,9 +351,20 @@ def _post_mcp(daemon_url: str, tool_name: str, params: dict):
         return False, {"error": f"network/transport: {e}"}
 
 
-def _post_mine(daemon_url: str, mine_dir: str, timeout: int = 60):
-    """POST /mine to daemon. Returns (ok, response_or_failure_reason)."""
-    payload = json.dumps({"dir": mine_dir, "mode": "auto"}).encode()
+def _post_mine(daemon_url: str, mine_dir: str, timeout: int = 60,
+               mode: str = "convos", wing: str = ""):
+    """POST /mine to daemon. Returns (ok, response_or_failure_reason).
+
+    Mode defaults to ``convos`` (the only sensible default for transcript
+    ingest — and matches the daemon's accepted set ``{convos, projects}``;
+    the older ``"auto"`` literal was never valid and silently 400'd).
+    Wing is forwarded when truthy so transcript drawers land in the right
+    project wing rather than the daemon's default ``"general"``.
+    """
+    body = {"dir": mine_dir, "mode": mode}
+    if wing:
+        body["wing"] = wing
+    payload = json.dumps(body).encode()
     try:
         req = urllib.request.Request(
             daemon_url.rstrip("/") + "/mine",
@@ -619,6 +630,38 @@ def _prune_state_files(max_age_days: int = 7):
         pass
 
 
+def _ingest_transcript_via_daemon(daemon_url: str, transcript_path: str, wing: str):
+    """Restore the transcript-ingest step that mempalace's upstream
+    ``hooks_cli._ingest_transcript`` does on every save and precompact.
+
+    Was dropped when palace-daemon's hook became a stdlib-only replacement
+    for ``mempalace hook run`` (post-2026-05-11). Without this, Stop/PreCompact
+    write only a marker diary entry — the verbatim conversation content
+    that used to land via ``mempalace mine --mode convos`` was missing.
+
+    Re-routed through the daemon's ``/mine`` endpoint so we don't take a
+    Python import dependency on mempalace itself. Best-effort: any failure
+    is logged and the save proceeds — never blocks the hook.
+    """
+    path = _validate_transcript_path(transcript_path)
+    if path is None or not path.is_file() or path.stat().st_size < 100:
+        return
+    settings = _load_hook_settings()
+    if not settings.get("ingest_transcripts", True):
+        return
+    try:
+        ok, response = _post_mine(daemon_url, str(path.parent),
+                                  timeout=settings.get("mine_timeout_s", 30),
+                                  mode="convos", wing=wing)
+        if ok:
+            _log(f"Transcript ingest queued: {path.name} → wing={wing}")
+        else:
+            err = (response or {}).get("error", "unknown")
+            _log(f"Transcript ingest failed: {err}")
+    except Exception as e:
+        _log(f"Transcript ingest exception (non-fatal): {e}")
+
+
 def hook_session_start(data: dict, harness: str):
     parsed = _parse_harness_input(data, harness)
     session_id = parsed["session_id"]
@@ -728,6 +771,12 @@ def hook_stop(data: dict, harness: str):
             "session_id": session_id,
         })
         _log(f"Silent save {'OK' if ok else 'FAILED (daemon unreachable)'} at exchange {exchange_count} → {wing}")
+
+        # Restore the transcript-mine step that upstream mempalace's
+        # hooks_cli does on every save (see hooks_cli._ingest_transcript).
+        # The diary entry is a marker; the mine produces the content-rich
+        # drawers from the conversation itself.
+        _ingest_transcript_via_daemon(daemon_url, transcript_path, wing)
         if toast:
             _desktop_notify("MemPalace", f"Auto-saved at {exchange_count} msgs ({trigger})")
         # Themed feedback — surfaced in Claude Code UI via the systemMessage
@@ -787,15 +836,21 @@ def hook_precompact(data: dict, harness: str):
         err = (save_response or {}).get("error", "unknown error")
         sys_msgs.append(f"✘ Pre-compact boundary save failed — {err}")
 
+    # Transcript ingest — same step upstream hooks_cli fires here. The
+    # diary write above is a marker; this captures actual conversation
+    # content as drawers via the miner.
+    _ingest_transcript_via_daemon(daemon_url, transcript_path, wing)
+
     mine_dir = _get_mine_dir()
     if mine_dir:
         _log(f"Precompact mine via daemon: {mine_dir}")
-        ok, mine_response = _post_mine(daemon_url, mine_dir, timeout=60)
+        ok, mine_response = _post_mine(daemon_url, mine_dir,
+                                       timeout=60, mode="convos", wing=wing)
         _log(f"Precompact mine {'OK' if ok else 'skipped (daemon unreachable)'}")
         palace_count = _format_palace_count(_get_palace_stats(daemon_url)) if ok else ""
         sys_msgs.append(_theme_mine(mine_dir, ok, mine_response, palace_count))
     else:
-        _log("Precompact mine skipped: MEMPAL_DIR not set")
+        _log("Precompact MEMPAL_DIR mine skipped: MEMPAL_DIR not set")
 
     if toast:
         _desktop_notify("MemPalace", "Pre-compaction checkpoint triggered")
