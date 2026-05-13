@@ -324,9 +324,19 @@ def _format_palace_count(stats: dict) -> str:
 def _theme_save_ok(exchange_count: int, trigger: str, response: dict, palace_count: str) -> str:
     """Build the success themed message for a Stop-hook save.
 
-    Unpacks the nested MCP result envelope to recover the drawer location
-    in the palace (wing/room from agent/topic), so operators see exactly
-    where their memory landed — not just "into the palace."
+    Unpacks the nested MCP result envelope to recover the drawer's
+    location in the palace per mempalace's wing → room → drawer model
+    (with `topic` as a tag attached to the drawer, NOT a room).
+
+    For `mempalace_diary_write` specifically the daemon stores the
+    drawer at:
+        wing = "wing_<agent>"   (auto-derived from agent_name)
+        room = "diary"          (constant for diary writes)
+        topic = <topic>         (a tag, often "checkpoint")
+        drawer = <entry_id>     (the actual memory)
+
+    We render the location as ``<wing>/<room>`` (dropping the redundant
+    "wing_" prefix) and surface the topic separately as a tag.
     """
     inner = {}
     try:
@@ -336,27 +346,25 @@ def _theme_save_ok(exchange_count: int, trigger: str, response: dict, palace_cou
     except Exception:
         inner = {}
 
-    # mempalace_diary_write returns {agent, topic, entry_id, timestamp}.
-    # Agent name maps to wing in mempalace's storage convention; topic
-    # maps to room. The location is the user-visible "where".
-    wing = inner.get("agent", "")
-    room = inner.get("topic", "")
+    agent = inner.get("agent", "") or ""
+    topic = inner.get("topic", "") or ""
     entry_id = inner.get("entry_id", "")
 
-    location = ""
-    if wing and room:
-        location = f"{wing}/{room}"
-    elif wing:
-        location = wing
-    elif room:
-        location = room
-
-    if location:
-        head = f"✦ Memory filed in {location}"
+    # Reconstruct the storage path mempalace stamped onto the drawer.
+    # tool_diary_write always uses room=diary and wing=wing_<agent>.
+    if agent:
+        wing_display = agent  # drop the redundant "wing_" prefix for readability
+        room = "diary"
+        location = f"{wing_display}/{room}"
+        head = f"✦ Drawer filed in {location}"
     else:
         head = "✦ Memory woven into the palace"
 
-    tail_bits = [f"exchange {exchange_count}", f"trigger={trigger}"]
+    tail_bits = []
+    if topic:
+        tail_bits.append(f"topic={topic}")
+    tail_bits.append(f"exchange {exchange_count}")
+    tail_bits.append(f"trigger={trigger}")
     if palace_count:
         tail_bits.append(f"palace now holds {palace_count}")
     msg = f"{head} — " + ", ".join(tail_bits)
