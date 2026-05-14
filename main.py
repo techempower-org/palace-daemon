@@ -1058,35 +1058,6 @@ async def list_drawers(
     return _unwrap(result)
 
 
-@app.get("/dump_collections")
-async def dump_collections(x_api_key: str | None = Header(default=None)):
-    """List all chromadb collection names in the palace.
-
-    Migration entry point: client iterates this list, then calls
-    ``/dump_drawers?collection=<name>`` per collection. Same cached-
-    client safety as ``/dump_drawers`` — no fresh PersistentClient open,
-    no SIGSEGV class.
-    """
-    _check_auth(x_api_key)
-
-    def _list():
-        # mempalace's ChromaCollection wraps the raw chromadb client.
-        wrapper = _mp._get_collection()
-        raw_col = getattr(wrapper, "_collection", None)
-        if raw_col is None:
-            return None, "cannot resolve raw chromadb collection from wrapper"
-        try:
-            return [c.name for c in raw_col._client.list_collections()], None
-        except Exception as e:
-            return None, f"list_collections failed: {e}"
-
-    loop = asyncio.get_running_loop()
-    names, err = await loop.run_in_executor(None, _list)
-    if err is not None:
-        raise HTTPException(status_code=500, detail=err)
-    return {"collections": names}
-
-
 @app.delete("/memory/{drawer_id}")
 async def delete_memory(drawer_id: str, x_api_key: str | None = Header(default=None)):
     """Delete a drawer by id. Wraps mempalace_delete_drawer."""
