@@ -1015,6 +1015,79 @@ async def search(
 # candidate_strategy="union" on the existing /search endpoint.
 
 
+@app.post("/search/hybrid")
+async def search_hybrid(request: Request, x_api_key: str | None = Header(default=None)):
+    """Hybrid search: vector + BM25 + graph in a single ranked result set.
+
+    Phase 4 of the hybrid-search-taxonomy initiative. Routes through
+    mempalace's ``search_memories`` with ``candidate_strategy="hybrid"``,
+    which:
+      1. Runs vector candidate selection (existing)
+      2. Unions BM25 candidates from postgres tsvector (Phase 2)
+      3. Adds graph-expanded drawers — vector-seeded entity expansion
+         AND query-NER entity matching (Phase 3)
+      4. Reranks the combined pool with the hybrid scorer
+
+    Body::
+
+        {
+          "query":         "pgvector advisory lock race",
+          "wing":          "memorypalace",      // optional, exact-match filter
+          "room":          "problems",          // optional, canonical only
+          "limit":         10,
+          "include_trace": false                // optional, attaches per-source
+                                                // counts + latencies if true
+        }
+
+    Returns the same hit shape as /search; each hit has a `matched_via`
+    field naming the source (vector, bm25_postgres, graph_seeded,
+    graph_ner) which the trace flag surfaces.
+
+    Requires postgres backend.
+    """
+    _check_auth(x_api_key)
+    if _mp._config.backend != "postgres":
+        raise HTTPException(
+            status_code=503,
+            detail="/search/hybrid requires MEMPALACE_BACKEND=postgres; daemon is on chroma.",
+        )
+
+    body = await request.json()
+    query = (body.get("query") or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="'query' is required and must be non-empty")
+    wing = body.get("wing") or None
+    room = body.get("room") or None
+    limit = int(body.get("limit") or 10)
+    include_trace = bool(body.get("include_trace") or False)
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=400, detail="'limit' must be 1..100")
+    if room is not None and room not in _canonical_rooms():
+        raise HTTPException(
+            status_code=400,
+            detail={"error": f"room {room!r} is not canonical",
+                    "valid_rooms": sorted(_canonical_rooms())},
+        )
+
+    args = {
+        "query": query,
+        "limit": limit,
+        "candidate_strategy": "hybrid",
+    }
+    if wing:
+        args["wing"] = wing
+    if room:
+        args["room"] = room
+    args["include_trace"] = include_trace
+
+    result = await _call({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "tools/call",
+        "params": {"name": "mempalace_search", "arguments": args},
+    })
+    return _unwrap(result)
+
+
 @app.post("/search/keyword")
 async def search_keyword(request: Request, x_api_key: str | None = Header(default=None)):
     """BM25 keyword search over mempalace_drawers.doc_tsv.
