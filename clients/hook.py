@@ -794,7 +794,7 @@ def _ingest_transcript_via_daemon(daemon_url: str, transcript_path: str, wing: s
     ok = False
     try:
         ok, response = _post_mine(daemon_url, mine_dir,
-                                  timeout=settings.get("mine_timeout_s", 30),
+                                  timeout=settings.get("mine_timeout_s", 60),
                                   mode="convos", wing=wing)
         if ok:
             _log(f"Transcript ingest queued: {path.name} → wing={wing}")
