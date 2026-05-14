@@ -1026,11 +1026,38 @@ def hook_precompact(data: dict, harness: str):
 
 
 def run_hook(hook_name: str, harness: str):
+    # Read stdin in the parent so the child has it whether or not we detach.
     try:
-        data = json.load(sys.stdin)
+        raw = sys.stdin.read()
+        data = json.loads(raw) if raw.strip() else {}
     except (json.JSONDecodeError, EOFError):
         _log("WARNING: Failed to parse stdin JSON, proceeding with empty data")
         data = {}
+
+    # Stop/precompact do slow HTTP round-trips to palace-daemon (save +
+    # mine). When the daemon is wedged — e.g. a pgvector lazy-index
+    # race holding ACCESS EXCLUSIVE on mempalace_drawers — those calls
+    # eat the entire urlopen timeout, and the harness blocks until the
+    # hook returns. Detach the worker into a session-leader child so the
+    # parent returns in <100ms and the daemon work finishes whenever it
+    # finishes. Set PALACE_HOOK_NO_DETACH=1 for synchronous testing.
+    if hook_name in ("stop", "precompact") and os.environ.get("PALACE_HOOK_NO_DETACH") != "1":
+        try:
+            pid = os.fork()
+        except OSError:
+            pid = -1  # fall through to inline run
+        if pid > 0:
+            return  # parent: hook event "done" immediately
+        if pid == 0:
+            # Child: detach so the harness doesn't track us
+            try:
+                os.setsid()
+                with open(os.devnull, "rb") as devnull_in:
+                    os.dup2(devnull_in.fileno(), 0)
+                # Keep stderr so daemon errors land in hook.log via _log;
+                # stdout is fine too — claude has already moved on.
+            except OSError:
+                pass
 
     hooks = {
         "session-start": hook_session_start,
