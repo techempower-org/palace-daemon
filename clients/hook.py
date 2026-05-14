@@ -1049,13 +1049,22 @@ def run_hook(hook_name: str, harness: str):
         if pid > 0:
             return  # parent: hook event "done" immediately
         if pid == 0:
-            # Child: detach so the harness doesn't track us
+            # Child: detach so the harness doesn't track us. Claude waits
+            # for the hook's stdout/stderr pipes to close — if the child
+            # keeps them open during the 30s urlopen, the hook event
+            # doesn't clear until the child exits. Redirect all three
+            # to /dev/null. _log() writes to ~/.mempalace/hook_state/
+            # hook.log directly, not via stderr, so daemon failures
+            # still get recorded.
             try:
                 os.setsid()
-                with open(os.devnull, "rb") as devnull_in:
-                    os.dup2(devnull_in.fileno(), 0)
-                # Keep stderr so daemon errors land in hook.log via _log;
-                # stdout is fine too — claude has already moved on.
+                devnull_in = os.open(os.devnull, os.O_RDONLY)
+                devnull_out = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull_in, 0)
+                os.dup2(devnull_out, 1)
+                os.dup2(devnull_out, 2)
+                os.close(devnull_in)
+                os.close(devnull_out)
             except OSError:
                 pass
 
