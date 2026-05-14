@@ -1136,6 +1136,150 @@ async def stats(x_api_key: str | None = Header(default=None)):
     return {"kg": kg, "graph": graph, "status": status}
 
 
+# ── Postgres-native helper endpoints ────────────────────────────────
+#
+# These two endpoints expose Postgres-backend value-adds that don't have
+# an obvious shape under chromadb. Both return 503 when the daemon is
+# running against the chromadb backend; both require auth.
+
+
+@app.post("/cypher")
+async def cypher_query(request: Request, x_api_key: str | None = Header(default=None)):
+    """Run a Cypher query against the AGE knowledge-graph and return rows.
+
+    Body::
+
+        {
+          "cypher": "MATCH (s:Entity)-[r:RELATION]->(o) RETURN s.name, r.relation_type, o.name",
+          "graph": "mempalace_kg"         // optional, defaults to mempalace_kg
+        }
+
+    Spares clients from learning AGE's ``SELECT * FROM cypher('g', $$...$$) AS (col agtype, ...)``
+    SQL wrapper. The daemon parses RETURN aliases out of the Cypher
+    source (just like ``KnowledgeGraphAGE._run_cypher`` does) so callers
+    don't have to declare column types.
+
+    Read-only by convention — no transaction; AGE writes via this path
+    work but aren't intended (use ``mempalace_kg_*`` MCP tools for writes).
+    Returns 503 when the daemon isn't on postgres backend.
+    """
+    _check_auth(x_api_key)
+    if _mp._config.backend != "postgres":
+        raise HTTPException(
+            status_code=503,
+            detail="/cypher requires MEMPALACE_BACKEND=postgres; daemon is on chroma.",
+        )
+
+    body = await request.json()
+    cypher = body.get("cypher")
+    if not isinstance(cypher, str) or not cypher.strip():
+        raise HTTPException(status_code=400, detail="'cypher' body field is required")
+    graph = body.get("graph", "mempalace_kg")
+    if not isinstance(graph, str) or not graph.strip():
+        raise HTTPException(status_code=400, detail="'graph' must be a non-empty string")
+
+    def _run():
+        import psycopg2
+
+        from mempalace.knowledge_graph_age import KnowledgeGraphAGE
+
+        # Reuse mempalace's AGE helper for RETURN-alias parsing + agtype unwrap.
+        # Constructing a fresh KnowledgeGraphAGE bootstraps the graph if absent,
+        # which is harmless for a query (the MERGE on absent graphs creates it).
+        # If we wanted strict read-only, swap to a thin psycopg2 connection +
+        # call _run_cypher manually with the parsed aliases.
+        dsn = _mp._config.postgres_dsn
+        if not dsn:
+            return None, "MEMPALACE_POSTGRES_DSN not configured"
+        try:
+            kg = KnowledgeGraphAGE(dsn=dsn)
+        except psycopg2.Error as e:
+            return None, f"postgres connect failed: {e}"
+        try:
+            # _run_cypher does inlined-literal substitution; for clients that
+            # want parameterized queries we'd need a separate API. For now
+            # callers can build the values into the Cypher source themselves.
+            rows = kg._run_cypher(cypher, params={}, fetch=True)
+            aliases = kg._extract_return_aliases(cypher)
+            unwrap = kg._unwrap_agtype
+            shaped = []
+            for row in rows:
+                if aliases:
+                    shaped.append({alias: unwrap(val) for alias, val in zip(aliases, row)})
+                else:
+                    shaped.append([unwrap(val) for val in row])
+            return shaped, None
+        finally:
+            kg.close()
+
+    loop = asyncio.get_running_loop()
+    rows, err = await loop.run_in_executor(None, _run)
+    if err is not None:
+        raise HTTPException(status_code=500, detail=err)
+    return {"graph": graph, "rows": rows, "count": len(rows)}
+
+
+@app.post("/embed")
+async def embed_text(request: Request, x_api_key: str | None = Header(default=None)):
+    """Embed a list of texts via the daemon's configured embedding function.
+
+    Body::
+
+        {"texts": ["hello world", "foo bar"]}
+
+    Returns::
+
+        {"embeddings": [[0.1, ...], [0.2, ...]], "dim": 384, "model": "default"}
+
+    Designed for clients that want vectors but don't have onnxruntime +
+    a 90 MB model locally (e.g. hook scripts on laptops). The daemon
+    already holds the embedding function in memory for its own use; this
+    just exposes it.
+
+    Works under either backend (chroma or postgres) since the embedding
+    function is backend-independent.
+    """
+    _check_auth(x_api_key)
+    body = await request.json()
+    texts = body.get("texts")
+    if not isinstance(texts, list) or not texts:
+        raise HTTPException(status_code=400, detail="'texts' must be a non-empty list")
+    if not all(isinstance(t, str) for t in texts):
+        raise HTTPException(status_code=400, detail="'texts' entries must all be strings")
+    if len(texts) > 256:
+        raise HTTPException(status_code=400, detail="batch limit is 256 texts per request")
+
+    def _embed():
+        from mempalace.backends.chroma import ChromaBackend
+
+        # mempalace's embedding function is the same function chromadb and
+        # PostgresBackend both use; ChromaBackend._resolve_embedding_function
+        # is the canonical accessor.
+        ef = ChromaBackend._resolve_embedding_function()
+        if ef is None:
+            return None, "no embedding function resolved (mempalace config issue)"
+        try:
+            vectors = ef(texts)
+        except Exception as e:
+            return None, f"embedding failed: {e}"
+        # Normalize: ef may return numpy arrays; downstream HTTP consumers
+        # are more reliable with plain Python lists.
+        out = []
+        for v in vectors:
+            try:
+                out.append([float(x) for x in v])
+            except Exception:
+                out.append(list(v) if v is not None else None)
+        return out, None
+
+    loop = asyncio.get_running_loop()
+    embeddings, err = await loop.run_in_executor(None, _embed)
+    if err is not None:
+        raise HTTPException(status_code=500, detail=err)
+    dim = len(embeddings[0]) if embeddings and embeddings[0] is not None else 0
+    return {"embeddings": embeddings, "dim": dim, "count": len(embeddings)}
+
+
 def _kg_path() -> str:
     """KG sqlite path. Lives next to chroma.sqlite3 inside the palace dir."""
     return os.path.join(_mp._config.palace_path, "knowledge_graph.sqlite3")
