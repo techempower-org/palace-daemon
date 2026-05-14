@@ -176,13 +176,24 @@ The architectural argument for why those pieces survive backend swaps (chroma â†
 
 ### Install
 
+Uses [uv](https://github.com/astral-sh/uv) for venv + dependency install â€” faster than `pip` and doesn't require the `python3-venv` apt package (which isn't installed by default on Ubuntu 24.04).
+
 ```bash
 git clone https://github.com/jphein/palace-daemon.git
 cd palace-daemon
-python3 -m venv venv
+uv venv venv
+uv pip install --python venv/bin/python -r requirements.txt
+```
+
+<details>
+<summary>pip fallback (if uv unavailable)</summary>
+
+```bash
+python3 -m venv venv          # requires apt install python3.12-venv on Ubuntu
 source venv/bin/activate
 pip install -r requirements.txt
 ```
+</details>
 
 ### Run (manual)
 
