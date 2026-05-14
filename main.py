@@ -1003,6 +1003,73 @@ async def search(
     return _unwrap(result)
 
 
+# ── Postgres-native BM25 search ──────────────────────────────────────
+#
+# Phase 2 of the hybrid-search-taxonomy initiative (familiar.realm.watch
+# spec §3.6). The daemon issues postgres tsvector queries directly
+# rather than routing through the mempalace_search MCP tool — the MCP
+# path is vector-only and lives in chromadb-shaped code.
+#
+# 503 when backend is chroma. The chroma path has its own BM25
+# fallback via _bm25_only_via_sqlite, surfaced through
+# candidate_strategy="union" on the existing /search endpoint.
+
+
+@app.post("/search/keyword")
+async def search_keyword(request: Request, x_api_key: str | None = Header(default=None)):
+    """BM25 keyword search over mempalace_drawers.doc_tsv.
+
+    Body::
+
+        {
+          "query": "pgvector lazy index race",
+          "wing":  "memorypalace",          // optional, exact-match filter
+          "room":  "problems",              // optional, must be canonical if set
+          "limit": 20
+        }
+
+    Returns the same result shape as ``/search`` for callers that mix
+    the two (each hit has id, document, wing, room, metadata, score).
+    Uses ``websearch_to_tsquery`` for user-friendly query parsing
+    (phrase syntax, OR, negation).
+    """
+    _check_auth(x_api_key)
+    if _mp._config.backend != "postgres":
+        raise HTTPException(
+            status_code=503,
+            detail="/search/keyword requires MEMPALACE_BACKEND=postgres; daemon is on chroma.",
+        )
+
+    body = await request.json()
+    query = (body.get("query") or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="'query' is required and must be non-empty")
+    wing = body.get("wing") or None
+    room = body.get("room") or None
+    limit = int(body.get("limit") or 20)
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=400, detail="'limit' must be 1..200")
+
+    # Validate room if provided so callers get fast feedback (vs an
+    # empty-result silent surprise from a typo).
+    if room is not None and room not in _canonical_rooms():
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": f"room {room!r} is not in the canonical set",
+                "valid_rooms": sorted(_canonical_rooms()),
+            },
+        )
+
+    dsn = os.environ.get("MEMPALACE_POSTGRES_DSN")
+    if not dsn:
+        raise HTTPException(status_code=500, detail="MEMPALACE_POSTGRES_DSN not set in daemon environment")
+
+    from mempalace.searcher import _bm25_only_via_postgres
+    result = _bm25_only_via_postgres(query, dsn, wing=wing, room=room, n_results=limit)
+    return result
+
+
 @app.get("/context")
 async def context(
     topic: str,
