@@ -1103,13 +1103,89 @@ async def update_memory(drawer_id: str, request: Request, x_api_key: str | None 
     return _unwrap(result)
 
 
+def _normalize_wing_slug(s: str) -> str:
+    """Canonical wing-slug form per the 2026-05-14 taxonomy spec §3.2.
+
+    Idempotent: applying twice yields the same result. Used at the
+    /memory boundary so writes from any caller (familiar, manual curl,
+    test rigs) land with the same slug shape as the miner produces.
+    """
+    import re as _re
+    if not s:
+        return "unknown"
+    s = s.lower()
+    if s.startswith("wing_"):
+        s = s[5:]
+    s = _re.sub(r"[^a-z0-9_]", "_", s)
+    return s or "unknown"
+
+
+# Cached set of canonical room names. Refreshed on cache miss or via
+# explicit /admin/refresh-rooms (TODO). For now, cache for the daemon's
+# lifetime — restart picks up changes to mempalace_canonical_rooms.
+_canonical_rooms_cache: set[str] | None = None
+
+
+def _canonical_rooms() -> set[str]:
+    """Read the configurable room set from mempalace_canonical_rooms.
+
+    Falls back to the spec's default 7 when the lookup table is absent
+    or the backend isn't postgres (legacy chroma path doesn't have the
+    FK lookup; validate against the spec defaults).
+    """
+    global _canonical_rooms_cache
+    if _canonical_rooms_cache is not None:
+        return _canonical_rooms_cache
+
+    DEFAULTS = {"architecture", "decisions", "problems", "planning",
+                "sessions", "references", "discoveries"}
+
+    try:
+        if _mp._config.backend != "postgres":
+            _canonical_rooms_cache = DEFAULTS
+            return _canonical_rooms_cache
+        import psycopg2
+        dsn = os.environ.get("MEMPALACE_POSTGRES_DSN")
+        if not dsn:
+            _canonical_rooms_cache = DEFAULTS
+            return _canonical_rooms_cache
+        with psycopg2.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT name FROM mempalace_canonical_rooms")
+                rows = cur.fetchall()
+        if rows:
+            _canonical_rooms_cache = {r[0] for r in rows}
+        else:
+            _canonical_rooms_cache = DEFAULTS
+    except Exception:
+        _canonical_rooms_cache = DEFAULTS
+    return _canonical_rooms_cache
+
+
 @app.post("/memory")
 async def store_memory(request: Request, x_api_key: str | None = Header(default=None)):
     _check_auth(x_api_key)
     body = await request.json()
     content = body.get("content", "")
-    wing = body.get("wing", "general")
-    room = body.get("room", "notes")
+
+    # Taxonomy enforcement at the write boundary. Wing slug is normalized
+    # (idempotent) so the same project is always the same slug regardless
+    # of how the caller spelled it. Room is validated against the
+    # configurable canonical set; non-canonical writes are rejected with
+    # the valid set in the error payload so callers can adapt.
+    wing = _normalize_wing_slug(body.get("wing") or "unknown")
+    room = body.get("room") or "discoveries"  # spec's catch-all default
+    valid_rooms = _canonical_rooms()
+    if room not in valid_rooms:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": f"room {room!r} is not in the canonical set",
+                "valid_rooms": sorted(valid_rooms),
+                "hint": "Use one of the canonical rooms, or `mempalace rooms add` to register a new one.",
+            },
+        )
+
     result = await _call({
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
@@ -1122,6 +1198,16 @@ async def store_memory(request: Request, x_api_key: str | None = Header(default=
     if isinstance(unwrapped, dict) and unwrapped.get('success'):
         unwrapped['toast'] = f'Filed to {wing}/{room}'
     return unwrapped
+
+
+@app.post("/admin/refresh-rooms")
+async def refresh_rooms(x_api_key: str | None = Header(default=None)):
+    """Invalidate the canonical rooms cache so the next /memory call
+    re-reads mempalace_canonical_rooms. Use after `mempalace rooms add`."""
+    _check_auth(x_api_key)
+    global _canonical_rooms_cache
+    _canonical_rooms_cache = None
+    return {"refreshed": True, "rooms": sorted(_canonical_rooms())}
 
 
 @app.get("/stats")

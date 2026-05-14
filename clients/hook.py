@@ -774,10 +774,10 @@ def _ingest_transcript_via_daemon(daemon_url: str, transcript_path: str, wing: s
     """
     path = _validate_transcript_path(transcript_path)
     if path is None or not path.is_file() or path.stat().st_size < 100:
-        return
+        return False
     settings = _load_hook_settings()
     if not settings.get("ingest_transcripts", True):
-        return
+        return False
 
     mine_dir = str(path.parent)
 
@@ -787,8 +787,11 @@ def _ingest_transcript_via_daemon(daemon_url: str, transcript_path: str, wing: s
     slot = _try_claim_mine_slot(mine_dir, "convos", wing)
     if slot is None:
         _log(f"Transcript ingest skipped (lock held): {path.name} wing={wing}")
-        return
+        # Treat lock-held as success: another hook is already doing the
+        # work; don't show a failure in themed output.
+        return True
 
+    ok = False
     try:
         ok, response = _post_mine(daemon_url, mine_dir,
                                   timeout=settings.get("mine_timeout_s", 30),
@@ -805,6 +808,7 @@ def _ingest_transcript_via_daemon(daemon_url: str, transcript_path: str, wing: s
             slot.close()
         except OSError:
             pass
+    return ok
 
 
 def hook_session_start(data: dict, harness: str):
@@ -925,34 +929,27 @@ def hook_stop(data: dict, harness: str):
         return
 
     if silent:
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-        entry = f"AUTO-SAVE:{session_id}|{exchange_count}.msgs|{ts}|hook.{trigger}"
+        # Phase 1D refactor (2026-05-14 hybrid-search-taxonomy spec, §3.5):
+        # the hook no longer writes drawers directly via diary_write. The
+        # miner is the single source of writes; the hook is a trigger.
+        # /mine with mode=convos lets the miner chunk the transcript into
+        # one-exchange-per-drawer + emits canonical-room values via the
+        # post-spec detect_convo_room. The "single session summary"
+        # semantic that diary_write previously provided is satisfied by
+        # the convos-mode chunking + retrieval — the conversation is
+        # captured as content-rich drawers, not as one opaque summary.
         wing = _project_wing(data, transcript_path)
-        ok, response = _post_mcp(daemon_url, "mempalace_diary_write", {
-            "agent_name": harness,
-            "entry": entry,
-            "topic": CHECKPOINT_TOPIC,
-            "wing": wing,
-            "session_id": session_id,
-        })
-        _log(f"Silent save {'OK' if ok else 'FAILED (daemon unreachable)'} at exchange {exchange_count} → {wing}")
-
-        # Restore the transcript-mine step that upstream mempalace's
-        # hooks_cli does on every save (see hooks_cli._ingest_transcript).
-        # The diary entry is a marker; the mine produces the content-rich
-        # drawers from the conversation itself.
-        _ingest_transcript_via_daemon(daemon_url, transcript_path, wing)
+        ok = _ingest_transcript_via_daemon(daemon_url, transcript_path, wing)
+        _log(f"Silent save (mine-only) {'OK' if ok else 'FAILED (daemon unreachable)'} at exchange {exchange_count} → {wing}")
         if toast:
             _desktop_notify("MemPalace", f"Auto-saved at {exchange_count} msgs ({trigger})")
-        # Themed feedback — surfaced in Claude Code UI via the systemMessage
-        # field. Query the daemon's /stats after the write for richer
-        # context (current drawer count), but never let that round-trip
-        # failure suppress the message itself.
+        # Themed feedback unchanged — themed message describes the
+        # ingest outcome; palace stats are best-effort.
         if ok:
             palace_count = _format_palace_count(_get_palace_stats(daemon_url))
-            sys_msg = _theme_save_ok(exchange_count, trigger, response, palace_count, wing)
+            sys_msg = _theme_save_ok(exchange_count, trigger, {}, palace_count, wing)
         else:
-            sys_msg = _theme_save_fail(exchange_count, trigger, response)
+            sys_msg = _theme_save_fail(exchange_count, trigger, {"error": "mine via daemon failed"})
         _output({"systemMessage": sys_msg})
     else:
         if toast:
@@ -973,38 +970,21 @@ def hook_precompact(data: dict, harness: str):
     daemon_url = settings.get("daemon_url", "http://localhost:8085")
     toast = settings.get("desktop_toast", False)
 
-    # Always file a context-boundary diary marker, regardless of mine config.
-    # Pre-compact is a load-bearing moment — the next turn loses ~all
-    # detail — so leaving a drawer pointer is the minimum the hook owes
-    # the operator. Was previously only done if MEMPAL_DIR was set, which
-    # silently no-op'd in most setups.
+    # Phase 1D refactor: precompact is also miner-only now. The transcript
+    # ingest captures the current conversation state as drawers via the
+    # miner; the previous "boundary marker" diary_write is dropped (it
+    # was a stub anyway — the actual conversation content is what matters
+    # at compaction, and the miner captures that).
     wing = _project_wing(data, transcript_path)
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-    boundary_entry = (
-        f"PRE-COMPACT BOUNDARY:{session_id}|{ts}|"
-        f"context about to be compressed — next turn starts with summary only"
-    )
-    save_ok, save_response = _post_mcp(daemon_url, "mempalace_diary_write", {
-        "agent_name": harness,
-        "entry": boundary_entry,
-        "topic": PRECOMPACT_TOPIC,
-        "wing": wing,
-        "session_id": session_id,
-    })
-    _log(f"Pre-compact boundary save {'OK' if save_ok else 'FAILED'} → {wing}")
+    ingest_ok = _ingest_transcript_via_daemon(daemon_url, transcript_path, wing)
+    _log(f"Pre-compact mine {'OK' if ingest_ok else 'FAILED'} → {wing}")
 
     sys_msgs = []
-    if save_ok:
+    if ingest_ok:
         palace_count = _format_palace_count(_get_palace_stats(daemon_url))
-        sys_msgs.append(_theme_precompact_save(wing, save_response, palace_count))
+        sys_msgs.append(_theme_precompact_save(wing, {}, palace_count))
     else:
-        err = (save_response or {}).get("error", "unknown error")
-        sys_msgs.append(f"✘ Pre-compact boundary save failed — {err}")
-
-    # Transcript ingest — same step upstream hooks_cli fires here. The
-    # diary write above is a marker; this captures actual conversation
-    # content as drawers via the miner.
-    _ingest_transcript_via_daemon(daemon_url, transcript_path, wing)
+        sys_msgs.append("✘ Pre-compact transcript ingest failed — daemon unreachable")
 
     mine_dir = _get_mine_dir()
     if mine_dir:
