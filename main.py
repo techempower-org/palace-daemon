@@ -1642,6 +1642,81 @@ def _read_wings_rooms_direct() -> tuple[dict[str, int], list[dict]]:
     return wings, rooms
 
 
+def _read_kg_postgres() -> tuple[list[dict], list[dict]]:
+    """Read entities + triples directly from the live AGE graph.
+
+    Shape matches the chroma sqlite KG schema so the /graph response
+    stays stable across backends:
+      entity:  {id, name, type, properties}
+      triple:  {subject, predicate, object, valid_from, valid_to,
+                confidence, source_file}
+
+    AGE entities don't have a separate `id`/`type`/`properties` model —
+    they're MERGE'd by name when a triple is added, so we map
+    id=name=name, type='entity', properties={}. `source_file` is
+    populated from the relation's `source` field if present.
+
+    Limited to 500 triples to bound /graph latency on large palaces;
+    callers that need the full graph should query AGE directly via
+    /cypher.
+    """
+    dsn = getattr(_mp._config, "postgres_dsn", None) or os.environ.get(
+        "MEMPALACE_POSTGRES_DSN"
+    )
+    if not dsn:
+        return [], []
+
+    try:
+        # Construct on-demand. The AGE helper's __init__ is cheap once
+        # the extension is loaded; the explicit close() in finally
+        # releases the connection we opened here.
+        from mempalace.knowledge_graph_age import KnowledgeGraphAGE
+
+        kg = KnowledgeGraphAGE(dsn=dsn)
+    except Exception:
+        return [], []
+
+    try:
+        # query_triples() returns dicts with keys subject, relation_type,
+        # object, source, valid_from, valid_to, confidence.
+        rows = kg.query_triples()
+    except Exception:
+        rows = []
+    finally:
+        try:
+            kg.close()
+        except Exception:
+            pass
+
+    rows = rows[:500]  # cap to bound payload
+
+    triples: list[dict] = []
+    entity_names: set[str] = set()
+    for r in rows:
+        subj = r.get("subject")
+        pred = r.get("relation_type")
+        obj = r.get("object")
+        if not (subj and pred and obj):
+            continue
+        triples.append({
+            "subject": subj,
+            "predicate": pred,
+            "object": obj,
+            "valid_from": r.get("valid_from"),
+            "valid_to": r.get("valid_to"),
+            "confidence": r.get("confidence"),
+            "source_file": r.get("source"),
+        })
+        entity_names.add(subj)
+        entity_names.add(obj)
+
+    entities = [
+        {"id": n, "name": n, "type": "entity", "properties": {}}
+        for n in sorted(entity_names)
+    ]
+    return entities, triples
+
+
 def _read_kg_direct() -> tuple[list[dict], list[dict]]:
     """Read-only snapshot of KG entities + triples.
 
@@ -1652,15 +1727,15 @@ def _read_kg_direct() -> tuple[list[dict], list[dict]]:
     on each query.
 
     Under the postgres backend the KG lives in AGE (the `mempalace_kg`
-    graph), and the sibling sqlite file — if present — is a pre-migration
-    leftover that no longer receives writes. Reading it would return
-    frozen snapshot data, so we short-circuit to empty lists and let the
-    caller surface KG state via the `mempalace_kg_stats` MCP tool (which
-    consults the live AGE backend). A live AGE-backed entity/triple read
-    would belong here but is out of scope for this fix.
+    graph). We use `KnowledgeGraphAGE` to read the live graph directly —
+    one Cypher MATCH for triples, then derive the entity list from the
+    union of subjects+objects (AGE schema has no separate entity-row
+    concept; entities are MERGE'd by name when triples are inserted).
+    Limited to 500 triples to bound `/graph` latency on large palaces;
+    UI surfaces this as a sample, not a full export.
     """
     if getattr(_mp._config, "backend", None) == "postgres":
-        return [], []
+        return _read_kg_postgres()
     kg_path = _kg_path()
     if not os.path.isfile(kg_path):
         return [], []
