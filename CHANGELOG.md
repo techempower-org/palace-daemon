@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+### Fixed — 2026-05-15 — *`/graph` wing counts stale after postgres cutover*
+
+`/graph` was reporting wing/room drawer counts from the legacy
+`chroma.sqlite3` snapshot even when `MEMPALACE_BACKEND=postgres`. Under
+postgres the chroma file is a frozen pre-migration store that no longer
+receives writes, so counts ratchet down to whatever was present at
+cutover and never refresh — `familiar_realm_watch` reported 25 drawers
+in `/graph` against 235 live in postgres (~10× stale).
+
+`_read_wings_rooms_direct` now dispatches by `_mp._config.backend`:
+under postgres it runs two cheap `GROUP BY` queries against the indexed
+`wing` and `(wing, room)` columns of `mempalace_drawers` (~150 ms each
+on the canonical 270K-drawer palace, well under the previous chroma
+direct-read budget — small enough to compute live on every call rather
+than cache). Under chroma the original sqlite path is preserved.
+`_read_kg_direct` also short-circuits to empty under postgres backend
+(the live KG is in AGE; the sibling sqlite is the same kind of
+pre-migration leftover) so `/graph.kg_entities` no longer surfaces
+frozen snapshot data.
+
+Tests at `tests/test_graph_wings_dispatch.py` pin the dispatch and
+verify the chroma sqlite path is never opened under postgres.
+
 ### Added — 2026-05-13 / 2026-05-14 — *hybrid retrieval endpoints + postgres-direct surface*
 
 After the [techempower-org/mempalace](https://github.com/techempower-org/mempalace) substrate cutover to Postgres + pgvector + Apache AGE landed (2026-05-13/14), the daemon needed to expose the new backend's capabilities over HTTP. Four endpoints added, all postgres-backend-gated (return 503 if `MEMPALACE_BACKEND=chroma`):

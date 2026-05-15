@@ -1516,20 +1516,88 @@ def _chroma_path() -> str:
     return os.path.join(_mp._config.palace_path, "chroma.sqlite3")
 
 
+def _read_wings_rooms_postgres() -> tuple[dict[str, int], list[dict]]:
+    """Read wings + rooms-per-wing directly from the postgres backend.
+
+    Two cheap GROUP BY queries on the indexed `wing` / (`wing`,`room`)
+    columns of `mempalace_drawers`. Measured at ~150ms each on the
+    canonical 270K-drawer palace, well under the original chroma-sqlite
+    direct read budget and small enough to compute live on every /graph
+    call instead of caching.
+
+    Returns ({}, []) on any failure so /graph degrades gracefully — the
+    SME adapter falls back to MCP composition in that case.
+    """
+    dsn = os.environ.get("MEMPALACE_POSTGRES_DSN") or getattr(
+        _mp._config, "postgres_dsn", None
+    )
+    if not dsn:
+        return {}, []
+
+    wings: dict[str, int] = {}
+    rooms_by_wing: dict[str, dict[str, int]] = {}
+    try:
+        import psycopg2
+        # Short timeout — /graph is interactive; we'd rather degrade than
+        # block the request behind a stuck planner.
+        with psycopg2.connect(dsn, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SET LOCAL statement_timeout = '10s'; "
+                    "SELECT wing, COUNT(*) FROM mempalace_drawers GROUP BY wing"
+                )
+                for name, n in cur.fetchall():
+                    if name:
+                        wings[name] = n
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SET LOCAL statement_timeout = '10s'; "
+                    "SELECT wing, room, COUNT(*) FROM mempalace_drawers "
+                    "GROUP BY wing, room"
+                )
+                for wing, room, n in cur.fetchall():
+                    if wing and room:
+                        rooms_by_wing.setdefault(wing, {})[room] = n
+    except Exception:
+        # Schema drift, connection issue, statement timeout, anything —
+        # degrade to empty rather than 500 the /graph request.
+        return {}, []
+
+    all_wings = set(wings) | set(rooms_by_wing)
+    rooms = [{"wing": w, "rooms": rooms_by_wing.get(w, {})} for w in sorted(all_wings)]
+    return wings, rooms
+
+
 def _read_wings_rooms_direct() -> tuple[dict[str, int], list[dict]]:
-    """Read wings + rooms directly from chroma.sqlite3 (read-only, off-loop).
+    """Read wings + rooms directly from the live backend, off-loop.
 
     Bypasses the MCP fan-out (list_wings + list_rooms × N) which serializes
-    through the read semaphore and stalls under load. Direct sqlite GROUP BY
-    on the embedding_metadata table is ~200× faster on the canonical 151K-
-    drawer palace (~0.4s vs 60-120s under contention) and consumes zero
-    semaphore slots.
+    through the read semaphore and stalls under load. Computes live on
+    every call — both backends are fast enough that caching just creates
+    staleness bugs (the chroma sqlite snapshot used to lag the live
+    postgres backend by ~10× after the chroma → postgres migration; this
+    was the original motivation for routing by backend here).
 
-    Schema is the ChromaDB persistent client's internal layout — not part
-    of mempalace's public API. Tolerated by catching OperationalError; if
-    the schema ever drifts, /graph degrades to empty wings/rooms (the SME
-    adapter then falls back to its MCP composition path).
+    - postgres: two GROUP BY queries on `mempalace_drawers` (~150ms each
+      on the canonical 270K-drawer palace).
+    - chroma:   GROUP BY on `embedding_metadata` in the persistent
+      client's `chroma.sqlite3`. ~200× faster than the MCP fan-out on
+      151K drawers (~0.4s vs 60-120s under contention).
+
+    Schemas are internal to the respective backends — not part of
+    mempalace's public API. Tolerated by catching OperationalError /
+    psycopg2 errors; if the schema ever drifts, /graph degrades to empty
+    wings/rooms (the SME adapter then falls back to its MCP composition
+    path).
     """
+    # Route by configured backend. The chroma sqlite path is a stale
+    # snapshot under postgres (it was the pre-migration store and
+    # receives no further writes), so reading it would return frozen
+    # counts — exactly the "10× stale" bug this function exists to avoid.
+    backend = getattr(_mp._config, "backend", None)
+    if backend == "postgres":
+        return _read_wings_rooms_postgres()
+
     chroma = _chroma_path()
     if not os.path.isfile(chroma):
         return {}, []
@@ -1577,13 +1645,22 @@ def _read_wings_rooms_direct() -> tuple[dict[str, int], list[dict]]:
 def _read_kg_direct() -> tuple[list[dict], list[dict]]:
     """Read-only snapshot of KG entities + triples.
 
-    The KG is a separate SQLite file from the ChromaDB store the daemon
-    coordinates writes for, so a read here does not cross the
-    single-writer invariant. Opens read-only via URI mode so it cannot
-    create the file or mutate state. Schema differences (older palaces,
+    Under the chroma backend the KG lives in a sibling SQLite file
+    (`knowledge_graph.sqlite3`); a read there does not cross the
+    single-writer invariant. Schema differences (older palaces,
     in-progress migrations) are tolerated by catching OperationalError
     on each query.
+
+    Under the postgres backend the KG lives in AGE (the `mempalace_kg`
+    graph), and the sibling sqlite file — if present — is a pre-migration
+    leftover that no longer receives writes. Reading it would return
+    frozen snapshot data, so we short-circuit to empty lists and let the
+    caller surface KG state via the `mempalace_kg_stats` MCP tool (which
+    consults the live AGE backend). A live AGE-backed entity/triple read
+    would belong here but is out of scope for this fix.
     """
+    if getattr(_mp._config, "backend", None) == "postgres":
+        return [], []
     kg_path = _kg_path()
     if not os.path.isfile(kg_path):
         return [], []
