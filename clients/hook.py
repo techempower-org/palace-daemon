@@ -167,6 +167,48 @@ def _output(data: dict):
     print(json.dumps(data, indent=2, ensure_ascii=False))
 
 
+def _detach_for_async_work() -> bool:
+    """Fork + setsid + redirect FDs to /dev/null. Returns ``True`` if
+    we are the (detached) child and should continue with the slow
+    work; ``False`` if we are the parent and should ``return``.
+
+    Used by ``hook_stop`` / ``hook_precompact`` *after* they've emitted
+    their user-visible ``systemMessage`` via ``_output`` — claude waits
+    for the hook's stdout/stderr pipes to close before clearing the
+    event, so the parent's ``return`` lets the harness unblock while
+    the child finishes the slow daemon round-trip. Emitting the themed
+    message *before* the fork is the whole point of this helper: the
+    detached child's stdout is ``/dev/null``, so any ``_output`` call
+    after detach is invisible.
+
+    Failures are conservative — if ``os.fork()`` raises, we return
+    ``True`` so the caller runs inline (synchronous fallback). Set
+    ``PALACE_HOOK_NO_DETACH=1`` to skip the detach entirely (testing).
+    """
+    if os.environ.get("PALACE_HOOK_NO_DETACH") == "1":
+        return True
+    try:
+        pid = os.fork()
+    except OSError:
+        return True  # fork failed; run inline as a fallback
+    if pid > 0:
+        return False  # parent: caller should immediately return
+    # We are the child. Detach so claude's harness pipe-close logic
+    # doesn't block on us.
+    try:
+        os.setsid()
+        devnull_in = os.open(os.devnull, os.O_RDONLY)
+        devnull_out = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull_in, 0)
+        os.dup2(devnull_out, 1)
+        os.dup2(devnull_out, 2)
+        os.close(devnull_in)
+        os.close(devnull_out)
+    except OSError:
+        pass
+    return True
+
+
 def _read_last_save_ts(session_id: str) -> float:
     ts_file = STATE_DIR / f"{session_id}_last_save_ts"
     try:
@@ -939,18 +981,38 @@ def hook_stop(data: dict, harness: str):
         # the convos-mode chunking + retrieval — the conversation is
         # captured as content-rich drawers, not as one opaque summary.
         wing = _project_wing(data, transcript_path)
+
+        # Emit the themed systemMessage in the parent BEFORE detaching.
+        # The detached child has stdout redirected to /dev/null (so
+        # claude's harness can close its pipe and clear the event), which
+        # means any _output call after detach is invisible to the user.
+        # palace_count is the pre-save count — slightly stale but the
+        # delta from one save is negligible at 273k drawers, and the
+        # _get_palace_stats round-trip is ~50ms on a warm daemon.
+        # Save success is optimistic: if the ingest later fails, the
+        # failure path lands in hook.log only; the user sees the
+        # success-themed line. The original (pre-detach) code emitted
+        # only after the ingest returned, so the failure mode showed up
+        # in the UI. We accept the slight loss of fidelity to recover
+        # the in-session user-visible save confirmation that the detach
+        # broke.
+        pre_palace_count = _format_palace_count(_get_palace_stats(daemon_url))
+        sys_msg = _theme_save_ok(exchange_count, trigger, {}, pre_palace_count, wing)
+        _output({"systemMessage": sys_msg})
+
+        if not _detach_for_async_work():
+            return
+
+        # We are the (detached) child. Do the slow ingest. Anything
+        # we print from here goes to /dev/null; logging via _log()
+        # to ~/.mempalace/hook_state/hook.log is the durable channel.
         ok = _ingest_transcript_via_daemon(daemon_url, transcript_path, wing)
         _log(f"Silent save (mine-only) {'OK' if ok else 'FAILED (daemon unreachable)'} at exchange {exchange_count} → {wing}")
+        if not ok:
+            failure_themed = _theme_save_fail(exchange_count, trigger, {"error": "mine via daemon failed"})
+            _log(f"FAILURE themed (would-have-emitted): {failure_themed}")
         if toast:
             _desktop_notify("MemPalace", f"Auto-saved at {exchange_count} msgs ({trigger})")
-        # Themed feedback unchanged — themed message describes the
-        # ingest outcome; palace stats are best-effort.
-        if ok:
-            palace_count = _format_palace_count(_get_palace_stats(daemon_url))
-            sys_msg = _theme_save_ok(exchange_count, trigger, {}, palace_count, wing)
-        else:
-            sys_msg = _theme_save_fail(exchange_count, trigger, {"error": "mine via daemon failed"})
-        _output({"systemMessage": sys_msg})
     else:
         if toast:
             _desktop_notify("MemPalace checkpoint", "Save requested — check Claude")
@@ -976,33 +1038,46 @@ def hook_precompact(data: dict, harness: str):
     # was a stub anyway — the actual conversation content is what matters
     # at compaction, and the miner captures that).
     wing = _project_wing(data, transcript_path)
+
+    # Emit themed systemMessage in the parent BEFORE detaching. See
+    # hook_stop for the rationale. palace_count is pre-ingest; ingest
+    # outcome is optimistic and falls back to hook.log on failure.
+    # The MEMPAL_DIR mine's themed message (which depends on the mine
+    # result) cannot be emitted in this single-fork architecture —
+    # that path's outcome lands in hook.log only.
+    pre_palace_count = _format_palace_count(_get_palace_stats(daemon_url))
+    sys_msgs = [_theme_precompact_save(wing, {}, pre_palace_count)]
+    mine_dir = _get_mine_dir()
+    if mine_dir:
+        sys_msgs.append(f"⟳ Precompact MEMPAL_DIR mine queued: {mine_dir}")
+    _output({"systemMessage": "\n".join(sys_msgs)})
+
+    if not _detach_for_async_work():
+        return
+
+    # We are the (detached) child. Do the slow ingest + optional mine.
+    # Both outcomes land in hook.log only; the user already saw the
+    # optimistic themed line above.
     ingest_ok = _ingest_transcript_via_daemon(daemon_url, transcript_path, wing)
     _log(f"Pre-compact mine {'OK' if ingest_ok else 'FAILED'} → {wing}")
+    if not ingest_ok:
+        _log("FAILURE themed (would-have-emitted): ✘ Pre-compact transcript ingest failed — daemon unreachable")
 
-    sys_msgs = []
-    if ingest_ok:
-        palace_count = _format_palace_count(_get_palace_stats(daemon_url))
-        sys_msgs.append(_theme_precompact_save(wing, {}, palace_count))
-    else:
-        sys_msgs.append("✘ Pre-compact transcript ingest failed — daemon unreachable")
-
-    mine_dir = _get_mine_dir()
     if mine_dir:
         _log(f"Precompact mine via daemon: {mine_dir}")
         ok, mine_response = _post_mine(daemon_url, mine_dir,
                                        timeout=60, mode="convos", wing=wing)
-        _log(f"Precompact mine {'OK' if ok else 'skipped (daemon unreachable)'}")
-        palace_count = _format_palace_count(_get_palace_stats(daemon_url)) if ok else ""
-        sys_msgs.append(_theme_mine(mine_dir, ok, mine_response, palace_count))
+        _log(f"Precompact MEMPAL_DIR mine {'OK' if ok else 'skipped (daemon unreachable)'}")
+        if ok:
+            post_palace_count = _format_palace_count(_get_palace_stats(daemon_url))
+            _log(f"MINE-RESULT themed (would-have-emitted): {_theme_mine(mine_dir, ok, mine_response, post_palace_count)}")
+        else:
+            _log(f"MINE-RESULT themed (would-have-emitted): {_theme_mine(mine_dir, ok, mine_response, '')}")
     else:
         _log("Precompact MEMPAL_DIR mine skipped: MEMPAL_DIR not set")
 
     if toast:
         _desktop_notify("MemPalace", "Pre-compaction checkpoint triggered")
-
-    # Concatenate multiple themed lines with newline so both events
-    # surface in the Claude Code UI.
-    _output({"systemMessage": "\n".join(sys_msgs)} if sys_msgs else {})
 
 
 def run_hook(hook_name: str, harness: str):
@@ -1014,40 +1089,11 @@ def run_hook(hook_name: str, harness: str):
         _log("WARNING: Failed to parse stdin JSON, proceeding with empty data")
         data = {}
 
-    # Stop/precompact do slow HTTP round-trips to palace-daemon (save +
-    # mine). When the daemon is wedged — e.g. a pgvector lazy-index
-    # race holding ACCESS EXCLUSIVE on mempalace_drawers — those calls
-    # eat the entire urlopen timeout, and the harness blocks until the
-    # hook returns. Detach the worker into a session-leader child so the
-    # parent returns in <100ms and the daemon work finishes whenever it
-    # finishes. Set PALACE_HOOK_NO_DETACH=1 for synchronous testing.
-    if hook_name in ("stop", "precompact") and os.environ.get("PALACE_HOOK_NO_DETACH") != "1":
-        try:
-            pid = os.fork()
-        except OSError:
-            pid = -1  # fall through to inline run
-        if pid > 0:
-            return  # parent: hook event "done" immediately
-        if pid == 0:
-            # Child: detach so the harness doesn't track us. Claude waits
-            # for the hook's stdout/stderr pipes to close — if the child
-            # keeps them open during the 30s urlopen, the hook event
-            # doesn't clear until the child exits. Redirect all three
-            # to /dev/null. _log() writes to ~/.mempalace/hook_state/
-            # hook.log directly, not via stderr, so daemon failures
-            # still get recorded.
-            try:
-                os.setsid()
-                devnull_in = os.open(os.devnull, os.O_RDONLY)
-                devnull_out = os.open(os.devnull, os.O_WRONLY)
-                os.dup2(devnull_in, 0)
-                os.dup2(devnull_out, 1)
-                os.dup2(devnull_out, 2)
-                os.close(devnull_in)
-                os.close(devnull_out)
-            except OSError:
-                pass
-
+    # Stop/precompact do slow HTTP round-trips to palace-daemon and
+    # would block the harness — but the detach is now handled inside
+    # each handler (after it emits its user-visible systemMessage via
+    # _output) by calling _detach_for_async_work(). The dispatcher
+    # just dispatches; the handlers decide when to fork.
     hooks = {
         "session-start": hook_session_start,
         "stop": hook_stop,
