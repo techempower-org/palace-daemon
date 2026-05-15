@@ -80,17 +80,42 @@ class TestReadWingsRoomsDispatch(unittest.TestCase):
 
 
 class TestReadKgDirectDispatch(unittest.TestCase):
-    def test_postgres_backend_returns_empty_not_stale_sqlite(self):
-        """Under postgres backend the KG lives in AGE; the sibling
-        knowledge_graph.sqlite3 — if present — is a pre-migration
-        leftover. Returning its contents would surface frozen snapshot
-        data, so we short-circuit to empty.
+    def test_postgres_backend_dispatches_to_age_helper(self):
+        """Under postgres backend the KG lives in AGE; dispatch must
+        route to `_read_kg_postgres` (which queries live AGE), never to
+        the sibling knowledge_graph.sqlite3 (which is a frozen pre-
+        migration leftover under this backend).
         """
+        sentinel_entities = [{"id": "Razer Kiyo Pro", "name": "Razer Kiyo Pro", "type": "entity", "properties": {}}]
+        sentinel_triples = [{
+            "subject": "Razer Kiyo Pro", "predicate": "status_byte",
+            "object": "0x82", "valid_from": "2026-04-11",
+            "valid_to": None, "confidence": 1, "source_file": None,
+        }]
+        sentinel = (sentinel_entities, sentinel_triples)
         with patch.object(main, "_mp") as mp, \
+             patch.object(main, "_read_kg_postgres", return_value=sentinel) as pg, \
              patch("sqlite3.connect") as sql_connect:
             mp._config = _Cfg("postgres")
             entities, triples = main._read_kg_direct()
+        self.assertEqual(pg.call_count, 1)
+        # The chroma KG sqlite file must NOT be opened under postgres backend
+        # — that path is the staleness bug we're fixing.
         sql_connect.assert_not_called()
+        self.assertEqual(entities, sentinel_entities)
+        self.assertEqual(triples, sentinel_triples)
+
+    def test_chroma_backend_does_not_call_age_helper(self):
+        """Under MEMPALACE_BACKEND=chroma the legacy sqlite KG path is
+        authoritative; the AGE helper must not be invoked.
+        """
+        with patch.object(main, "_mp") as mp, \
+             patch.object(main, "_read_kg_postgres") as pg, \
+             patch.object(main, "_kg_path", return_value="/nonexistent/knowledge_graph.sqlite3"):
+            mp._config = _Cfg("chroma")
+            entities, triples = main._read_kg_direct()
+        pg.assert_not_called()
+        # File doesn't exist → degrade to empty.
         self.assertEqual(entities, [])
         self.assertEqual(triples, [])
 
