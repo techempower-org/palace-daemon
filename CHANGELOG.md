@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### Added — 2026-05-13 / 2026-05-14 — *hybrid retrieval endpoints + postgres-direct surface*
+
+After the [techempower-org/mempalace](https://github.com/techempower-org/mempalace) substrate cutover to Postgres + pgvector + Apache AGE landed (2026-05-13/14), the daemon needed to expose the new backend's capabilities over HTTP. Four endpoints added, all postgres-backend-gated (return 503 if `MEMPALACE_BACKEND=chroma`):
+
+- **`POST /search/hybrid`** — vector ∪ BM25 ∪ AGE graph-expanded candidates, hybrid-reranked. Routes through `mempalace.searcher.search_memories(candidate_strategy="hybrid")`. Accepts `query`, optional `wing`, optional `room` (validated against `mempalace_canonical_rooms`), `limit` (1..100), `include_trace` for per-source counts + latencies. Each hit gets a `matched_via` field naming the source (`vector` / `bm25_postgres` / `graph_seeded` / `graph_ner`).
+- **`POST /search/keyword`** — postgres-native BM25 only. `tsvector` query via `plainto_tsquery` + ILIKE fallback for underscore identifiers (the `pg_advisory_xact_lock` class of identifier that `to_tsquery` tokenizes wrong). Cheaper than `/search/hybrid` when the caller wants only lexical matches; mirrors the chromadb-era `_bm25_only_via_sqlite` semantics.
+- **`POST /cypher`** — direct AGE graph query path. Takes a Cypher string + optional params, returns serialized rows. Behind `PALACE_DAEMON_API_KEY` like every write endpoint. Enables knowledge-graph tooling that needs to traverse the graph without going through MCP.
+- **`POST /embed`** — direct embedding endpoint. Wraps `mempalace.embedding.get_embedding_function()` to return vectors for arbitrary text. Used by upstream tools (familiar-side reflection writers, multipass eval adapters) that need stable embeddings without owning an ONNX runtime.
+
+`/memory` now normalizes wing slug (the Phase 1A migration that landed in mempalace) and validates room against the canonical 7-room set at the boundary — returns 400 with the valid set if the caller misuses one.
+
+### Added — 2026-05-14 / 2026-05-15 — *deploy-palace-daemon.sh; broader operational tooling*
+
+- **[`ops/scripts/deploy-palace-daemon.sh`](ops/scripts/deploy-palace-daemon.sh)** — one-shot deployer. Rsyncs to `/var/tmp/palace-daemon-src` (avoiding /tmp tmpfs full conditions that bit us once), then sudo-rsyncs into `/mnt/raid/projects/palace-daemon/`, pip installs requirements into the existing venv at `~/.local/share/palace-daemon/venv`, `systemctl restart palace-daemon`, then polls `/health` until ready. Replaces the previous syncthing-based "edit on katana, syncthing mirrors to disks" deploy flow.
+- **Why deploy-script instead of syncthing**: 2026-05-14 03:33 UTC, syncthing produced a `main.sync-conflict-*.py` against disks's older copy, and during conflict resolution the `.git` directory on katana ended up missing `HEAD` + `config` with `objects/` holding unresolvable deltas. Recovered via fresh clone; `~/Projects/.stignore` now globally excludes `.git` to prevent recurrence. Documented in mempalace memory note `reference_pgvector_lazy_index_race.md` adjacent. The takeaway: syncthing is not a deploy primitive for git-tracked work.
+
+### Operational notes — 2026-05-14
+
+- **`PALACE_MAX_WRITE_CONCURRENCY` bumped 1 → 2** (`79a3949`) and hook default `mine_timeout_s` 30 → 60 — concurrent mines from multiple Claude sessions were occasionally timing out under the postgres backend's `CREATE INDEX` window. Raised the cap once the mempalace-side `pg_advisory_xact_lock` fix (mempalace fork commit `4566f8a`) made the lazy-index race deterministic.
+- **Remote URL** migrated from `jphein/palace-daemon` to `techempower-org/palace-daemon`. Old jphein URLs redirect but emit a push warning.
+
 ### Fixed — 2026-05-11 / 2026-05-12 operational debugging session
 
 A long debugging session against the disks palace surfaced (and fixed)
