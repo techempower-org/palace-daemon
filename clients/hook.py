@@ -593,7 +593,7 @@ def _theme_save_ok(exchange_count: int, trigger: str, response: dict, palace_cou
     Renders the full chain a human-readable walk takes through the palace
     to reach the drawer that was just filed:
 
-        palace → wing:<project> → room:diary → drawer:…<short-id>
+        palace → wing:<project> → room:sessions → drawer:…<short-id>
 
     Per the room taxonomy spec, the wing is the *project*, not the agent.
     The agent identity lives in drawer metadata. Room remains ``diary``
@@ -620,7 +620,7 @@ def _theme_save_ok(exchange_count: int, trigger: str, response: dict, palace_cou
 
     display = _display_wing(wing) if wing else _display_wing(inner.get("agent", ""))
     if display and display != "?":
-        chain = f"palace → wing:{display} → room:diary → drawer:{drawer_label}"
+        chain = f"palace → wing:{display} → room:sessions → drawer:{drawer_label}"
         head = f"✦ {chain}"
     else:
         head = "✦ Memory woven into the palace"
@@ -661,8 +661,10 @@ def _theme_session_start(wing: str, response: dict) -> str:
     """One-line palace greeting at session start.
 
     Surfaces what mempalace already knows about the project this session
-    is operating on. Calls ``tool_list_drawers(wing, room=diary, limit=1)``
+    is operating on. Calls ``tool_list_drawers(wing, room=sessions, limit=1)``
     to get a wing-scoped count regardless of which agent wrote each entry.
+    (Was ``room=diary`` historically; renamed to match the canonical 7-room
+    set per the Phase 1D FK migration on 2026-05-14.)
 
     Examples:
       ✦ palace ready — wing:familiar_realm_watch holds 47 diary entries
@@ -703,7 +705,7 @@ def _theme_precompact_save(wing: str, response: dict, palace_count: str) -> str:
     timestamp = inner.get("timestamp", "") or ""
     drawer_label = _drawer_label(topic, timestamp)
     display = _display_wing(wing)
-    chain = f"palace → wing:{display} → room:diary → drawer:{drawer_label}"
+    chain = f"palace → wing:{display} → room:sessions → drawer:{drawer_label}"
     msg = f"◆ Pre-compact boundary save — {chain}"
     if palace_count:
         msg += f", palace now holds {palace_count}"
@@ -871,7 +873,7 @@ def hook_session_start(data: dict, harness: str):
 
     ok, response = _post_mcp(daemon_url, "mempalace_list_drawers", {
         "wing": wing,
-        "room": "diary",
+        "room": "sessions",
         "limit": 1,
     })
     if ok:

@@ -197,15 +197,19 @@ class TestThemedSaveMessage(unittest.TestCase):
         # was the antipattern this fix corrects.
         self.assertNotIn("wing:claude-code", msg)
 
-    def test_chain_includes_room_diary(self):
-        # Room stays diary until mempalace exposes a room parameter to
-        # tool_diary_write. The message is truthful about what was stored.
+    def test_chain_includes_room_sessions(self):
+        # Room is "sessions" — one of the 7 canonical rooms enforced by
+        # the FK constraint added in mempalace's Phase 1D migration on
+        # 2026-05-14. "diary" was the pre-migration value and is no
+        # longer accepted by mempalace_drawers_room_fk; tool_diary_write
+        # was renamed to emit "sessions" in the matching mempalace patch
+        # (techempower-org/mempalace#83). The themed chain must agree.
         msg = hook._theme_save_ok(
             exchange_count=10, trigger="time",
             response=self._make_response(), palace_count="",
             wing="palace_daemon",
         )
-        self.assertIn("room:diary", msg)
+        self.assertIn("room:sessions", msg)
 
     def test_drawer_label_uses_topic_and_time(self):
         # Drawer display is a slug-style label built from topic + HH:MM,
