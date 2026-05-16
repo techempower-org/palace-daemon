@@ -988,17 +988,31 @@ def _search_args(query: str, limit: int) -> dict:
 async def search(
     q: str,
     limit: int = 5,
+    wing: str | None = None,
+    room: str | None = None,
     x_api_key: str | None = Header(default=None),
 ):
     """Semantic search over the main `mempalace_drawers` collection.
     Stop-hook auto-save checkpoints live in the dedicated
     `mempalace_session_recovery` collection and are not surfaced here —
-    use the `mempalace_session_recovery_read` MCP tool for those."""
+    use the `mempalace_session_recovery_read` MCP tool for those.
+
+    `wing` and `room` are optional exact-match filters forwarded to
+    ``mempalace_search``. Pre-2026-05-16 this endpoint silently dropped
+    those params (FastAPI strips unknown query args, and the signature
+    didn't accept them) — callers asking for scoped results got
+    palace-wide results back instead.
+    """
     _check_auth(x_api_key)
+    args = _search_args(q, limit)
+    if wing:
+        args["wing"] = wing
+    if room:
+        args["room"] = room
     result = await _call({
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
-        "params": {"name": "mempalace_search", "arguments": _search_args(q, limit)},
+        "params": {"name": "mempalace_search", "arguments": args},
     })
     return _unwrap(result)
 
