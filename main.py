@@ -273,7 +273,13 @@ async def _warn_if_hnsw_threads_unset() -> None:
     ChromaDB 1.5.x does not persist HNSW metadata across reopens (MemPalace
     issue #1161). After any cache clear the collection silently reverts to
     parallel inserts, risking SIGSEGV under concurrent writes.
+
+    No-op when MEMPALACE_BACKEND != "chroma" — the HNSW thread-pinning warning
+    is a chroma-only concern. Without this gate, postgres-backed daemons see
+    confusing "MemPalace issue #1161" log noise that doesn't apply. (#14)
     """
+    if getattr(_mp._config, "backend", "chroma") != "chroma":
+        return
     try:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _mp.handle_request, {
@@ -752,12 +758,18 @@ async def lifespan(app: FastAPI):
     # signal handler tears the event loop down mid-coroutine and skips lifespan
     # shutdown (the flush). Leave signal handling to uvicorn.
 
-    moved = quarantine_stale_hnsw(_mp._config.palace_path)
-    if moved:
-        logger.warning(
-            "Quarantined %d stale HNSW segment(s) — ChromaDB will rebuild indexes: %s",
-            len(moved), moved,
-        )
+    # Stale-HNSW quarantine is a chromadb-segment salvage step. On postgres
+    # backends, the indexes live in pgvector and this preflight has nothing
+    # to do — running it I/O-walks the legacy chroma sqlite + segment dirs at
+    # every startup, and any noise it logs is misleading. Gate behind backend
+    # detection. (#14)
+    if getattr(_mp._config, "backend", "chroma") == "chroma":
+        moved = quarantine_stale_hnsw(_mp._config.palace_path)
+        if moved:
+            logger.warning(
+                "Quarantined %d stale HNSW segment(s) — ChromaDB will rebuild indexes: %s",
+                len(moved), moved,
+            )
 
     # Migrate Stop-hook auto-save checkpoints from the main searchable
     # collection into the dedicated mempalace_session_recovery collection

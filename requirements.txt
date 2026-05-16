@@ -2,3 +2,7 @@ mempalace>=3.3.2
 fastapi>=0.136.0
 uvicorn[standard]>=0.44.0
 watchdog>=3.0.0
+# Required when MEMPALACE_BACKEND=postgres. Small (~3 MB) and only loaded on
+# demand by mempalace's postgres backend, so safe to ship unconditionally.
+# See palace-daemon#15: degraded-state at runtime is worse than 3 MB on disk.
+psycopg2-binary>=2.9
