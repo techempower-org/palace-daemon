@@ -195,6 +195,8 @@ python3 -m venv venv          # requires apt install python3.12-venv on Ubuntu
 source venv/bin/activate
 pip install -r requirements.txt
 ```
+
+uv is preferred; the stdlib `venv + pip` path is legacy and noted only for hosts that don't have uv installed.
 </details>
 
 ### Run (manual)
@@ -207,19 +209,20 @@ python main.py
 PALACE_API_KEY=$(openssl rand -hex 32) python main.py --palace /mnt/raid/projects/mempalace-data/palace
 ```
 
-### Run (systemd user service)
+### Run (systemd system service — preferred)
 
 ```bash
-mkdir -p ~/.config/systemd/user/
-cp palace-daemon.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now palace-daemon
+sudo cp palace-daemon.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now palace-daemon
 ```
 
-Edit the service file to set `PALACE_API_KEY`, `MEMPALACE_PALACE`, and any custom args before installing.
+Edit the unit file to set `User=`, `Group=`, the `ExecStart=` venv path, `PALACE_API_KEY`, `MEMPALACE_PALACE`, and any custom args before installing.
 
-> [!WARNING]
-> **Never install both system AND user services.** They'll fight for port 8085 and the second instance will crash-loop. Pick one.
+System unit is the only supported configuration. Per `CLAUDE.md` "Service Management" rule: `sudo systemctl [start|stop|restart] palace-daemon` is the canonical control path.
+
+> [!CAUTION]
+> **Never install BOTH the system unit AND a `~/.config/systemd/user/palace-daemon.service`.** Both run with `ExecStartPre=/usr/bin/fuser -k 8085/tcp` and will kill each other's listener in a cascade — the second instance's startup hook kills the first's listener, then the first restarts and kills the second. Restart counters in the hundreds within minutes is the symptom. If you have both, delete the user unit at `~/.config/systemd/user/palace-daemon.service` (along with any `.bak` siblings) and run `systemctl --user daemon-reload`.
 
 > [!CAUTION]
 > **Don't expose port 8085 without setting `PALACE_API_KEY`.** The `/mine` endpoint accepts arbitrary filesystem paths.

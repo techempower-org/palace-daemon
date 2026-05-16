@@ -2,8 +2,9 @@
 # verify-routes.sh — smoke test for palace-daemon HTTP routes after deploy.
 #
 # Exercises every public route against a running daemon. Designed to be
-# run manually after `systemctl --user restart palace-daemon` or
-# equivalent, not in CI (it depends on a live palace).
+# run manually after `sudo systemctl restart palace-daemon` (system unit;
+# the only supported configuration — see CLAUDE.md), not in CI (it
+# depends on a live palace).
 #
 # Usage:
 #   PALACE_DAEMON_URL=http://disks.jphe.in:8085 \
