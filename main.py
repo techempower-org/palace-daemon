@@ -1337,7 +1337,9 @@ async def store_memory(request: Request, x_api_key: str | None = Header(default=
     unwrapped = _unwrap(result)
     if isinstance(unwrapped, dict) and unwrapped.get('success'):
         unwrapped['toast'] = f'Filed to {wing}/{room}'
-    return unwrapped
+    # mempalace#86: bubble warnings/errors up to the client. Default to
+    # empty lists when paired with a mempalace that doesn't emit them.
+    return _ensure_warnings_fields(unwrapped)
 
 
 @app.post("/admin/refresh-rooms")
@@ -2146,23 +2148,37 @@ async def silent_save(request: Request, x_api_key: str | None = Header(default=N
             and _repair_state.get("mode") == "rebuild"
         ):
             await _enqueue_pending_write(body)
-            return {
+            return _ensure_warnings_fields({
                 "count": msg_count,
                 "themes": themes,
                 "queued": True,
                 "systemMessage": messages.save_queued(msg_count, themes),
-            }
+            })
         result = await _do_silent_save_write(body)
 
+    # mempalace#86: tool_diary_write may return warnings/errors lists.
+    # Forward them unchanged so clients/hook.py can surface them in the
+    # themed systemMessage. Older mempalace returns no such fields → [].
+    warnings = result.get("warnings") if isinstance(result, dict) else None
+    if not isinstance(warnings, list):
+        warnings = []
+    errors = result.get("errors") if isinstance(result, dict) else None
+    if not isinstance(errors, list):
+        errors = []
+
     if result.get("success"):
-        return {
+        return _ensure_warnings_fields({
             "count": msg_count,
             "themes": themes,
             "queued": False,
             "entry_id": result.get("entry_id"),
+            "warnings": warnings,
+            "errors": errors,
             "toast": f"Palace updated: {msg_count} msgs saved ({themes[0] if themes else "checkpoint"})",
-            "systemMessage": messages.save_ok(msg_count, themes),
-        }
+            "systemMessage": messages.save_ok(
+                msg_count, themes, warnings=warnings, errors=errors,
+            ),
+        })
     raise HTTPException(
         status_code=500,
         detail=f"silent save failed: {result.get('error', 'unknown')}",
@@ -2392,6 +2408,11 @@ def _unwrap(mcp_response: dict) -> Any:
         return json.loads(text)
     except (KeyError, TypeError, json.JSONDecodeError):
         return mcp_response
+
+
+# mempalace#86 — bubble warnings/errors through to clients with a stable
+# response shape, regardless of whether mempalace emits the new fields.
+_ensure_warnings_fields = messages.ensure_warnings_fields
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

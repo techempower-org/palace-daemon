@@ -6,6 +6,8 @@ events. One file, one place to retheme everything.
 
 Glyphs:
   ✦ — a memory operation (save, drain, held-in-trust)
+  ⚠ — a memory operation with a non-fatal warning (e.g. non-canonical room)
+  ✕ — a memory operation that failed
   ◈ — a palace operation (repair, reload, backup, restore)
 """
 
@@ -19,11 +21,82 @@ def _theme_tag(themes: Iterable[str]) -> str:
     return " — " + ", ".join(items[:4])
 
 
-def save_ok(count: int, themes: Iterable[str] = ()) -> str:
-    """Silent-save success (palace is healthy)."""
+def _format_notes(notes: Iterable[str]) -> str:
+    """Render warning/error notes as an indented secondary line.
+
+    Empty inputs return an empty string — the caller can append unconditionally.
+    """
+    items = [str(n).strip() for n in (notes or []) if str(n).strip()]
+    if not items:
+        return ""
+    return "\n    " + "\n    ".join(items)
+
+
+def ensure_warnings_fields(payload):
+    """Normalize a write-path response so it always carries ``warnings`` and
+    ``errors`` lists (mempalace#86).
+
+    Newer mempalace versions include ``warnings: list[str]`` (and optionally
+    ``errors: list[str]``) on drawer-write responses. We forward those fields
+    unchanged, but when paired with an older mempalace that doesn't emit
+    them, we still return the keys with empty lists so callers can rely on
+    the shape.
+
+    Non-dict payloads pass through untouched — they're either error envelopes
+    or already-shaped objects that the caller will handle on its own.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    warnings = payload.get("warnings")
+    if not isinstance(warnings, list):
+        warnings = []
+    errors = payload.get("errors")
+    if not isinstance(errors, list):
+        errors = []
+    payload["warnings"] = [str(w) for w in warnings]
+    payload["errors"] = [str(e) for e in errors]
+    return payload
+
+
+def save_ok(
+    count: int,
+    themes: Iterable[str] = (),
+    warnings: Iterable[str] = (),
+    errors: Iterable[str] = (),
+) -> str:
+    """Silent-save outcome line — glyph + body + optional notes.
+
+    mempalace#86: when the underlying write returned warnings (e.g. a
+    non-canonical room was accepted as-is) or errors (e.g. HNSW rebuilding,
+    write rejected), surface them on an indented second line so the user
+    sees what actually happened, not just what was attempted.
+    """
+    warnings = list(warnings or [])
+    errors = list(errors or [])
+    if errors:
+        glyph = "✕"
+        verb = "Save FAILED"
+    elif warnings:
+        glyph = "⚠"
+        verb = "Saved with warning" if len(warnings) == 1 else "Saved with warnings"
+    else:
+        glyph = "✦"
+        verb = None  # legacy "memory woven" phrasing below
+
+    if verb is None:
+        # Backwards-compatible phrasing when no warnings/errors are present.
+        # Keeps the existing themed voice for the healthy path.
+        if count == 1:
+            head = f"{glyph} 1 memory woven into the palace{_theme_tag(themes)}"
+        else:
+            head = f"{glyph} {count} memories woven into the palace{_theme_tag(themes)}"
+        return head
+
     if count == 1:
-        return f"✦ 1 memory woven into the palace{_theme_tag(themes)}"
-    return f"✦ {count} memories woven into the palace{_theme_tag(themes)}"
+        head = f"{glyph} {verb} — 1 memory{_theme_tag(themes)}"
+    else:
+        head = f"{glyph} {verb} — {count} memories{_theme_tag(themes)}"
+    return head + _format_notes(errors or warnings)
 
 
 def save_queued(count: int, themes: Iterable[str] = ()) -> str:

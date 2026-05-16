@@ -587,57 +587,135 @@ def _drawer_label(topic: str, timestamp: str) -> str:
     return topic or "?"
 
 
+def _extract_inner(response: dict) -> dict:
+    """Unwrap a daemon /mcp or /memory response into the inner result dict.
+
+    Handles both the JSON-RPC envelope shape (``result.content[0].text``
+    holds a JSON-encoded inner dict, as returned by /mcp) and the
+    already-unwrapped dict shape (as returned by /memory and /silent-save).
+
+    Returns ``{}`` on any parse failure — themed rendering should degrade
+    cleanly when the response shape isn't what we expected.
+    """
+    if not isinstance(response, dict):
+        return {}
+    # Already unwrapped (e.g. /memory, /silent-save direct returns).
+    if "result" not in response and ("warnings" in response or "errors" in response or "success" in response or "entry_id" in response):
+        return response
+    try:
+        content = response.get("result", {}).get("content", [])
+        if content and isinstance(content[0], dict):
+            return json.loads(content[0].get("text", "{}")) or {}
+    except Exception:
+        pass
+    return {}
+
+
+def _split_outcome(inner: dict) -> tuple[list[str], list[str]]:
+    """Pull warnings/errors lists out of a write-path response.
+
+    mempalace#86: drawer-write responses carry ``warnings: list[str]`` and
+    ``errors: list[str]``. Older mempalace versions don't emit them — we
+    default to empty lists so the themed renderer can treat 'no fields' and
+    'fields present but empty' identically.
+    """
+    if not isinstance(inner, dict):
+        return [], []
+    warnings = inner.get("warnings")
+    errors = inner.get("errors")
+    if not isinstance(warnings, list):
+        warnings = []
+    if not isinstance(errors, list):
+        errors = []
+    # Coerce to str so a misbehaving server can't crash the renderer.
+    return [str(w) for w in warnings], [str(e) for e in errors]
+
+
+def _format_outcome_notes(items: list[str]) -> str:
+    """Indented secondary line for warnings/errors. Empty input → empty string."""
+    cleaned = [s.strip() for s in items if str(s).strip()]
+    if not cleaned:
+        return ""
+    return "\n    " + "\n    ".join(cleaned)
+
+
 def _theme_save_ok(exchange_count: int, trigger: str, response: dict, palace_count: str, wing: str = "") -> str:
-    """Build the success themed message for a Stop-hook save.
+    """Build the themed-chain message for a Stop-hook save.
 
     Renders the full chain a human-readable walk takes through the palace
     to reach the drawer that was just filed:
 
-        palace → wing:<project> → room:sessions → drawer:…<short-id>
+        ◆ Saved — palace → wing:<project> → room:sessions → drawer:…<short-id>
 
     Per the room taxonomy spec, the wing is the *project*, not the agent.
-    The agent identity lives in drawer metadata. Room remains ``diary``
-    today because ``tool_diary_write`` hardcodes it; post-pgvector
-    migration this becomes room=``sessions`` per the canonical 7-room
-    list. An upstream room-parameter feature request will follow once
-    the taxonomy has settled in our own pgvector schema.
+    The agent identity lives in drawer metadata.
+
+    mempalace#86: when the response carries warnings (non-canonical room,
+    deprecated topic, …) or errors (HNSW rebuild rejected the write, …),
+    the leading glyph + verb reflect the actual outcome and an indented
+    secondary line surfaces the message text. Older mempalace versions
+    don't emit those fields → falls back to the original "memory woven"
+    phrasing.
 
     Topic surfaces as a tag after the chain — present but not part of
     the path. Closets (the index layer) are auto-built by
     ``mempalace mine`` and aren't addressable from a diary write.
     """
-    inner = {}
-    try:
-        content = response.get("result", {}).get("content", []) if isinstance(response, dict) else []
-        if content and isinstance(content[0], dict):
-            inner = json.loads(content[0].get("text", "{}"))
-    except Exception:
-        inner = {}
+    inner = _extract_inner(response)
+    warnings, errors = _split_outcome(inner)
 
     topic = inner.get("topic", "") or ""
     timestamp = inner.get("timestamp", "") or ""
     drawer_label = _drawer_label(topic, timestamp)
 
     display = _display_wing(wing) if wing else _display_wing(inner.get("agent", ""))
-    if display and display != "?":
-        chain = f"palace → wing:{display} → room:sessions → drawer:{drawer_label}"
-        head = f"✦ {chain}"
+    chain = (
+        f"palace → wing:{display} → room:sessions → drawer:{drawer_label}"
+        if display and display != "?"
+        else ""
+    )
+
+    if errors:
+        glyph_verb = "✕ Save FAILED"
+        head = f"{glyph_verb} — {chain}" if chain else f"{glyph_verb}"
+        notes = _format_outcome_notes(errors)
+    elif warnings:
+        glyph_verb = (
+            "⚠ Saved with warning" if len(warnings) == 1 else "⚠ Saved with warnings"
+        )
+        head = f"{glyph_verb} — {chain}" if chain else f"{glyph_verb}"
+        notes = _format_outcome_notes(warnings)
     else:
-        head = "✦ Memory woven into the palace"
+        # Legacy phrasing for the clean path — preserves the existing
+        # voice operators are used to.
+        head = f"✦ {chain}" if chain else "✦ Memory woven into the palace"
+        notes = ""
 
     tail_bits = [f"exchange {exchange_count}", f"trigger={trigger}"]
     if palace_count:
         tail_bits.append(f"palace now holds {palace_count}")
-    return f"{head}  —  " + ", ".join(tail_bits)
+    return f"{head}  —  " + ", ".join(tail_bits) + notes
 
 
 def _theme_save_fail(exchange_count: int, trigger: str, failure: dict) -> str:
-    """Build the failure themed message for a Stop-hook save."""
-    err = (failure or {}).get("error", "unknown error")
-    return (
-        f"✘ Memory save failed at exchange {exchange_count} "
-        f"(trigger={trigger}) — {err}"
+    """Build the failure themed message for a Stop-hook save.
+
+    mempalace#86: when the response carries an ``errors`` list (e.g.
+    {"errors": ["HNSW rebuilding, write rejected"]}), surface the messages
+    on an indented secondary line. Falls back to the historical ``error``
+    string for transport-level failures (HTTP 401, network/transport, …).
+    """
+    failure = failure or {}
+    errors = failure.get("errors")
+    if not isinstance(errors, list):
+        errors = []
+    head = (
+        f"✕ Memory save failed at exchange {exchange_count} (trigger={trigger})"
     )
+    if errors:
+        return head + _format_outcome_notes([str(e) for e in errors])
+    err = failure.get("error", "unknown error")
+    return f"{head} — {err}"
 
 
 def _theme_mine(mine_dir: str, ok: bool, failure: dict, palace_count: str) -> str:
@@ -693,23 +771,31 @@ def _theme_precompact_save(wing: str, response: dict, palace_count: str) -> str:
 
     Distinct from _theme_save_ok so the operator sees this is a boundary
     save (not a periodic checkpoint). Same chain shape, different sigil.
+
+    mempalace#86: warnings / errors from the underlying write surface on an
+    indented second line, identical to _theme_save_ok's treatment.
     """
-    inner = {}
-    try:
-        content = response.get("result", {}).get("content", []) if isinstance(response, dict) else []
-        if content and isinstance(content[0], dict):
-            inner = json.loads(content[0].get("text", "{}"))
-    except Exception:
-        inner = {}
+    inner = _extract_inner(response)
+    warnings, errors = _split_outcome(inner)
     topic = inner.get("topic", "precompact") or "precompact"
     timestamp = inner.get("timestamp", "") or ""
     drawer_label = _drawer_label(topic, timestamp)
     display = _display_wing(wing)
     chain = f"palace → wing:{display} → room:sessions → drawer:{drawer_label}"
-    msg = f"◆ Pre-compact boundary save — {chain}"
+
+    if errors:
+        head = f"✕ Pre-compact save FAILED — {chain}"
+        notes = _format_outcome_notes(errors)
+    elif warnings:
+        head = f"⚠ Pre-compact boundary save (with warning) — {chain}"
+        notes = _format_outcome_notes(warnings)
+    else:
+        head = f"◆ Pre-compact boundary save — {chain}"
+        notes = ""
+
     if palace_count:
-        msg += f", palace now holds {palace_count}"
-    return msg
+        head += f", palace now holds {palace_count}"
+    return head + notes
 
 
 def _desktop_notify(title: str, body: str) -> None:
