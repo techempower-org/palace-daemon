@@ -2,6 +2,43 @@
 
 ## [Unreleased]
 
+### Added — 2026-05-15 — *woven warnings/errors pipeline (mempalace#86 daemon side)*
+
+Propagates the new `warnings: list[str]` / `errors: list[str]` fields that
+mempalace#86 introduces on drawer-write responses through the daemon's
+HTTP surface, and surfaces them inline in the themed `systemMessage` line
+that the hook already emits.
+
+- `messages.ensure_warnings_fields(payload)` — shape-normalizer used by
+  `/memory` and `/silent-save` to guarantee `warnings` and `errors`
+  arrays are present on every write response, even when paired with an
+  older mempalace that doesn't emit them. Graceful degradation: no
+  crash, just empty lists.
+- `messages.save_ok(count, themes, warnings, errors)` — leading glyph now
+  reflects the actual outcome: `✦` clean / `⚠` warning / `✕` failed.
+  Warning and error texts render on an indented secondary line so they
+  read naturally inside the existing chain output.
+- `clients/hook.py` — `_theme_save_ok`, `_theme_save_fail`, and
+  `_theme_precompact_save` all parse the new fields out of the response
+  and render the same `glyph + chain + indented-note` shape. Helper
+  functions `_extract_inner` and `_split_outcome` factor the parsing so
+  the JSON-RPC envelope and the already-unwrapped `/memory` shape both
+  feed the same renderer.
+- Tests at [`tests/test_warnings_pipeline.py`](tests/test_warnings_pipeline.py)
+  cover the normalizer, the themed `save_ok` body, and the hook renderers
+  for each of clean / warn / error.
+
+Visible outcome: when a Stop-hook write hits a non-canonical room (or
+HNSW rebuild rejects the write, or any other warning condition mempalace
+chooses to surface), the user sees:
+
+```
+⚠ Saved with warning — palace → wing:X → room:sessions → drawer:abc@08:48
+    room 'diary' is not canonical (canonical: sessions). accepted as-is.
+```
+
+instead of the previous silent-failure-then-discover-it-days-later pattern.
+
 ### Fixed — 2026-05-15 — *`/graph` wing counts stale after postgres cutover*
 
 `/graph` was reporting wing/room drawer counts from the legacy
