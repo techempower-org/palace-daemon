@@ -204,9 +204,9 @@ For MCP-only tools: bootstrap writes only the mcpServers block.
 ## Verification
 
 ### Hook fix
-1. Start daemon: `systemctl --user start palace-daemon`
+1. Start daemon: `sudo systemctl start palace-daemon`
 2. Trigger stop hook (hit exchange multiple of 15); confirm approval block appears with mine dir
-3. Approve: confirm `journalctl --user -u palace-daemon` shows POST /mine; no subprocess spawned
+3. Approve: confirm `sudo journalctl -u palace-daemon` shows POST /mine; no subprocess spawned
 4. Deny: no mine process, conversation continues
 5. Stop daemon: hook fires, passes through silently
 

@@ -4,7 +4,18 @@
 # Assumes:
 #   - You're committed and want to push HEAD to origin/main.
 #   - The deploy host has the repo synced (e.g., via Syncthing).
-#   - palace-daemon is a systemd --user service named "palace-daemon".
+#   - palace-daemon is a **systemd system** service named "palace-daemon"
+#     (unit at /etc/systemd/system/palace-daemon.service, restarted via
+#     `sudo systemctl restart palace-daemon`). User-level units are NOT
+#     used and must not be created. A user unit alongside the system
+#     unit will cause both to `ExecStartPre=/usr/bin/fuser -k 8085/tcp`
+#     each other in a kill cascade (restart counter ran to 97 before
+#     the duplicate user unit was deleted, 2026-05-16). See
+#     palace-daemon/CLAUDE.md "Service unit" section.
+#   - The daemon venv lives at ~/.local/share/palace-daemon/venv/
+#     and is preferentially managed with uv (`uv pip install --python
+#     <venv-python> ...`). Stdlib venv usage is legacy. Either path
+#     works for installs since the venv's pip works.
 #
 # Usage:
 #   scripts/deploy.sh                       # default host: disks
@@ -53,7 +64,9 @@ else
 fi
 
 step "3/5  restart palace-daemon on $HOST"
-ssh "$HOST" "systemctl --user restart palace-daemon" || fail "restart failed"
+# System service, not user service. sudo without password requires passwordless
+# sudo on the target (jp has this on the homelab hosts per CLAUDE.md).
+ssh "$HOST" "sudo systemctl restart palace-daemon" || fail "restart failed"
 ok "restart issued"
 
 step "4/5  wait for daemon health"
