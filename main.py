@@ -1222,6 +1222,10 @@ async def search_age_fused(request: Request, x_api_key: str | None = Header(defa
 
     if limit < 1 or limit > 200:
         raise HTTPException(status_code=400, detail="'limit' must be 1..200")
+    if graph_top_k < 1 or graph_top_k > 1000:
+        raise HTTPException(status_code=400, detail="'graph_top_k' must be 1..1000")
+    if fusion_k < 1 or fusion_k > 1000:
+        raise HTTPException(status_code=400, detail="'fusion_k' must be 1..1000")
 
     # Step 1: Vector retrieval via mempalace_search (existing MCP tool).
     vec_result = await _call({
@@ -1246,15 +1250,21 @@ async def search_age_fused(request: Request, x_api_key: str | None = Header(defa
             }}
         return {"results": vec_hits[:limit]}
 
+    # Initialize *before* the AGE lookup so the trace block can read it
+    # even when the lookup raises before extraction happens.
+    query_entities: list = []
     graph_hits_by_drawer: dict[str, float] = {}
-    try:
+
+    def _age_lookup() -> tuple[list, dict[str, float]]:
+        """Sync AGE entity-overlap lookup. Called via ``asyncio.to_thread``
+        so the daemon's event loop isn't blocked on Postgres I/O."""
         from mempalace.knowledge_graph_age import KnowledgeGraphAGE
         kg = KnowledgeGraphAGE(dsn)
+        hits: dict[str, float] = {}
+        extractor = _load_age_extractor()
+        qents = extractor(query) if extractor else []
         try:
-            # Extract entities from the query, look up drawers via MATCH.
-            extractor = _load_age_extractor()
-            query_entities = extractor(query) if extractor else []
-            for qe in query_entities:
+            for qe in qents:
                 try:
                     rows = kg._run_cypher(
                         """
@@ -1270,14 +1280,15 @@ async def search_age_fused(request: Request, x_api_key: str | None = Header(defa
                     drawer_id = kg._unwrap_agtype(r[0])
                     cnt = kg._unwrap_agtype(r[1]) or 1
                     if drawer_id:
-                        graph_hits_by_drawer[str(drawer_id)] = (
-                            graph_hits_by_drawer.get(str(drawer_id), 0) + int(cnt)
-                        )
+                        hits[str(drawer_id)] = hits.get(str(drawer_id), 0) + int(cnt)
         finally:
             kg.close()
+        return qents, hits
+
+    try:
+        query_entities, graph_hits_by_drawer = await asyncio.to_thread(_age_lookup)
     except Exception as e:
         # AGE not available — log + fall through.
-        import logging
         logging.warning("/search/age-fused: AGE lookup failed: %s — falling back to vector-only", e)
 
     # Step 3: RRF fusion. Vector rank by position; graph rank by overlap count.
@@ -1322,7 +1333,7 @@ async def search_age_fused(request: Request, x_api_key: str | None = Header(defa
             "n_vector": len(vec_hits),
             "n_graph": len(graph_hits_by_drawer),
             "n_after_fusion": len(out_hits),
-            "query_entities": [e.name for e in (query_entities if 'query_entities' in dir() else [])],
+            "query_entities": [e.name for e in query_entities],
         }
     return response
 
