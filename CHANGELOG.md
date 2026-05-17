@@ -2,6 +2,43 @@
 
 ## [Unreleased]
 
+### Added — 2026-05-17 — *`/search/age-fused` endpoint: vector ⊕ AGE graph fusion*
+
+Phase 5 of the multi-project AGE-integration plan (Phases 1-4 + 6 land on
+`techempower-org/mempalace:feat/age-kg-parity`). Adds a new POST endpoint
+that combines mempalace's vector retrieval with AGE entity-overlap on the
+write-through knowledge graph populated by `mempalace.kg_writethrough` +
+`mempalace.backfill_age`. Returns RRF-merged results so callers that want
+graph-aware retrieval don't have to fuse client-side.
+
+- `POST /search/age-fused` — body: `{query, wing?, room?, limit, graph_top_k,
+  fusion_k, include_trace}`. Pipeline:
+  1. Vector retrieval via existing `mempalace_search` MCP path (over-fetches
+     so RRF has more candidates).
+  2. Query entity extraction — tries `sme.extractors.regex.extract` first,
+     falls back to `mempalace.kg_writethrough._builtin_regex_extractor`.
+  3. AGE lookup — `MATCH (d:Drawer)-[r:MENTIONS]->(e:Entity {name})` for
+     each query entity; sum `r.count` per drawer.
+  4. RRF fusion — combines vector + graph ranks via `1 / (k + rank)`.
+  5. Returns hits with `matched_via ∈ {vector, graph, both}` and `rrf_score`.
+- Graceful degradation: missing `MEMPALACE_POSTGRES_DSN` → vector-only with
+  warning trace. Empty AGE graph / no extractable entities → vector-only.
+  Per-entity Cypher errors → skip that entity, continue.
+- `_load_age_extractor()` — cached extractor loader; SME's regex extractor
+  preferred for richer two-pass capture, mempalace's builtin as fallback.
+
+Cited from `techempower-org/multipass-structural-memory-eval@28ae3f1`: the
+AGE write-through spike on n=200 git-derived probes showed graph-only beats
+vector by +5pp R@5 and fusion adds another +4pp on top (file-level vectors).
+This endpoint lands that retrieval pattern in production code path, gated
+behind the new endpoint so vector-only behavior on the default `/search`
+is preserved.
+
+Caveats:
+- 503 when `MEMPALACE_BACKEND` is not `postgres`.
+- Graph-only hits return a minimal stub (`document=None`); callers fetch
+  full drawers via `/memory/{id}` if they need the body.
+
 ### Added — 2026-05-15 — *woven warnings/errors pipeline (mempalace#86 daemon side)*
 
 Propagates the new `warnings: list[str]` / `errors: list[str]` fields that
