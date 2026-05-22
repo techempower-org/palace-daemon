@@ -15,6 +15,7 @@ Roadmap:
 """
 import argparse
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -326,7 +327,15 @@ _READ_TOOLS = {
 
 def _check_auth(x_api_key: str | None):
     key = os.getenv("PALACE_API_KEY", "")
-    if key and x_api_key != key:
+    if not key:
+        return
+    # hmac.compare_digest requires both arguments to be the same type and
+    # non-None. Treat a missing header as an empty string so we always run
+    # the constant-time path — short-circuiting on ``x_api_key is None``
+    # would reintroduce a timing distinction between "no header" and
+    # "wrong header".
+    provided = x_api_key or ""
+    if not hmac.compare_digest(provided, key):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
@@ -1602,9 +1611,13 @@ async def cypher_query(request: Request, x_api_key: str | None = Header(default=
     source (just like ``KnowledgeGraphAGE._run_cypher`` does) so callers
     don't have to declare column types.
 
-    Read-only by convention — no transaction; AGE writes via this path
-    work but aren't intended (use ``mempalace_kg_*`` MCP tools for writes).
-    Returns 503 when the daemon isn't on postgres backend.
+    Enforced read-only: the underlying psycopg2 transaction is marked
+    ``READ ONLY`` before the Cypher executes, so AGE write verbs
+    (``CREATE``, ``MERGE``, ``SET``, ``DELETE``, ``DETACH DELETE``,
+    ``REMOVE``) fail at the PostgreSQL layer with SQLSTATE 25006 and the
+    endpoint returns 403. Callers that need to mutate the graph must go
+    through the ``mempalace_kg_*`` MCP tools. Returns 503 when the daemon
+    isn't on postgres backend.
     """
     _check_auth(x_api_key)
     if _mp._config.backend != "postgres":
@@ -1623,14 +1636,13 @@ async def cypher_query(request: Request, x_api_key: str | None = Header(default=
 
     def _run():
         import psycopg2
+        import psycopg2.errors
 
         from mempalace.knowledge_graph_age import KnowledgeGraphAGE
 
         # Reuse mempalace's AGE helper for RETURN-alias parsing + agtype unwrap.
         # Constructing a fresh KnowledgeGraphAGE bootstraps the graph if absent,
         # which is harmless for a query (the MERGE on absent graphs creates it).
-        # If we wanted strict read-only, swap to a thin psycopg2 connection +
-        # call _run_cypher manually with the parsed aliases.
         dsn = _mp._config.postgres_dsn
         if not dsn:
             return None, "MEMPALACE_POSTGRES_DSN not configured"
@@ -1639,10 +1651,23 @@ async def cypher_query(request: Request, x_api_key: str | None = Header(default=
         except psycopg2.Error as e:
             return None, f"postgres connect failed: {e}"
         try:
-            # _run_cypher does inlined-literal substitution; for clients that
-            # want parameterized queries we'd need a separate API. For now
-            # callers can build the values into the Cypher source themselves.
-            rows = kg._run_cypher(cypher, params={}, fetch=True)
+            # Enforce read-only at the transaction layer. AGE writes go
+            # through ``SELECT * FROM cypher(...)`` so the daemon can't
+            # tell from the SQL surface whether the embedded Cypher
+            # mutates — the read-only transaction is what makes the
+            # guarantee real. ``SET TRANSACTION READ ONLY`` must run
+            # before any other statement in the current transaction;
+            # KnowledgeGraphAGE.__init__ commits its bootstrap transaction,
+            # leaving a clean state. Rollback any stale transaction as a
+            # safety belt before starting the read-only one.
+            kg._conn.rollback()
+            with kg._conn.cursor() as cur:
+                cur.execute("SET TRANSACTION READ ONLY")
+            try:
+                rows = kg._run_cypher(cypher, params={}, fetch=True)
+            except psycopg2.errors.ReadOnlySqlTransaction as e:
+                kg._conn.rollback()
+                return None, ("read-only", str(e))
             aliases = kg._extract_return_aliases(cypher)
             unwrap = kg._unwrap_agtype
             shaped = []
@@ -1658,6 +1683,15 @@ async def cypher_query(request: Request, x_api_key: str | None = Header(default=
     loop = asyncio.get_running_loop()
     rows, err = await loop.run_in_executor(None, _run)
     if err is not None:
+        if isinstance(err, tuple) and err and err[0] == "read-only":
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "/cypher is read-only; write verbs (CREATE/MERGE/SET/DELETE/"
+                    "DETACH DELETE/REMOVE) are rejected. Use mempalace_kg_* MCP "
+                    f"tools for graph mutations. PostgreSQL: {err[1]}"
+                ),
+            )
         raise HTTPException(status_code=500, detail=err)
     return {"graph": graph, "rows": rows, "count": len(rows)}
 
