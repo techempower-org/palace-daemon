@@ -1484,9 +1484,10 @@ def _normalize_wing_slug(s: str) -> str:
     return s or "unknown"
 
 
-# Cached set of canonical room names. Refreshed on cache miss or via
-# explicit /admin/refresh-rooms (TODO). For now, cache for the daemon's
-# lifetime — restart picks up changes to mempalace_canonical_rooms.
+# Cached set of canonical room names. Populated lazily on first /memory
+# write; invalidate via POST /admin/refresh-rooms after registering a new
+# canonical room (e.g. `mempalace rooms add`). Otherwise cached for the
+# daemon's lifetime.
 _canonical_rooms_cache: set[str] | None = None
 
 
@@ -1568,12 +1569,31 @@ async def store_memory(request: Request, x_api_key: str | None = Header(default=
 
 @app.post("/admin/refresh-rooms")
 async def refresh_rooms(x_api_key: str | None = Header(default=None)):
-    """Invalidate the canonical rooms cache so the next /memory call
-    re-reads mempalace_canonical_rooms. Use after `mempalace rooms add`."""
+    """Clear the canonical-rooms cache and rebuild it from the database.
+
+    The /memory write boundary validates ``room`` against a cached set
+    pulled from ``mempalace_canonical_rooms`` (postgres). The cache lives
+    for the daemon's lifetime, so a freshly registered room (e.g. via
+    ``mempalace rooms add``) is invisible until the daemon restarts —
+    unless this endpoint is called.
+
+    Behavior:
+        * Drops ``_canonical_rooms_cache``.
+        * Eagerly repopulates it by calling ``_canonical_rooms()``, which
+          re-reads the postgres lookup table (or falls back to the spec's
+          7 defaults when the table is absent or the backend isn't
+          postgres).
+        * Returns the new room list plus its count.
+
+    Auth: standard ``X-API-Key`` (same ``PALACE_API_KEY`` as every other
+    endpoint — palace-daemon has a single API-key model rather than a
+    separate admin token).
+    """
     _check_auth(x_api_key)
     global _canonical_rooms_cache
     _canonical_rooms_cache = None
-    return {"refreshed": True, "rooms": sorted(_canonical_rooms())}
+    rooms = sorted(_canonical_rooms())
+    return {"refreshed": True, "rooms": rooms, "count": len(rooms)}
 
 
 @app.get("/stats")

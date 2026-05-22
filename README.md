@@ -262,7 +262,7 @@ This installs `mempal-fast.py` as the Stop/PreCompact hook handler and `palace-m
 | `/memory` | POST | Store a drawer with taxonomy enforcement (wing normalization + canonical room validation) |
 | `/memory/{id}` | DELETE | Drop a drawer — wraps `mempalace_delete_drawer` |
 | `/memory/{id}` | PATCH | Update drawer `content` / `wing` / `room` (all optional in body) — wraps `mempalace_update_drawer` |
-| `/admin/refresh-rooms` | POST | Invalidate the canonical rooms cache after `mempalace rooms add` |
+| `/admin/refresh-rooms` | POST | Clear + eagerly rebuild the canonical rooms cache (after `mempalace rooms add`); returns `{refreshed, rooms, count}` |
 | `/mine` | POST | Bulk import a directory (validated absolute path only) |
 | `/watch` | GET | List directories the file-watcher is currently monitoring (configured via `PALACE_WATCH_DIRS`) |
 | `/flush` | POST | Force checkpoint of pending writes |
