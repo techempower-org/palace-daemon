@@ -10,13 +10,53 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCHES_DIR="$SCRIPT_DIR/../patches"
-VENV_SITE="$(/home/radu/.local/share/pipx/venvs/mempalace/bin/python \
-    -c 'import site; print(site.getsitepackages()[0])')"
+
+# Locate the python interpreter of the mempalace install. Try in order:
+#   1. $MEMPALACE_PYTHON override (escape hatch for non-standard layouts)
+#   2. pipx venv: $(pipx environment --value PIPX_LOCAL_VENVS)/mempalace/bin/python
+#   3. the `mempalace` binary on PATH — derive its venv via ../bin/python
+# Patches target the installed package's source tree, so we need *that*
+# venv's site-packages, not whatever interpreter happens to run this script.
+find_mempalace_python() {
+    if [[ -n "${MEMPALACE_PYTHON:-}" && -x "$MEMPALACE_PYTHON" ]]; then
+        echo "$MEMPALACE_PYTHON"
+        return 0
+    fi
+    if command -v pipx >/dev/null 2>&1; then
+        local pipx_venvs
+        pipx_venvs="$(pipx environment --value PIPX_LOCAL_VENVS 2>/dev/null || true)"
+        if [[ -n "$pipx_venvs" && -x "$pipx_venvs/mempalace/bin/python" ]]; then
+            echo "$pipx_venvs/mempalace/bin/python"
+            return 0
+        fi
+    fi
+    local mempalace_bin
+    mempalace_bin="$(command -v mempalace 2>/dev/null || true)"
+    if [[ -n "$mempalace_bin" ]]; then
+        local resolved venv_python
+        resolved="$(readlink -f "$mempalace_bin")"
+        venv_python="$(dirname "$resolved")/python"
+        if [[ -x "$venv_python" ]]; then
+            echo "$venv_python"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+if ! MEMPALACE_PY="$(find_mempalace_python)"; then
+    echo "error: could not locate the mempalace install's python interpreter." >&2
+    echo "  tried: \$MEMPALACE_PYTHON, pipx venvs, and 'mempalace' on PATH." >&2
+    echo "  set MEMPALACE_PYTHON=/path/to/venv/bin/python and re-run." >&2
+    exit 1
+fi
+
+VENV_SITE="$("$MEMPALACE_PY" -c 'import site; print(site.getsitepackages()[0])')"
 
 DRY_RUN=0
 [[ "${1:-}" == "--check" ]] && DRY_RUN=1
 
-MEMPALACE_VERSION="$(/home/radu/.local/share/pipx/venvs/mempalace/bin/python \
+MEMPALACE_VERSION="$("$MEMPALACE_PY" \
     -c 'import mempalace; print(mempalace.__version__)' 2>/dev/null || echo unknown)"
 
 echo "mempalace version : $MEMPALACE_VERSION"

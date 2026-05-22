@@ -57,9 +57,12 @@ for i in $(seq 1 "$WAIT_SECS"); do
   fi
 done
 
-# Probe /search for the "vector ranked 0" warning
+# Probe /search for the "vector ranked 0" warning.
+# /search only accepts q, limit, wing, room (main.py:999-1006) — a previous
+# revision passed kind=content but FastAPI silently dropped it. Drop the
+# unsupported param so the URL matches what the endpoint actually parses.
 PROBE=$(curl -sS --max-time 10 "${HEADERS[@]}" \
-  "http://${HOST}:${PORT}/search?q=auto-repair-probe&limit=1&kind=content" 2>/dev/null)
+  "http://${HOST}:${PORT}/search?q=auto-repair-probe&limit=1" 2>/dev/null)
 if [ -z "$PROBE" ]; then
   log "search probe returned nothing — bailing"
   exit 0
