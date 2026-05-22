@@ -2339,6 +2339,19 @@ async def silent_save(request: Request, x_api_key: str | None = Header(default=N
     if not body.get("entry"):
         raise HTTPException(status_code=400, detail="'entry' is required")
 
+    # mempalace#86 surfaces wing/room validation as warnings on the write
+    # response, but a missing wing reaches tool_diary_write as "" and may
+    # not generate a warning at all depending on mempalace version. Detect
+    # it here so the systemMessage always flags the broken default.
+    # Don't reject — existing callers may rely on the empty-default — just
+    # warn so it shows up in the themed chain.
+    daemon_warnings: list[str] = []
+    raw_wing = body.get("wing")
+    if raw_wing is None or (isinstance(raw_wing, str) and not raw_wing.strip()):
+        daemon_warnings.append(
+            "wing is empty — diary entry will have no wing association"
+        )
+
     themes = body.get("themes") or []
     raw_msg_count = body.get("message_count")
     if raw_msg_count is None:
@@ -2367,6 +2380,7 @@ async def silent_save(request: Request, x_api_key: str | None = Header(default=N
                 "count": msg_count,
                 "themes": themes,
                 "queued": True,
+                "warnings": daemon_warnings,
                 "systemMessage": messages.save_queued(msg_count, themes),
             })
         result = await _do_silent_save_write(body)
@@ -2377,6 +2391,9 @@ async def silent_save(request: Request, x_api_key: str | None = Header(default=N
     warnings = result.get("warnings") if isinstance(result, dict) else None
     if not isinstance(warnings, list):
         warnings = []
+    # Prepend daemon-side warnings (empty wing, etc.) so they surface
+    # even when mempalace itself is silent about the issue.
+    warnings = list(daemon_warnings) + list(warnings)
     errors = result.get("errors") if isinstance(result, dict) else None
     if not isinstance(errors, list):
         errors = []
