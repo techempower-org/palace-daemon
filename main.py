@@ -2347,7 +2347,7 @@ async def silent_save(request: Request, x_api_key: str | None = Header(default=N
     # warn so it shows up in the themed chain.
     daemon_warnings: list[str] = []
     raw_wing = body.get("wing")
-    if raw_wing is None or (isinstance(raw_wing, str) and not raw_wing.strip()):
+    if not raw_wing or (isinstance(raw_wing, str) and not raw_wing.strip()):
         daemon_warnings.append(
             "wing is empty — diary entry will have no wing association"
         )

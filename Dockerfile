@@ -33,9 +33,11 @@ ENV PALACE_PATH=/palace \
     PALACE_HOST=0.0.0.0 \
     PALACE_PORT=8085
 
-# /app holds source and is the palace user's HOME (where the lock file
-# lives under ~/.cache/palace-daemon). Must be writable by palace.
-RUN chown -R palace:palace /app
+# Source stays root-owned (read-only to the app process). Only create
+# the writable directories the daemon actually needs at runtime:
+# ~/.cache/palace-daemon/ for the lock file.
+RUN mkdir -p /app/.cache/palace-daemon \
+    && chown -R palace:palace /app/.cache
 
 EXPOSE 8085
 
