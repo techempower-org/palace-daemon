@@ -1636,6 +1636,7 @@ async def cypher_query(request: Request, x_api_key: str | None = Header(default=
 
     def _run():
         import psycopg2
+        import psycopg2.errors
 
         from mempalace.knowledge_graph_age import KnowledgeGraphAGE
 
@@ -1656,8 +1657,10 @@ async def cypher_query(request: Request, x_api_key: str | None = Header(default=
             # mutates — the read-only transaction is what makes the
             # guarantee real. ``SET TRANSACTION READ ONLY`` must run
             # before any other statement in the current transaction;
-            # KnowledgeGraphAGE opens its connection autocommit=False so
-            # no transaction has started at this point.
+            # KnowledgeGraphAGE.__init__ commits its bootstrap transaction,
+            # leaving a clean state. Rollback any stale transaction as a
+            # safety belt before starting the read-only one.
+            kg._conn.rollback()
             with kg._conn.cursor() as cur:
                 cur.execute("SET TRANSACTION READ ONLY")
             try:
