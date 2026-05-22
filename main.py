@@ -1169,6 +1169,195 @@ async def search_keyword(request: Request, x_api_key: str | None = Header(defaul
     return result
 
 
+@app.post("/search/age-fused")
+async def search_age_fused(request: Request, x_api_key: str | None = Header(default=None)):
+    """Vector + AGE graph fusion search (Phase 5 of the AGE-integration work).
+
+    Combines mempalace's vector retrieval with AGE entity-overlap on the
+    write-through graph populated by kg_writethrough.py + backfill_age.py.
+    Returns RRF-merged results so callers that want graph-aware retrieval
+    don't have to fuse client-side.
+
+    Body::
+
+        {
+          "query":         "pgvector advisory lock race",
+          "wing":          "memorypalace",   // optional
+          "room":          "problems",       // optional
+          "limit":         10,
+          "graph_top_k":   50,                // graph candidates to fetch
+          "fusion_k":      60,                // RRF k constant
+          "include_trace": false              // attach per-source counts
+        }
+
+    Returns the same hit shape as /search, plus an optional ``trace``
+    field with {n_vector, n_graph, n_after_fusion}. Each hit has an
+    extra ``matched_via`` key (``"vector"``, ``"graph"``, or ``"both"``).
+
+    Requires:
+      - MEMPALACE_BACKEND=postgres (AGE lives in postgres)
+      - The kg_writethrough hook has populated MENTIONS edges (either via
+        write-through on writes or via mempalace.backfill_age)
+
+    Empty graph or extractor producing zero entities falls through to
+    vector-only — the endpoint never errors on a missing AGE state.
+    """
+    _check_auth(x_api_key)
+    if _mp._config.backend != "postgres":
+        raise HTTPException(
+            status_code=503,
+            detail="/search/age-fused requires MEMPALACE_BACKEND=postgres; daemon is on chroma.",
+        )
+
+    body = await request.json()
+    query = (body.get("query") or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="'query' is required and must be non-empty")
+    wing = body.get("wing") or None
+    room = body.get("room") or None
+    limit = int(body.get("limit") or 10)
+    graph_top_k = int(body.get("graph_top_k") or 50)
+    fusion_k = int(body.get("fusion_k") or 60)
+    include_trace = bool(body.get("include_trace") or False)
+
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=400, detail="'limit' must be 1..200")
+    if graph_top_k < 1 or graph_top_k > 1000:
+        raise HTTPException(status_code=400, detail="'graph_top_k' must be 1..1000")
+    if fusion_k < 1 or fusion_k > 1000:
+        raise HTTPException(status_code=400, detail="'fusion_k' must be 1..1000")
+
+    # Step 1: Vector retrieval via mempalace_search (existing MCP tool).
+    vec_result = await _call({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "tools/call",
+        "params": {"name": "mempalace_search", "arguments": _search_args(
+            query,
+            # Over-fetch so RRF has more candidates to work with.
+            max(graph_top_k, limit * 3),
+        ) | ({"wing": wing} if wing else {}) | ({"room": room} if room else {})},
+    })
+    vec_hits = (_unwrap(vec_result) or {}).get("results") or []
+
+    # Step 2: AGE graph entity-overlap.
+    dsn = os.environ.get("MEMPALACE_POSTGRES_DSN")
+    if not dsn:
+        # No AGE access — fall through to vector-only with a warning trace.
+        if include_trace:
+            return {"results": vec_hits[:limit], "trace": {
+                "n_vector": len(vec_hits), "n_graph": 0, "n_after_fusion": min(limit, len(vec_hits)),
+                "warning": "MEMPALACE_POSTGRES_DSN not set; age-fused falls back to vector-only",
+            }}
+        return {"results": vec_hits[:limit]}
+
+    # Initialize *before* the AGE lookup so the trace block can read it
+    # even when the lookup raises before extraction happens.
+    query_entities: list = []
+    graph_hits_by_drawer: dict[str, float] = {}
+
+    def _age_lookup() -> tuple[list, dict[str, float]]:
+        """Sync AGE entity-overlap lookup. Called via ``asyncio.to_thread``
+        so the daemon's event loop isn't blocked on Postgres I/O."""
+        from mempalace.knowledge_graph_age import KnowledgeGraphAGE
+        kg = KnowledgeGraphAGE(dsn)
+        hits: dict[str, float] = {}
+        extractor = _load_age_extractor()
+        qents = extractor(query) if extractor else []
+        try:
+            for qe in qents:
+                try:
+                    rows = kg._run_cypher(
+                        """
+                        MATCH (d:Drawer)-[r:MENTIONS]->(e:Entity {name: $ename})
+                        RETURN d.id AS id, r.count AS count
+                        """,
+                        {"ename": qe.name},
+                        fetch=True,
+                    )
+                except Exception:
+                    continue
+                for r in rows:
+                    drawer_id = kg._unwrap_agtype(r[0])
+                    cnt = kg._unwrap_agtype(r[1]) or 1
+                    if drawer_id:
+                        hits[str(drawer_id)] = hits.get(str(drawer_id), 0) + int(cnt)
+        finally:
+            kg.close()
+        return qents, hits
+
+    try:
+        query_entities, graph_hits_by_drawer = await asyncio.to_thread(_age_lookup)
+    except Exception as e:
+        # AGE not available — log + fall through.
+        logging.warning("/search/age-fused: AGE lookup failed: %s — falling back to vector-only", e)
+
+    # Step 3: RRF fusion. Vector rank by position; graph rank by overlap count.
+    vec_ranks = {hit.get("id"): i for i, hit in enumerate(vec_hits)}
+    graph_ranks = {did: i for i, did in enumerate(sorted(graph_hits_by_drawer, key=lambda d: -graph_hits_by_drawer[d])[:graph_top_k])}
+
+    union = set(vec_ranks) | set(graph_ranks)
+    fused_scores: dict[str, float] = {}
+    for did in union:
+        score = 0.0
+        if did in vec_ranks:
+            score += 1.0 / (fusion_k + vec_ranks[did])
+        if did in graph_ranks:
+            score += 1.0 / (fusion_k + graph_ranks[did])
+        fused_scores[did] = score
+
+    # Build the merged result list — preserve full hit metadata when
+    # vector saw the drawer; synth minimal metadata when graph-only.
+    vec_by_id = {hit.get("id"): hit for hit in vec_hits}
+    fused_order = sorted(fused_scores.items(), key=lambda kv: -kv[1])[:limit]
+    out_hits: list[dict] = []
+    for did, score in fused_order:
+        if did in vec_by_id:
+            hit = dict(vec_by_id[did])
+            hit["matched_via"] = "both" if did in graph_ranks else "vector"
+            hit["rrf_score"] = score
+        else:
+            # Graph-only drawer — minimal stub. Caller can fetch full
+            # drawer via /memory/{id} if needed.
+            hit = {
+                "id": did,
+                "document": None,
+                "matched_via": "graph",
+                "rrf_score": score,
+                "graph_mentions": graph_hits_by_drawer.get(did, 0),
+            }
+        out_hits.append(hit)
+
+    response = {"results": out_hits}
+    if include_trace:
+        response["trace"] = {
+            "n_vector": len(vec_hits),
+            "n_graph": len(graph_hits_by_drawer),
+            "n_after_fusion": len(out_hits),
+            "query_entities": [e.name for e in query_entities],
+        }
+    return response
+
+
+def _load_age_extractor():
+    """Lazy load the entity extractor for /search/age-fused.
+
+    Tries SME's regex extractor first; falls back to mempalace's builtin.
+    Cached on first call.
+    """
+    global _AGE_EXTRACTOR_CACHE
+    if "_AGE_EXTRACTOR_CACHE" in globals():
+        return _AGE_EXTRACTOR_CACHE
+    try:
+        from sme.extractors.regex import extract as ex  # type: ignore
+    except ImportError:
+        try:
+            from mempalace.kg_writethrough import _builtin_regex_extractor as ex  # type: ignore
+        except ImportError:
+            ex = None
+    _AGE_EXTRACTOR_CACHE = ex
+    return ex
+
+
 @app.get("/context")
 async def context(
     topic: str,
