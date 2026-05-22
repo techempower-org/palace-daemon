@@ -1,5 +1,16 @@
 # Recovery: ChromaDB segment quarantined with `dimensionality: None`
 
+> **Status — HISTORICAL / RETIRED (2026-05-22).** ChromaDB fixed the upstream
+> metadata-dict bug, and this fork's canonical palace migrated to
+> postgres + pgvector on 2026-05-14 (see `~/.mempalace/RETIRED`). This runbook
+> is preserved as a record of the recovery procedure that ran against the
+> production palace before the cutover; the in-tree canary
+> `tests/test_chromadb_metadata_recovery.py::test_corruption_reproduces_the_bug`
+> is now `@unittest.skip`-marked because chromadb no longer reproduces the
+> corruption pattern this document targets. Do not use these steps on a
+> live chromadb palace without first re-validating that the upstream bug
+> behavior matches what's described here.
+
 **Symptom** — On daemon startup (or any first-access of a chromadb collection),
 the integrity gate quarantines a segment dir with this log line:
 

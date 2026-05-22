@@ -58,7 +58,7 @@ These guide review priorities and PR decisions.
   with specific status codes — `400` for bad input, `401` for auth,
   `503` for backend-required-but-absent, `500` reserved for unexpected
   exceptions. Don't return error envelopes in 200 responses.
-- **Tests** live in `tests/` and run via the daemon's own venv (`.venv/`)
+- **Tests** live in `tests/` and run via the daemon's own venv (`venv/`)
   with `pytest`. Don't add tests that require a running daemon —
   use the in-process FastAPI TestClient (`from fastapi.testclient import
   TestClient`).

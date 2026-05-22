@@ -149,7 +149,7 @@ HNSW mtime gap 11166s on .../4697d280-... — Leaving in place.
 
 The upstream daemon focused on **stability** — semaphore-coordinated reads/writes, mine isolation, MCP-safe API key auth. JP's fork extended that into **production deployment patterns**:
 
-1. **Single-source-of-truth daemon for distributed Claude Code sessions.** Multiple Claude Code instances (different projects, different terminals, different machines) all routing through one daemon prevents the kind of concurrent-writer SQLite corruption that took down the canonical palace on 2026-04-24. The fork's daemon-strict mode (in [jphein/mempalace](https://github.com/jphein/mempalace)) plus this daemon's queue-and-drain plus `mempal-fast.py`'s no-import path together make that single-writer guarantee enforceable.
+1. **Single-source-of-truth daemon for distributed Claude Code sessions.** Multiple Claude Code instances (different projects, different terminals, different machines) all routing through one daemon prevents the kind of concurrent-writer SQLite corruption that took down the canonical palace on 2026-04-24. The fork's daemon-strict mode (in [techempower-org/mempalace](https://github.com/techempower-org/mempalace)) plus this daemon's queue-and-drain plus `mempal-fast.py`'s no-import path together make that single-writer guarantee enforceable.
 
 2. **Structural snapshots for evaluation frameworks.** When SME ([multipass-structural-memory-eval](https://github.com/M0nkeyFl0wer/multipass-structural-memory-eval)) needed a structural view of the palace for diagnostics, composing it serially over MCP timed out at 60-120s. The fork added `GET /graph` so an evaluator can pull wings, rooms, tunnels, KG entities, and KG triples in one HTTP roundtrip — sub-second on a 151K-drawer palace.
 
@@ -173,7 +173,7 @@ The architectural argument for why those pieces survive backend swaps (chroma �
 
 ### Requirements
 - Python 3.12+
-- mempalace ≥ 3.3.2 — the [fork](https://github.com/jphein/mempalace) is recommended if you want daemon-strict hook mode (single-writer enforcement) and the warnings/sqlite-fallback search path that aren't yet on `MemPalace/mempalace develop`. Stock mempalace works for everything else; the fork-only `migrate_checkpoints_to_recovery` lifespan call is `ImportError`-gated and degrades cleanly.
+- mempalace ≥ 3.3.2 — the [fork](https://github.com/techempower-org/mempalace) is recommended if you want daemon-strict hook mode (single-writer enforcement) and the warnings/sqlite-fallback search path that aren't yet on `MemPalace/mempalace develop`. Stock mempalace works for everything else; the fork-only `migrate_checkpoints_to_recovery` lifespan call is `ImportError`-gated and degrades cleanly.
 - For the local mempalace patch (`patches/mcp_server_get_collection.patch` — log + retry on `_get_collection` failure, in flight upstream as [#1286](https://github.com/MemPalace/mempalace/pull/1286)): re-apply with `scripts/apply_patches.sh` after each `pipx upgrade mempalace` until #1286 merges.
 
 ### Install
@@ -181,7 +181,7 @@ The architectural argument for why those pieces survive backend swaps (chroma �
 Uses [uv](https://github.com/astral-sh/uv) for venv + dependency install — faster than `pip` and doesn't require the `python3-venv` apt package (which isn't installed by default on Ubuntu 24.04).
 
 ```bash
-git clone https://github.com/jphein/palace-daemon.git
+git clone https://github.com/techempower-org/palace-daemon.git
 cd palace-daemon
 uv venv venv
 uv pip install --python venv/bin/python -r requirements.txt
@@ -234,8 +234,8 @@ Use `palace-mode install` to wire the [mempalace plugin](https://github.com/MemP
 ```bash
 export PALACE_DAEMON_URL=http://your-host:8085
 export PALACE_API_KEY=...
-~/Projects/palace-daemon/clients/palace-mode install
-~/Projects/palace-daemon/clients/palace-mode verify
+./clients/palace-mode install
+./clients/palace-mode verify
 ```
 
 This installs `mempal-fast.py` as the Stop/PreCompact hook handler and `palace-mcp-dispatch.sh` as the MCP server command in the plugin cache. Idempotent — safe to re-run after plugin updates.
@@ -246,17 +246,25 @@ This installs `mempal-fast.py` as the Stop/PreCompact hook handler and `palace-m
 |---|---|---|
 | `/health` | GET | Liveness + version |
 | `/search` | GET | Semantic search over `mempalace_drawers`; `limit=N`. (Stop-hook checkpoints live in `mempalace_session_recovery` — read via the `mempalace_session_recovery_read` MCP tool.) |
+| `/search/hybrid` | POST | Hybrid search — vector + BM25 + graph in one ranked set (`candidate_strategy="hybrid"`) |
+| `/search/keyword` | POST | BM25 keyword search over `mempalace_drawers.doc_tsv` with optional `wing`/`room` filters |
+| `/search/age-fused` | POST | Vector + AGE graph fusion search with RRF merging |
 | `/context` | GET | Same as `/search`, formatted for LLM prompts |
 | `/list` | GET | Query-free metadata browse — wraps `mempalace_list_drawers`. `wing=…&room=…&limit=N&offset=N`, all optional |
 | `/stats` | GET | Aggregate KG + graph + status counts |
 | `/graph` | GET | Single-shot structural snapshot (wings, rooms, tunnels, KG) — see [`docs/graph-endpoint.md`](docs/graph-endpoint.md) |
 | `/viz` | GET | Self-contained HTML status dashboard (D3 + Mermaid). Optional `?refresh=N`, `?key=…` |
+| `/cypher` | POST | Run a Cypher query against the AGE knowledge-graph; returns aliased rows (no SQL wrapper needed) |
+| `/embed` | POST | Embed a list of texts via the daemon's configured embedding function; returns vectors + dim + model |
 | `/repair` | POST | Coordinate repair (`mode=light\|scan\|prune\|rebuild`) |
 | `/repair/status` | GET | Current repair state + pending-writes queue depth |
 | `/silent-save` | POST | Stop-hook save path with queue-and-drain during rebuild |
+| `/memory` | POST | Store a drawer with taxonomy enforcement (wing normalization + canonical room validation) |
 | `/memory/{id}` | DELETE | Drop a drawer — wraps `mempalace_delete_drawer` |
 | `/memory/{id}` | PATCH | Update drawer `content` / `wing` / `room` (all optional in body) — wraps `mempalace_update_drawer` |
+| `/admin/refresh-rooms` | POST | Invalidate the canonical rooms cache after `mempalace rooms add` |
 | `/mine` | POST | Bulk import a directory (validated absolute path only) |
+| `/watch` | GET | List directories the file-watcher is currently monitoring (configured via `PALACE_WATCH_DIRS`) |
 | `/flush` | POST | Force checkpoint of pending writes |
 | `/reload` | POST | Invalidate cached client + collection |
 | `/backup` | POST | SQLite snapshot to a sibling file |
@@ -281,7 +289,7 @@ palace-mode {status,local,remote [URL],install,verify}
 
 - [rboarescu/palace-daemon](https://github.com/rboarescu/palace-daemon) — upstream
 - [MemPalace/mempalace](https://github.com/MemPalace/mempalace) — the underlying memory system this daemon fronts
-- [jphein/mempalace](https://github.com/jphein/mempalace) — the production fork of mempalace this daemon is paired with
+- [techempower-org/mempalace](https://github.com/techempower-org/mempalace) — the production fork of mempalace this daemon is paired with
 - [multipass-structural-memory-eval](https://github.com/M0nkeyFl0wer/multipass-structural-memory-eval) — the SME framework whose palace-daemon adapter consumes `/graph`
 - [Apache AGE](https://age.apache.org/) — graph extension for postgres, candidate KG view technology if mempalace's KG ever justifies it (currently doesn't)
 - [pgvector](https://github.com/pgvector/pgvector) — vector extension for postgres, candidate semantic-search view technology under upstream MemPalace [#665](https://github.com/MemPalace/mempalace/pull/665)
