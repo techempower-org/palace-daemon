@@ -44,14 +44,18 @@ set -euo pipefail
 _self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
 _dir="$(cd "$(dirname "$_self")" && pwd)"
 
-ENV_FILE="${PALACE_DAEMON_ENV:-$HOME/.config/palace-daemon/env}"
+# ${HOME:-} guard so the script doesn't crash under `set -u` if HOME is
+# unset (some restricted/containerized environments). Per gemini PR #26.
+ENV_FILE="${PALACE_DAEMON_ENV:-${HOME:-}/.config/palace-daemon/env}"
 BRIDGE="${PALACE_DAEMON_BRIDGE:-$_dir/mempalace-mcp.py}"
 PYTHON="${PALACE_DAEMON_PYTHON:-python3}"
 
 # Source the env file if present. `set -a` exports every var assigned inside.
+# Redirect any stdout chatter to stderr — this is an stdio MCP bridge and any
+# byte on stdout corrupts the JSON-RPC stream. Per gemini PR #26.
 if [[ -f "$ENV_FILE" ]]; then
     # shellcheck disable=SC1090
-    set -a; . "$ENV_FILE"; set +a
+    set -a; . "$ENV_FILE" 1>&2; set +a
 fi
 
 # After sourcing, fall back to a sane localhost default if the env file
@@ -64,4 +68,7 @@ if [[ ! -f "$BRIDGE" ]]; then
     exit 2
 fi
 
-exec "$PYTHON" "$BRIDGE" --daemon "$DAEMON" "$@"
+# ${@+"$@"} preserves $@ when set, expands to nothing when unset — avoids
+# Bash 3.2 (macOS default) tripping `set -u` on bare "$@" with no args.
+# Per gemini PR #26.
+exec "$PYTHON" "$BRIDGE" --daemon "$DAEMON" ${@+"$@"}
