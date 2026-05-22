@@ -11,7 +11,7 @@ Locks in the cache-invalidation contract:
 
 Run with::
 
-    cd /home/jp/Projects/palace-daemon
+    cd palace-daemon
     python -m unittest tests.test_admin_refresh_rooms -v
 """
 import os
