@@ -110,8 +110,15 @@ class TestChromadbMetadataRecovery(unittest.TestCase):
         with open(meta_path, "wb") as f:
             _serializer.dump(fixed, f)
 
+    @unittest.skip("chromadb upstream fixed the metadata bug — recovery runbook retired")
     def test_corruption_reproduces_the_bug(self):
         """Sanity: the corruption pattern actually breaks chromadb's load path.
+
+        Retired 2026-05-22: chromadb fixed the upstream bug (dimensionality=None
+        is now tolerated on load), so the assertion that "the corruption
+        reproduces the bug" no longer holds — the recovery runbook is historical.
+        Kept in-tree as documentation of the recovery procedure that was used
+        to repair the production palace before the pgvector cutover.
 
         If chromadb later starts tolerating dimensionality=None (i.e. the
         upstream bug gets fixed), this assertion fails — at which point the

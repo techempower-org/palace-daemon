@@ -1,7 +1,7 @@
 # Plan: Palace-daemon hook runner + network bootstrap
 
 > **Status:** SHIPPED. `clients/hook.py` was added 2026-04-24 in
-> [`62425e3`](https://github.com/jphein/palace-daemon/commit/62425e3)
+> [`62425e3`](https://github.com/techempower-org/palace-daemon/commit/62425e3)
 > ("feat: stdlib hook runner + bootstrap script replacing mempalace
 > hook run") and has been the canonical Stop/PreCompact runner since
 > the v1.4.2 release line. The simpler [`clients/mempal-fast.py`](../clients/mempal-fast.py)
@@ -127,7 +127,7 @@ Switch from `mempalace hook run` to `palace-daemon/clients/hook.py`.
   "daemon_url": "http://localhost:8085"
 }
 ```
-(Currently has `10.0.0.5:8085` — normalise to localhost for the host machine.)
+(Currently has `10.0.6.120:8085` — normalise to localhost for the host machine.)
 
 ---
 
@@ -140,9 +140,9 @@ Runs on any client machine (Linux/macOS). Installs the MCP client and configures
 ### Usage
 ```bash
 # scp from Artemis first, or fetch via curl if you add a /clients static route later
-scp user@10.0.0.5:/home/user/palace-daemon/clients/bootstrap.sh ~/bootstrap.sh
-bash bootstrap.sh --daemon http://10.0.0.5:8085 --tool claude-code
-bash bootstrap.sh --daemon http://10.0.0.5:8085 --tool all
+scp user@10.0.6.120:/home/user/palace-daemon/clients/bootstrap.sh ~/bootstrap.sh
+bash bootstrap.sh --daemon http://10.0.6.120:8085 --tool claude-code
+bash bootstrap.sh --daemon http://10.0.6.120:8085 --tool all
 ```
 
 ### What it does
@@ -211,6 +211,6 @@ For MCP-only tools: bootstrap writes only the mcpServers block.
 5. Stop daemon: hook fires, passes through silently
 
 ### Bootstrap
-1. Run on a second LAN machine: `bash bootstrap.sh --daemon http://10.0.0.5:8085 --tool claude-code`
+1. Run on a second LAN machine: `bash bootstrap.sh --daemon http://10.0.6.120:8085 --tool claude-code`
 2. Open Claude Code; confirm mempalace MCP tools visible
 3. Run `mempalace_search "test"` → response comes from Artemis palace
