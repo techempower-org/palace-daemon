@@ -1,6 +1,11 @@
 services:
   palace-daemon:
     build: .
+    # Per SECURITY.md: never run as root. The Dockerfile creates the
+    # `palace` user as UID:GID 1000:1000; override here if your host user
+    # owning the palace bind-mount uses a different UID. e.g.
+    #   PALACE_UID=$(id -u) PALACE_GID=$(id -g) docker compose up
+    user: "${PALACE_UID:-1000}:${PALACE_GID:-1000}"
     ports:
       - "${PALACE_PORT:-8085}:8085"
     volumes:
