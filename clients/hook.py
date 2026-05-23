@@ -166,6 +166,14 @@ def _count_human_messages(transcript_path: str) -> int:
                             )
                             if "<command-message>" in text:
                                 continue
+                            # All-tool_result content is a tool roundtrip,
+                            # not a human exchange — skip.
+                            text_blocks = [
+                                b for b in content
+                                if isinstance(b, dict) and b.get("type") == "text"
+                            ]
+                            if not text_blocks:
+                                continue
                         count += 1
                     elif entry.get("type") == "event_msg":
                         payload = entry.get("payload", {})
@@ -350,6 +358,14 @@ def hook_stop(data: dict, harness: str):
             last_save = int(last_save_file.read_text().strip())
         except (ValueError, OSError):
             last_save = 0
+
+    if exchange_count < last_save:
+        _log(
+            f"Session {session_id}: rebased stale last_save "
+            f"({last_save} → {exchange_count}) — counter went backward, "
+            f"likely after a count-rule change"
+        )
+        last_save = exchange_count
 
     since_last = exchange_count - last_save
     last_save_ts = _read_last_save_ts(session_id)
