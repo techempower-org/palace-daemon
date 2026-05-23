@@ -297,6 +297,48 @@ def _desktop_notify(title: str, body: str) -> None:
         pass
 
 
+def _detach() -> bool:
+    """Fork into a background process that survives harness pipe closure.
+
+    Returns True in the child (caller should continue with slow work),
+    False in the parent (caller should exit promptly).
+
+    The child becomes a session leader and redirects std streams to /dev/null
+    so writes to the now-closed harness pipes don't cause SIGPIPE.
+
+    If fork fails (shouldn't happen on Linux), returns True so the caller
+    falls back to synchronous execution — the work still happens, just with
+    the risk of being killed by the harness.
+    """
+    try:
+        pid = os.fork()
+    except OSError as e:
+        _log(f"fork failed, falling back to synchronous: {e}")
+        return True  # fall back: caller continues synchronously
+
+    if pid > 0:
+        # Parent — exit immediately so the harness can close its pipes
+        return False
+
+    # Child — detach fully
+    try:
+        os.setsid()
+    except OSError:
+        pass
+
+    # Redirect stdin/stdout/stderr to /dev/null so writes don't SIGPIPE
+    devnull = os.open(os.devnull, os.O_RDWR)
+    try:
+        os.dup2(devnull, 0)
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+    finally:
+        if devnull > 2:
+            os.close(devnull)
+
+    return True
+
+
 def _parse_harness_input(data: dict, harness: str) -> dict:
     if harness not in SUPPORTED_HARNESSES:
         print(f"Unknown harness: {harness}", file=sys.stderr)
@@ -398,6 +440,14 @@ def hook_stop(data: dict, harness: str):
         return
 
     if silent:
+        # Output to harness BEFORE forking — harness gets valid JSON immediately
+        _output({})
+
+        # Detach so diary save survives harness pipe closure
+        if not _detach():
+            return  # parent — already printed output, exit promptly
+
+        # Child continues here — stdout is /dev/null, work silently
         msgs = _extract_messages(transcript_path, max_turns=40)
         date_str = datetime.now().strftime("%Y-%m-%d")
         if msgs:
@@ -414,7 +464,6 @@ def hook_stop(data: dict, harness: str):
         _log(f"Silent save {'OK' if ok else 'FAILED (daemon unreachable)'} at exchange {exchange_count}")
         if toast:
             _desktop_notify("MemPalace", f"Auto-saved at {exchange_count} msgs ({trigger})")
-        _output({})
     else:
         if toast:
             _desktop_notify("MemPalace checkpoint", "Save requested — check Claude")
@@ -431,17 +480,25 @@ def hook_precompact(data: dict, harness: str):
     toast = settings.get("desktop_toast", False)
 
     mine_dir = _get_mine_dir()
-    if mine_dir:
-        _log(f"Precompact mine via daemon: {mine_dir}")
-        ok = _post_mine(daemon_url, mine_dir, timeout=60)
-        _log(f"Precompact mine {'OK' if ok else 'skipped (daemon unreachable)'}")
-    else:
+    if not mine_dir:
         _log("Precompact mine skipped: MEMPAL_DIR not set")
+        _output({})
+        return
+
+    # Output to harness BEFORE forking — harness gets valid JSON immediately
+    _output({})
+
+    # Detach so mine operation survives harness pipe closure
+    if not _detach():
+        return  # parent — already printed output, exit promptly
+
+    # Child continues here — stdout is /dev/null, work silently
+    _log(f"Precompact mine via daemon: {mine_dir}")
+    ok = _post_mine(daemon_url, mine_dir, timeout=60)
+    _log(f"Precompact mine {'OK' if ok else 'skipped (daemon unreachable)'}")
 
     if toast:
         _desktop_notify("MemPalace", "Pre-compaction checkpoint triggered")
-
-    _output({})
 
 
 def run_hook(hook_name: str, harness: str):
