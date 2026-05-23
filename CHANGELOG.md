@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+- **`GET /stats` concurrent HNSW race** — serialized the three parallel `mempalace_kg_stats` / `mempalace_graph_stats` / `mempalace_status` calls; concurrent execution raced on the ChromaDB HNSW index (issues #974/#965) causing SIGBUS on palaces with stale or rebuilding segments.
+
 # Changelog
 
 ## [1.7.0] - 2026-05-23
