@@ -7,7 +7,7 @@ Three semaphores govern concurrency (all tunable via PALACE_MAX_CONCURRENCY):
   _mine_sem  — one mine job at a time, independent of reads/writes
 
 Roadmap:
-  [HIGH] Verified Backups: /backup endpoint with integrity_check + smoke test retrieval.
+  [DONE] Verified Backups: /backup endpoint with integrity_check + smoke test retrieval.
   [DONE] Stability: Auto-detect "Internal Error" during search and trigger index recovery.
   [DONE] Flush: Ensure memories are checkpointed on shutdown and via /flush.
   [HIGH] Unified Routing: Ensure all clients (including miners/compactors) use the Daemon API.
@@ -1022,48 +1022,81 @@ async def reload_palace(x_api_key: str | None = Header(default=None)):
 async def create_backup(x_api_key: str | None = Header(default=None)):
     """
     Perform a verified atomic backup of the palace database.
-    Uses sqlite3 .backup to ensure consistency even under load.
+
+    Steps:
+      1. Hold _write_sem so no daemon writes race the snapshot.
+      2. sqlite3 .backup() for a consistent copy.
+      3. PRAGMA integrity_check on the *backup* file.
+      4. Smoke retrieval: open backup read-only, query embedding_metadata.
+      5. Return verification results.
     """
     _check_auth(x_api_key)
     palace_path = _mp._config.palace_path
     db_path = os.path.join(palace_path, "chroma.sqlite3")
-    
+
     backup_dir = os.path.join(os.path.dirname(palace_path), "palace.backup")
     os.makedirs(backup_dir, mode=0o700, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_path = os.path.join(backup_dir, f"chroma.sqlite3.{timestamp}.bak")
 
+    def _do_backup_and_verify() -> dict:
+        """All sync I/O in one helper, run via executor."""
+        # ── 1. Snapshot ─────────────────────────────────────────────
+        src = sqlite3.connect(db_path)
+        dst = sqlite3.connect(backup_path)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
+
+        # ── 2. Integrity check on the backup ────────────────────────
+        integrity = "ok"
+        check = sqlite3.connect(backup_path)
+        try:
+            row = check.execute("PRAGMA integrity_check;").fetchone()
+            integrity = row[0] if row else "FAILED: no result"
+        finally:
+            check.close()
+
+        # ── 3. Smoke retrieval (read-only) ──────────────────────────
+        smoke = "ok"
+        rows_sampled = 0
+        uri = f"file:{backup_path}?mode=ro"
+        try:
+            ro = sqlite3.connect(uri, uri=True)
+            try:
+                rows = ro.execute(
+                    "SELECT id, key, string_value "
+                    "FROM embedding_metadata LIMIT 5"
+                ).fetchall()
+                rows_sampled = len(rows)
+            finally:
+                ro.close()
+        except sqlite3.OperationalError as exc:
+            msg = str(exc)
+            if "no such table" in msg:
+                smoke = f"WARN: {msg}"
+            else:
+                smoke = f"FAILED: {msg}"
+
+        # ── 4. Overall status ───────────────────────────────────────
+        ok = integrity == "ok" and smoke == "ok"
+        return {
+            "backup_path": backup_path,
+            "timestamp": timestamp,
+            "integrity": integrity,
+            "smoke_test": smoke,
+            "rows_sampled": rows_sampled,
+            "status": "ok" if ok else "degraded",
+        }
+
     # Hold the write semaphore so no daemon-driven writes race the backup start.
     async with _write_sem:
         try:
-            src = sqlite3.connect(db_path)
-            dst = sqlite3.connect(backup_path)
-            try:
-                src.backup(dst)
-            finally:
-                dst.close()
-                src.close()
-
-            check = sqlite3.connect(backup_path)
-            try:
-                cursor = check.cursor()
-                cursor.execute("PRAGMA integrity_check;")
-                status = cursor.fetchone()[0]
-            finally:
-                check.close()
-
-            if status != "ok":
-                if os.path.exists(backup_path):
-                    os.remove(backup_path)
-                raise Exception(f"Integrity check failed: {status}")
-
-            return {
-                "status": "success",
-                "backup_file": backup_path,
-                "integrity": status,
-                "timestamp": timestamp
-            }
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, _do_backup_and_verify)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Backup failed: {str(e)}")
 
