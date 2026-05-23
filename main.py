@@ -689,11 +689,11 @@ async def store_memory(request: Request, x_api_key: str | None = Header(default=
 @app.get("/stats")
 async def stats(x_api_key: str | None = Header(default=None)):
     _check_auth(x_api_key)
+    # Sequential — concurrent HNSW access races on this palace (ChromaDB #974/#965).
     tools = ["mempalace_kg_stats", "mempalace_graph_stats", "mempalace_status"]
-    responses = await asyncio.gather(*[
-        _call({"jsonrpc": "2.0", "id": i, "method": "tools/call", "params": {"name": t, "arguments": {}}})
-        for i, t in enumerate(tools, 1)
-    ])
+    responses = []
+    for i, t in enumerate(tools, 1):
+        responses.append(await _call({"jsonrpc": "2.0", "id": i, "method": "tools/call", "params": {"name": t, "arguments": {}}}))
     kg, graph, status = [_unwrap(r) for r in responses]
     return {"kg": kg, "graph": graph, "status": status}
 
