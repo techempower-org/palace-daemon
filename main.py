@@ -43,7 +43,7 @@ import messages
 
 # ── Config (env vars override CLI defaults) ───────────────────────────────────
 
-VERSION = "1.7.1"
+VERSION = "1.7.2"
 DEFAULT_HOST = os.getenv("PALACE_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.getenv("PALACE_PORT", "8085"))
 DEFAULT_PALACE = os.getenv("PALACE_PATH", "")

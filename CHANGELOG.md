@@ -1,7 +1,11 @@
 ## [Unreleased]
 
+# Changelog — continued
+
+## [1.7.2] - 2026-05-23
+
 ### Fixed
-- **`_warn_if_hnsw_threads_unset` false positive** — function was calling `handle_request(ping)` to warm up the collection before reading `_collection_cache`. MCP ping is a protocol-level echo that never touches the ChromaDB collection, so after any cache clear (light/prune/rebuild repair, auto-repair quarantine) `_collection_cache` remained `None`, causing `hnsw:num_threads` to read as `None` and the warning to fire spuriously. Fixed by calling `_mp._get_collection()` instead, which actually opens the collection (applying `_pin_hnsw_threads` from mempalace 3.3.4) and populates the cache before the metadata check. Also removes the stale "Upgrade to mempalace >=3.3.4" hint (3.3.4 is the installed version and already has the fix). The proactive open is a net improvement: after any cache-clearing repair, the collection is re-pinned before the first incoming request rather than on it.
+- **`_warn_if_hnsw_threads_unset` false positive** — function was calling `handle_request(ping)` to warm up the collection before reading `_collection_cache`. MCP ping is a protocol-level echo that never touches the ChromaDB collection, so after any cache clear (light/prune/rebuild repair, auto-repair quarantine) `_collection_cache` remained `None`, causing `hnsw:num_threads` to read as `None` and the warning to fire spuriously. Fixed by calling `_mp._get_collection()` instead, which actually opens the collection (applying `_pin_hnsw_threads` from mempalace 3.3.4) and populates the cache before the metadata check. Also removes the stale "Upgrade to mempalace >=3.3.4" hint (3.3.4 is the installed version and already has the fix). Side effect: after any cache-clearing repair, the collection is proactively re-pinned before the first incoming request rather than on it.
 
 # Changelog — continued
 
