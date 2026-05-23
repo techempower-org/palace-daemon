@@ -244,7 +244,7 @@ This installs `mempal-fast.py` as the Stop/PreCompact hook handler and `palace-m
 
 | Route | Method | Purpose |
 |---|---|---|
-| `/health` | GET | Liveness + version |
+| `/health` | GET | Liveness + version + crash-loop state; returns 503 when `degraded` or `crash_loop` |
 | `/search` | GET | Semantic search over `mempalace_drawers`; `limit=N`. (Stop-hook checkpoints live in `mempalace_session_recovery` — read via the `mempalace_session_recovery_read` MCP tool.) |
 | `/search/hybrid` | POST | Hybrid search — vector + BM25 + graph in one ranked set (`candidate_strategy="hybrid"`) |
 | `/search/keyword` | POST | BM25 keyword search over `mempalace_drawers.doc_tsv` with optional `wing`/`room` filters |

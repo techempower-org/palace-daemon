@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Added — 2026-05-23 — *Crash-loop detection + `monitor.py`*
+
+Cherry-picked from upstream (`rboarescu/palace-daemon`, implements
+[#21](https://github.com/rboarescu/palace-daemon/issues/21)):
+
+- **Crash-loop detection**: tracks restart timestamps in
+  `~/.cache/palace-daemon/restart_history.json`. If 3+ restarts occur
+  within a 600s rolling window, `/health` returns
+  `{"status": "crash_loop", ...}` with HTTP 503.
+- **`monitor.py`**: standalone live dashboard that polls `/health`,
+  `/stats`, and `/repair/status`. ANSI terminal UI with alerts on
+  unreachable, degraded, drawer-count drops, and active repairs.
+- Retired `patches/mcp_server_get_collection.patch` — the retry-on-
+  cache-failure logic was absorbed into mempalace 3.3.5's
+  `_get_collection_chroma` backend.
+
 ### Changed — 2026-05-22 — *`/admin/refresh-rooms` response now includes `count`*
 
 Clears the existing `TODO` at `main.py:1488`. The endpoint already
