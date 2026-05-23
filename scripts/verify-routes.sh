@@ -69,8 +69,18 @@ except Exception as e:
 echo "→ palace-daemon at $URL"
 echo
 
-# /health — no auth, should always respond.
-probe "GET /health" "palace-daemon" "$URL/health"
+# /health — no auth, accepts 200 (ok) and 503 (degraded/crash_loop); both
+# are valid structured responses. Only a connection error or missing JSON is a
+# failure.
+health_resp=$(curl -sS --max-time 10 "${H_AUTH[@]}" "$URL/health" 2>&1) || {
+  fail "GET /health — connection error: ${health_resp:0:200}"
+}
+health_status=$(echo "$health_resp" | python3 -c "import json,sys; print(json.load(sys.stdin).get('status','MISSING'))" 2>/dev/null) || health_status="PARSE-ERROR"
+if [ "$health_status" = "PARSE-ERROR" ] || [ "$health_status" = "MISSING" ]; then
+  fail "GET /health — bad JSON or missing status field: ${health_resp:0:200}"
+else
+  pass "GET /health (status=$health_status)"
+fi
 
 # /search — semantic search; verifies the limit= param is honored.
 probe "GET /search" "results" "$URL/search?q=palace&limit=2"
