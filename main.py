@@ -35,6 +35,9 @@ except ImportError:
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+import subprocess as _subprocess
+import time as _time
+
 import mempalace.mcp_server as _mp
 from mempalace import repair as _mp_repair
 from mempalace.backends.chroma import quarantine_stale_hnsw
@@ -85,8 +88,10 @@ _log = logging.getLogger("palace-daemon")
 # ── Crash-loop detection ───────────────────────────────────────────────────────
 _CRASH_LOOP_DIR = Path.home() / ".cache" / "palace-daemon"
 _RESTART_HISTORY_PATH = _CRASH_LOOP_DIR / "restart_history.json"
-_CRASH_LOOP_WINDOW = 600   # seconds — rolling window for restart counting
-_CRASH_LOOP_THRESHOLD = 3  # restarts within window = crash loop
+_CRASH_LOOP_WINDOW = int(os.getenv("PALACE_CRASH_LOOP_THRESHOLD_SECONDS", "600"))
+_CRASH_LOOP_THRESHOLD = int(os.getenv("PALACE_CRASH_LOOP_THRESHOLD_COUNT", "3"))
+_CRASH_LOOP_RECOVERY = int(os.getenv("PALACE_CRASH_LOOP_RECOVERY_SECONDS", "1800"))
+_STARTUP_MONOTONIC = _time.monotonic()
 
 
 def _record_restart() -> None:
@@ -104,19 +109,33 @@ def _record_restart() -> None:
 
 
 def _crash_loop_state() -> dict:
-    """Return crash-loop metadata: crash_loop bool, restart_count, window_seconds."""
+    """Return crash-loop metadata: crash_loop bool, restart_count, window_seconds,
+    uptime_seconds, and recovered (True if auto-exited degraded state after clean uptime).
+    """
     try:
         data = json.loads(_RESTART_HISTORY_PATH.read_text()) if _RESTART_HISTORY_PATH.exists() else {}
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(seconds=_CRASH_LOOP_WINDOW)
         recent = [r for r in data.get("restarts", []) if datetime.fromisoformat(r) > cutoff]
+        uptime = _time.monotonic() - _STARTUP_MONOTONIC
+        over_threshold = len(recent) >= _CRASH_LOOP_THRESHOLD
+        recovered = over_threshold and uptime >= _CRASH_LOOP_RECOVERY
         return {
-            "crash_loop": len(recent) >= _CRASH_LOOP_THRESHOLD,
+            "crash_loop": over_threshold and not recovered,
             "restart_count": len(recent),
             "window_seconds": _CRASH_LOOP_WINDOW,
+            "uptime_seconds": round(uptime, 1),
+            "recovered": recovered,
         }
     except Exception:
-        return {"crash_loop": False, "restart_count": 0, "window_seconds": _CRASH_LOOP_WINDOW}
+        uptime = _time.monotonic() - _STARTUP_MONOTONIC
+        return {
+            "crash_loop": False,
+            "restart_count": 0,
+            "window_seconds": _CRASH_LOOP_WINDOW,
+            "uptime_seconds": round(uptime, 1),
+            "recovered": False,
+        }
 
 
 # ── Systemd watchdog / sd_notify ─────────────────────────────────────────────
@@ -535,6 +554,28 @@ async def lifespan(app: FastAPI):
 
     # Record this startup in the crash-loop ring buffer.
     _record_restart()
+
+    # Desktop-notify on crash-loop detection (best-effort).
+    cl_state = _crash_loop_state()
+    if cl_state["crash_loop"]:
+        logger.critical(
+            "CRASH LOOP DETECTED: %d restarts in %ds window",
+            cl_state["restart_count"],
+            cl_state["window_seconds"],
+        )
+        try:
+            _subprocess.Popen(
+                [
+                    "notify-send",
+                    "--urgency=critical",
+                    "palace-daemon crash loop",
+                    f"{cl_state['restart_count']} restarts in {cl_state['window_seconds']}s",
+                ],
+                stdout=_subprocess.DEVNULL,
+                stderr=_subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            pass  # notify-send not installed — headless/container environment
 
     # Start systemd watchdog loop if WatchdogSec is configured.
     wdog_secs = _watchdog_interval()
