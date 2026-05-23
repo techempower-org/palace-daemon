@@ -15,11 +15,15 @@ Roadmap:
 """
 import argparse
 import asyncio
+import contextlib
+import io
 import json
 import logging
 import os
+import re
 import sqlite3
 import sys
+import time
 import fcntl
 import signal
 from contextlib import asynccontextmanager
@@ -77,7 +81,7 @@ _mine_sem = asyncio.Semaphore(1)
 # Repair state — when in_progress is True, /silent-save queues instead of writing.
 # The fast-path check is lock-free (single-assignment dict); _repair_lock serializes
 # start/end transitions and prevents overlapping repairs.
-_repair_state: dict[str, Any] = {"in_progress": False, "mode": None, "started_at": None}
+_repair_state: dict[str, Any] = {"in_progress": False, "mode": None, "started_at": None, "progress": {}}
 _repair_lock = asyncio.Lock()
 
 _log = logging.getLogger("palace-daemon")
@@ -1133,6 +1137,61 @@ async def mine(request: Request, x_api_key: str | None = Header(default=None)):
     }
 
 
+# ── Rebuild progress tracking ────────────────────────────────────────────────
+
+
+class _RebuildProgressBuffer(io.TextIOBase):
+    """Stdout sink for rebuild_index that parses progress lines into a dict.
+
+    Lives in the executor thread (rebuild runs synchronously there) but
+    writes to a dict that /repair/status reads from the async side.
+    The dict is effectively thread-safe: each key is set atomically and
+    /repair/status only reads — no torn-read risk on CPython.
+    """
+
+    _STAGED  = re.compile(r"Staged\s+(\d+)\s*/\s*(\d+)")
+    _REFILED = re.compile(r"Re-filed\s+(\d+)\s*/\s*(\d+)")
+
+    def __init__(self, state: dict):
+        self._state = state
+
+    def write(self, s: str) -> int:
+        for line in s.splitlines():
+            m = self._STAGED.search(line)
+            if m:
+                self._state["staged_current"] = int(m.group(1))
+                self._state["staged_total"]   = int(m.group(2))
+                continue
+            m = self._REFILED.search(line)
+            if m:
+                cur, total = int(m.group(1)), int(m.group(2))
+                self._state["refiled_current"] = cur
+                self._state["refiled_total"]   = total
+                if total > 0:
+                    elapsed = time.monotonic() - self._state.get("_start_mono", time.monotonic())
+                    if cur > 0 and elapsed > 0:
+                        rate = cur / elapsed
+                        remaining = (total - cur) / rate
+                        self._state["eta_seconds"] = round(remaining, 1)
+        return len(s)
+
+    def flush(self):
+        pass
+
+
+@contextlib.contextmanager
+def _capture_rebuild_progress(state: dict):
+    """Redirect stdout to a parser that updates ``state`` while we're inside."""
+    state["_start_mono"] = time.monotonic()
+    buf = _RebuildProgressBuffer(state)
+    old = sys.stdout
+    sys.stdout = buf
+    try:
+        yield buf
+    finally:
+        sys.stdout = old
+
+
 # ── Repair + silent-save ─────────────────────────────────────────────────────
 
 @app.post("/silent-save")
@@ -1366,7 +1425,11 @@ async def repair(request: Request, x_api_key: str | None = Header(default=None))
             async with _exclusive_palace():
                 loop = asyncio.get_running_loop()
                 palace_path = _mp._config.palace_path
-                await loop.run_in_executor(None, _mp_repair.rebuild_index, palace_path)
+                _repair_state["progress"] = {}
+                with _capture_rebuild_progress(_repair_state["progress"]):
+                    await loop.run_in_executor(
+                        None, _mp_repair.rebuild_index, palace_path
+                    )
                 _mp._client_cache = None
                 _mp._collection_cache = None
                 result = {"rebuilt": True}
@@ -1378,6 +1441,7 @@ async def repair(request: Request, x_api_key: str | None = Header(default=None))
             _repair_state["in_progress"] = False
             _repair_state["mode"] = None
             _repair_state["started_at"] = None
+            _repair_state["progress"] = {}
         raise HTTPException(status_code=500, detail=f"repair failed: {e}")
 
     # Clear the flag BEFORE draining so replayed silent-saves go direct,
@@ -1386,6 +1450,7 @@ async def repair(request: Request, x_api_key: str | None = Header(default=None))
         _repair_state["in_progress"] = False
         _repair_state["mode"] = None
         _repair_state["started_at"] = None
+        _repair_state["progress"] = {}
 
     if mode == "rebuild":
         drained = await _drain_pending_writes()
@@ -1412,13 +1477,19 @@ async def repair_status():
                 pending = sum(1 for ln in f if ln.strip())
         except OSError:
             pending = -1
-    return {
+    resp = {
         "in_progress": _repair_state["in_progress"],
         "mode": _repair_state["mode"],
         "started_at": _repair_state["started_at"],
         "pending_writes": pending,
         "pending_writes_path": queue_path,
     }
+    if _repair_state.get("progress"):
+        resp["progress"] = {
+            k: v for k, v in _repair_state["progress"].items()
+            if not k.startswith("_")
+        }
+    return resp
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
