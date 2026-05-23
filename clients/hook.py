@@ -218,6 +218,14 @@ def _extract_messages(transcript_path: str, max_turns: int = 30) -> list:
     return turns[-max_turns:]
 
 
+def _auth_headers() -> dict:
+    """Return X-Api-Key header if PALACE_API_KEY is set, else empty dict."""
+    key = os.environ.get("PALACE_API_KEY", "")
+    if key:
+        return {"X-Api-Key": key}
+    return {}
+
+
 def _post_digest(daemon_url: str, session_id: str, agent_name: str,
                  harness: str, messages: list, exchange_count: int) -> bool:
     payload = {
@@ -233,7 +241,7 @@ def _post_digest(daemon_url: str, session_id: str, agent_name: str,
         req = urllib.request.Request(
             daemon_url.rstrip("/") + "/digest",
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **_auth_headers()},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -260,7 +268,7 @@ def _post_mcp(daemon_url: str, tool_name: str, params: dict) -> bool:
         req = urllib.request.Request(
             daemon_url.rstrip("/") + "/mcp",
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **_auth_headers()},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -276,7 +284,7 @@ def _post_mine(daemon_url: str, mine_dir: str, timeout: int = 60) -> bool:
         req = urllib.request.Request(
             daemon_url.rstrip("/") + "/mine",
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **_auth_headers()},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:

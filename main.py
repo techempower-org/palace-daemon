@@ -15,6 +15,7 @@ Roadmap:
 """
 import argparse
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -217,7 +218,9 @@ _READ_TOOLS = {
 
 def _check_auth(x_api_key: str | None):
     key = os.getenv("PALACE_API_KEY", "")
-    if key and x_api_key != key:
+    if not key:
+        return
+    if not x_api_key or not hmac.compare_digest(x_api_key, key):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
