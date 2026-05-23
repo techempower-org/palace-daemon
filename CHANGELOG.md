@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Changed — 2026-05-22 — *`/admin/refresh-rooms` response now includes `count`*
+
+Clears the existing `TODO` at `main.py:1488`. The endpoint already
+existed (added with the canonical-room validation in Phase 1D,
+2026-05-14) but the inline comment still flagged it as outstanding
+and the response lacked a count. This change:
+
+- Drops the stale `(TODO)` comment.
+- Sharpens the docstring to spell out the cache-clear-then-eager-
+  rebuild sequence and reaffirm the single `X-API-Key` auth model
+  (no separate admin token — palace-daemon has 27 endpoints, all
+  routed through `_check_auth`).
+- Adds a `count` field to the JSON response (`{refreshed, rooms,
+  count}`) so callers can verify shape without re-counting.
+- Adds `tests/test_admin_refresh_rooms.py` — 7 regression tests
+  covering cache-clear-before-rebuild ordering, response shape,
+  POST-only routing, and `X-API-Key` auth (correct/wrong/missing).
+
 ### Added — 2026-05-17 — *`/search/age-fused` endpoint: vector ⊕ AGE graph fusion*
 
 Phase 5 of the multi-project AGE-integration plan (Phases 1-4 + 6 land on
