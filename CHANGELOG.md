@@ -1,21 +1,29 @@
 ## [Unreleased]
 
+# Changelog
+
+## [1.7.0] - 2026-05-23
+
 ### Added
-- **`GET /viz`** — self-contained status dashboard. Single HTML page that fetches `/graph`, `/repair/status`, and `/health` in parallel and renders five panels: status strip (version, drawer count, repair pulse, pending writes), D3 force-directed knowledge graph, wing/room hierarchy (Mermaid tree), wings bar chart, tunnels list with click-to-highlight. D3 + Mermaid loaded via CDN (pinned versions, SRI-verified), no static-file deps. Optional `?refresh=N` for auto-refresh, `?key=…` for ergonomic auth bookmarking (note: this leaks the key into browser history / proxy logs / referer — prefer the `X-Api-Key` header for anything beyond a personal bookmark).
-- Inspired by upstream MemPalace PRs #1022 (sangeethkc — D3 KG viz), #393 (jravas — Mermaid diagrams), #431 (MiloszPodsiadly — CLI stats), #256 (rusel95 — sync_status MCP), #601 (mvanhorn — brief overview). None cherry-picked; the page consumes the daemon's own `/graph` endpoint so it benefits from the direct-sqlite optimization (sub-second on 151K drawers) and stays decoupled from upstream's evolution.
-- Security: `/viz` is auth-gated (`X-Api-Key` header *or* `?key=` query param) on the same code path as every other endpoint. All wing/room/entity names from `/graph` enter the DOM via `textContent` / safe `setAttribute`, never `innerHTML`. Mermaid labels pass through a sanitizer that strips ASCII control chars (`\n`, `\r`, `\t`, etc.) and `[`, `]`, `"`, `<`, `>`, `|`, `` ` `` so the parser can't be smuggled into. Mermaid runs with `securityLevel: "strict"` (default — XSS-safe label rendering, no clickable diagram nodes). CDN-loaded D3 + Mermaid are pinned with SRI hashes (`d3@7.8.5`, `mermaid@10.9.1`) so a compromised CDN response can't run arbitrary JS in the dashboard.
-- HTML template at `static/viz.html`; lazy-loaded on first request and cached in-process thereafter (one disk read per daemon process). New endpoint defined alongside `/graph` in `main.py`.
-- **`GET /graph`** — single-shot structural snapshot for SME-style consumers. Mirrors `/stats`'s `asyncio.gather` shape but adds rooms-per-wing fan-out + a direct read-only sqlite read of `knowledge_graph.sqlite3`. Replaces what an adapter would otherwise compose serially over HTTP — on a 151K-drawer palace, `list_wings` alone takes ~30s, so a serial composition costs minutes.
-- Response shape: `{ "wings": {<name>: <count>, ...}, "rooms": [{"wing": "<name>", "rooms": {<room>: <count>, ...}}, ...], "tunnels": [...], "kg_entities": [...], "kg_triples": [...], "kg_stats": {...} }`.
-- KG read uses URI-mode `?mode=ro` so the daemon can never accidentally write that file. Schema differences across mempalace versions tolerated via per-query `OperationalError` catch.
-- Wings + rooms read directly from `chroma.sqlite3.embedding_metadata` (read-only, off the asyncio loop), bypassing the `list_wings` + `list_rooms × N` MCP fan-out which serializes through the read semaphore. Schema is ChromaDB's internal layout; if it ever drifts, /graph degrades gracefully to empty wings/rooms.
-- Tunnels derived from `mempalace_graph_stats.top_tunnels` rather than `mempalace_list_tunnels` — the two disagree on what counts as a tunnel on mempalace 3.3.4 (`list_tunnels` returns `[]`, `graph_stats.tunnel_rooms` reports the real count). Spec at `docs/graph-endpoint.md` Part 2 for the upstream-mempalace fix.
-- Spec / design notes: `docs/graph-endpoint.md`. Coordinates with `multipass-structural-memory-eval` (SME) — adapter prefers `/graph` once daemon ≥ this release and falls back to MCP composition otherwise.
+- **`GET /viz`** — self-contained status dashboard. Single HTML page that fetches `/graph`, `/repair/status`, and `/health` in parallel and renders five panels: status strip (version, drawer count, repair pulse, pending writes), D3 force-directed knowledge graph, wing/room hierarchy (Mermaid tree), wings bar chart, tunnels list with click-to-highlight. D3 + Mermaid loaded via CDN (pinned versions, SRI-verified), no static-file deps. Optional `?refresh=N` for auto-refresh, `?key=…` for ergonomic auth bookmarking (key leaks into browser history — prefer `X-Api-Key` header beyond personal bookmarks). HTML template at `static/viz.html`; lazy-loaded and cached in-process. Auth-gated; all user-visible strings enter DOM via `textContent`/safe `setAttribute`, Mermaid runs `securityLevel: "strict"`, CDN assets SRI-pinned (`d3@7.8.5`, `mermaid@10.9.1`).
+- **`GET /graph`** — single-shot structural snapshot for SME-style consumers. Composites wings, rooms, tunnels, KG stats in parallel via `asyncio.gather`; reads `chroma.sqlite3` and `knowledge_graph.sqlite3` directly in read-only mode. Cuts multi-call latency from 60–120 s to ~0.4 s on a 151K-drawer palace. Degrades gracefully on schema drift. Spec: `docs/graph-endpoint.md`.
+- **`GET /list`** — query-free metadata browse. Wraps `mempalace_list_drawers`; filter by `?wing=` and/or `?room=`.
+- **`DELETE /memory/{id}` + `PATCH /memory/{id}`** — drawer-level CRUD endpoints for curator UIs. Delete wraps `mempalace_kg_invalidate`-style removal; patch wraps `mempalace_update_drawer`.
+- **`feat(lifespan): auto-migrate Stop-hook checkpoints`** — daemon startup calls `mempalace.migrate.migrate_checkpoints_to_recovery()` (idempotent). Gated by `PALACE_MIGRATE_CHECKPOINTS=1` env var; no-op when unset.
+- **`feat: canonicalize Stop-hook topic`** — daemon rewrites legacy `"auto-save"` synonyms to canonical `"checkpoint"` topic at the `/silent-save` boundary, with a warning log entry. Defensive; safe for already-shipped clients.
+- **`scripts/verify-routes.sh`** — curl-based smoke-test script covering all read-only daemon routes. Run post-deploy to confirm no regressions.
+- **`clients/mempal-fast.py`** — `CHECKPOINT_TOPIC` constant added (mirrors `hook.py`); eliminates hardcoded string duplication.
+
+### Fixed
+- **`/search` and `/context` `limit=` parameter** — param name mismatch caused queries to always cap at 5 results regardless of the `limit=` argument. Fixed.
+- **`clients/palace-mcp-dispatch.sh` portable path** — hardcoded absolute path replaced with `readlink`-based sibling lookup; works on any machine.
+- **`clients/palace-mode` embedded secrets removed** — hardcoded homelab URL and API key replaced with env-var-only config with fail-fast guards.
+
+### Docs
+- **`docs/event-log-frame.md`** — architectural reference framing palace-daemon under Kleppmann's log + materialized-views pattern; context for future Postgres-backend and TypeScript-rewrite discussions.
 
 ### Maintenance
-- Upgraded mempalace to 3.3.5.  removed — retry-on-failure
-  with cache clearing and error logging landed upstream in 3.3.5 (#1377, #1396).
-   now exits clean with no patches to apply.
+- Upgraded mempalace to 3.3.5. `mcp_server_get_collection.patch` removed — retry-on-failure with cache clearing and error logging landed upstream (#1377, #1396). `apply_patches.sh` now exits clean with no patches to apply.
 
 # Changelog
 
