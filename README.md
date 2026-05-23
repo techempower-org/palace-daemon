@@ -283,7 +283,21 @@ scripts/deploy.sh
 
 # Switch local Claude Code sessions between modes
 palace-mode {status,local,remote [URL],install,verify}
+
+# Live integrity monitor — ANSI dashboard with alerts
+python monitor.py --url http://disks:8085 --interval 5
 ```
+
+### Scripts & tooling
+
+| Script | Description |
+|---|---|
+| `scripts/deploy.sh` | One-command `git push → wait for sync → systemctl restart → /health poll → verify-routes` deploy. |
+| `scripts/verify-routes.sh` | curl-based smoke test for every public route. |
+| `clients/palace-mode` | Local↔remote palace switching (`status`, `local`, `remote [URL]`, `install`, `verify`). |
+| `clients/palace-mcp-dispatch.sh` | Picks daemon vs. in-process MCP based on `PALACE_DAEMON_URL`. |
+| `clients/mempal-fast.py` | Stdlib-only Stop/PreCompact hook handler — POSTs to `/silent-save` without importing mempalace. |
+| `monitor.py` | Standalone live integrity monitor. Polls `/health`, `/stats`, `/repair/status` and prints an ANSI dashboard with alerts for unreachable, degraded, drawer-count drops, and active repairs. Usage: `python monitor.py --url http://disks:8085 --interval 5` |
 
 ## Sources
 

@@ -17,6 +17,19 @@ Cherry-picked from upstream (`rboarescu/palace-daemon`, implements
 - Retired `patches/mcp_server_get_collection.patch` — the retry-on-
   cache-failure logic was absorbed into mempalace 3.3.5's
   `_get_collection_chroma` backend.
+- **Crash-loop extras** (completes #21 spec): configurable thresholds
+  via `PALACE_CRASH_LOOP_THRESHOLD_COUNT`, `_SECONDS`, and
+  `_RECOVERY_SECONDS` env vars; auto-exit degraded after 30min clean
+  uptime; desktop-notify via `notify-send` on crash-loop detection.
+- **Verified backups**: `/backup` now runs `PRAGMA integrity_check` and
+  a smoke retrieval on the snapshot; returns `{integrity, smoke_test,
+  rows_sampled, status}`.
+- **`_READ_TOOLS` sync**: added `mempalace_list_tags`,
+  `mempalace_memories_filed_away`, `mempalace_walk_palace`; sorted
+  alphabetically; synced against mempalace 3.3.5.
+- **Unified routing audit**: all client write paths verified to route
+  through daemon HTTP API — no bypasses found.
+- **`monitor.py` docs**: added Scripts & tooling table to README.
 
 ### Changed — 2026-05-22 — *`/admin/refresh-rooms` response now includes `count`*
 

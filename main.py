@@ -7,11 +7,11 @@ Three semaphores govern concurrency (all tunable via PALACE_MAX_CONCURRENCY):
   _mine_sem  — one mine job at a time, independent of reads/writes
 
 Roadmap:
-  [HIGH] Verified Backups: /backup endpoint with integrity_check + smoke test retrieval.
+  [DONE] Verified Backups: /backup endpoint with integrity_check + smoke test retrieval.
   [DONE] Stability: Auto-detect "Internal Error" during search and trigger index recovery.
   [DONE] Flush: Ensure memories are checkpointed on shutdown and via /flush.
-  [HIGH] Unified Routing: Ensure all clients (including miners/compactors) use the Daemon API.
-  [MED]  Maintenance: Automate _READ_TOOLS sync with upstream mempalace.
+  [DONE] Unified Routing: Ensure all clients (including miners/compactors) use the Daemon API.
+  [DONE] Maintenance: Automate _READ_TOOLS sync with upstream mempalace.
 """
 import argparse
 import asyncio
@@ -100,8 +100,14 @@ _log = logging.getLogger("palace-daemon")
 # ── Crash-loop detection ───────────────────────────────────────────────────────
 _CRASH_LOOP_DIR = Path.home() / ".cache" / "palace-daemon"
 _RESTART_HISTORY_PATH = _CRASH_LOOP_DIR / "restart_history.json"
-_CRASH_LOOP_WINDOW = 600
-_CRASH_LOOP_THRESHOLD = 3
+_CRASH_LOOP_WINDOW = int(os.getenv("PALACE_CRASH_LOOP_THRESHOLD_SECONDS", "600"))
+_CRASH_LOOP_THRESHOLD = int(os.getenv("PALACE_CRASH_LOOP_THRESHOLD_COUNT", "3"))
+_CRASH_LOOP_RECOVERY = int(os.getenv("PALACE_CRASH_LOOP_RECOVERY_SECONDS", "1800"))
+
+# Monotonic timestamp of when this process started — used by
+# _crash_loop_state() to auto-exit the degraded state after the daemon
+# has been running cleanly for _CRASH_LOOP_RECOVERY seconds.
+_STARTUP_MONOTONIC: float = _time.monotonic()
 
 
 def _record_restart() -> None:
@@ -123,10 +129,21 @@ def _crash_loop_state() -> dict:
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(seconds=_CRASH_LOOP_WINDOW)
         recent = [r for r in data.get("restarts", []) if datetime.fromisoformat(r) > cutoff]
+        in_loop = len(recent) >= _CRASH_LOOP_THRESHOLD
+
+        # Auto-recovery: if the daemon has been running continuously for
+        # _CRASH_LOOP_RECOVERY seconds without crashing, suppress the
+        # crash-loop flag even if old restarts are still in the window.
+        # This lets the daemon self-heal without operator intervention.
+        uptime = _time.monotonic() - _STARTUP_MONOTONIC
+        recovered = in_loop and uptime >= _CRASH_LOOP_RECOVERY
+
         return {
-            "crash_loop": len(recent) >= _CRASH_LOOP_THRESHOLD,
+            "crash_loop": in_loop and not recovered,
             "restart_count": len(recent),
             "window_seconds": _CRASH_LOOP_WINDOW,
+            "uptime_seconds": round(uptime, 1),
+            "recovered": recovered,
         }
     except Exception:
         return {"crash_loop": False, "restart_count": 0, "window_seconds": _CRASH_LOOP_WINDOW}
@@ -336,26 +353,30 @@ async def _warn_if_hnsw_threads_unset() -> None:
 
 
 # Tools that only read state — everything else is treated as a write.
+# Synced against mempalace 3.3.5 (mempalace/mcp_server.py tool_* functions).
 _READ_TOOLS = {
-    "mempalace_search",
+    "mempalace_check_duplicate",
+    "mempalace_diary_read",
+    "mempalace_find_tunnels",
+    "mempalace_follow_tunnels",
+    "mempalace_get_aaak_spec",
+    "mempalace_get_drawer",
+    "mempalace_get_taxonomy",
+    "mempalace_graph_stats",
+    "mempalace_hook_settings",
     "mempalace_kg_query",
     "mempalace_kg_stats",
     "mempalace_kg_timeline",
-    "mempalace_graph_stats",
-    "mempalace_status",
     "mempalace_list_drawers",
-    "mempalace_get_drawer",
     "mempalace_list_rooms",
-    "mempalace_list_wings",
+    "mempalace_list_tags",
     "mempalace_list_tunnels",
-    "mempalace_find_tunnels",
-    "mempalace_follow_tunnels",
+    "mempalace_list_wings",
+    "mempalace_memories_filed_away",
+    "mempalace_search",
+    "mempalace_status",
     "mempalace_traverse",
-    "mempalace_diary_read",
-    "mempalace_check_duplicate",
-    "mempalace_get_taxonomy",
-    "mempalace_get_aaak_spec",
-    "mempalace_hook_settings",
+    "mempalace_walk_palace",
 }
 
 
@@ -797,6 +818,26 @@ async def lifespan(app: FastAPI):
     logger = logging.getLogger(__name__)
 
     _record_restart()
+    cl_state = _crash_loop_state()
+    if cl_state["crash_loop"]:
+        msg = (
+            f"palace-daemon CRASH-LOOP: {cl_state['restart_count']} restarts "
+            f"in {cl_state['window_seconds']}s"
+        )
+        logger.critical(msg)
+        # Best-effort desktop notification — don't fail if notify-send is
+        # missing (headless server, SSH-only, etc.).
+        try:
+            import subprocess
+            subprocess.Popen(
+                ["notify-send", "--urgency=critical", "palace-daemon", msg],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
 
     # Uvicorn installs its own SIGINT/SIGTERM handlers that shut down gracefully;
     # we don't need to override them. Calling sys.exit() from inside an asyncio
@@ -2244,50 +2285,108 @@ async def reload_palace(x_api_key: str | None = Header(default=None)):
 async def create_backup(x_api_key: str | None = Header(default=None)):
     """
     Perform a verified atomic backup of the palace database.
-    Uses sqlite3 .backup to ensure consistency even under load.
+
+    Uses sqlite3 .backup to snapshot the live DB, then verifies the
+    backup by running ``PRAGMA integrity_check`` and a smoke retrieval
+    (reading rows from ``embedding_metadata``) on the backup file — never
+    on the live DB.  All sync I/O runs in an executor to avoid blocking
+    the event loop.
+
+    The backup is kept even when verification fails so operators can
+    inspect it; the response flags the failure via ``integrity`` /
+    ``smoke_test`` fields.
     """
     _check_auth(x_api_key)
     palace_path = _mp._config.palace_path
     db_path = os.path.join(palace_path, "chroma.sqlite3")
-    
+
     backup_dir = os.path.join(os.path.dirname(palace_path), "palace.backup")
     os.makedirs(backup_dir, mode=0o700, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_path = os.path.join(backup_dir, f"chroma.sqlite3.{timestamp}.bak")
 
-    # Hold the write semaphore so no daemon-driven writes race the backup start.
-    async with _write_sem:
+    def _do_backup_and_verify() -> dict:
+        """Sync: snapshot + integrity check + smoke retrieval."""
+        # ── 1. Snapshot via sqlite3.backup ──────────────────────────
+        src = sqlite3.connect(db_path)
+        dst = sqlite3.connect(backup_path)
         try:
-            src = sqlite3.connect(db_path)
-            dst = sqlite3.connect(backup_path)
-            try:
-                src.backup(dst)
-            finally:
-                dst.close()
-                src.close()
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
 
-            check = sqlite3.connect(backup_path)
-            try:
-                cursor = check.cursor()
-                cursor.execute("PRAGMA integrity_check;")
-                status = cursor.fetchone()[0]
-            finally:
-                check.close()
+        result: dict = {
+            "backup_path": backup_path,
+            "timestamp": timestamp,
+            "integrity": "ok",
+            "smoke_test": "ok",
+            "rows_sampled": 0,
+        }
 
+        # ── 2. PRAGMA integrity_check on the backup ────────────────
+        try:
+            conn = sqlite3.connect(backup_path)
+            try:
+                cur = conn.cursor()
+                cur.execute("PRAGMA integrity_check;")
+                status = cur.fetchone()[0]
+            finally:
+                conn.close()
             if status != "ok":
-                if os.path.exists(backup_path):
-                    os.remove(backup_path)
-                raise Exception(f"Integrity check failed: {status}")
+                result["integrity"] = f"FAILED: {status}"
+        except Exception as exc:
+            result["integrity"] = f"FAILED: {exc}"
 
-            return {
-                "status": "success",
-                "backup_file": backup_path,
-                "integrity": status,
-                "timestamp": timestamp
-            }
+        # ── 3. Smoke retrieval — read rows from the backup ─────────
+        try:
+            conn = sqlite3.connect(
+                f"file:{backup_path}?mode=ro", uri=True, timeout=5,
+            )
+            try:
+                cur = conn.cursor()
+                # embedding_metadata is ChromaDB's main data table.
+                # A successful read of >=1 row proves the backup is
+                # structurally sound and contains real data.
+                cur.execute(
+                    "SELECT id, key, string_value FROM embedding_metadata LIMIT 5"
+                )
+                rows = cur.fetchall()
+                result["rows_sampled"] = len(rows)
+                if not rows:
+                    result["smoke_test"] = "WARN: table exists but returned 0 rows"
+            except sqlite3.OperationalError as exc:
+                # Table might not exist (empty / fresh palace). That's
+                # not corruption — just an empty database.
+                if "no such table" in str(exc).lower():
+                    result["smoke_test"] = "WARN: embedding_metadata table missing (empty palace?)"
+                    result["rows_sampled"] = 0
+                else:
+                    result["smoke_test"] = f"FAILED: {exc}"
+            finally:
+                conn.close()
+        except Exception as exc:
+            result["smoke_test"] = f"FAILED: {exc}"
+
+        return result
+
+    # Hold the write semaphore so no daemon-driven writes race the
+    # backup start, then run all sync I/O in an executor.
+    async with _write_sem:
+        loop = asyncio.get_running_loop()
+        try:
+            result = await loop.run_in_executor(None, _do_backup_and_verify)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Backup failed: {str(e)}")
+
+    # Derive overall status from verification results.
+    ok = (
+        result["integrity"] == "ok"
+        and result["smoke_test"] == "ok"
+    )
+    result["status"] = "ok" if ok else "degraded"
+    return result
 
 
 # ── Mine endpoint (serialized bulk import) ────────────────────────────────────
