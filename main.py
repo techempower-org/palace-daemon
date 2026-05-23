@@ -33,7 +33,7 @@ try:
 except ImportError:
     _anthropic = None
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 import mempalace.mcp_server as _mp
 from mempalace import repair as _mp_repair
@@ -893,6 +893,53 @@ async def graph(x_api_key: str | None = Header(default=None)):
         "kg_triples": kg_triples,
         "kg_stats": _unwrap(kg_stats_resp) or {},
     }
+
+
+# ── /viz status dashboard ───────────────────────────────────────────────────
+
+_VIZ_HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "viz.html")
+_VIZ_HTML_CACHE: str | None = None
+
+
+@app.get("/viz", response_class=HTMLResponse)
+async def viz(
+    key: str | None = None,
+    x_api_key: str | None = Header(default=None),
+):
+    """Self-contained status dashboard at /viz.
+
+    Returns the HTML page from static/viz.html. The page then fetches
+    /graph, /repair/status, and /health client-side and renders five panels:
+    KG force-graph (D3), wings bar chart, wing/room hierarchy (Mermaid),
+    tunnels list, KG stats.
+
+    Auth: same as every other endpoint — ``X-Api-Key`` header. As an
+    ergonomic shortcut for browser bookmarking, ``?key=...`` is also
+    accepted; the page reads it from the URL and re-supplies it to the
+    data endpoints. The ``?key=...`` shape leaks the key into browser
+    history, proxy logs, and referer headers — prefer the header for
+    anything beyond a personal bookmark.
+
+    The HTML template is read from disk lazily on the first request and
+    cached in-process thereafter (one disk read per daemon process).
+
+    Inspired by upstream PRs #1022 (D3 KG viz), #393 (Mermaid diagrams),
+    #431 (CLI stats), #256 (sync_status MCP), #601 (brief overview) — none
+    cherry-picked, just patterns synthesized over the daemon's /graph.
+    """
+    # Accept the API key from either the X-Api-Key header (preferred) or
+    # the ?key= query parameter (bookmarkable). _check_auth is a no-op
+    # when PALACE_API_KEY is unset, so this preserves the
+    # zero-config-local-dev experience.
+    _check_auth(x_api_key or key)
+    global _VIZ_HTML_CACHE
+    if _VIZ_HTML_CACHE is None:
+        try:
+            with open(_VIZ_HTML_PATH, encoding="utf-8") as f:
+                _VIZ_HTML_CACHE = f.read()
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=f"viz template missing: {e}")
+    return HTMLResponse(content=_VIZ_HTML_CACHE)
 
 
 @app.post("/flush")
