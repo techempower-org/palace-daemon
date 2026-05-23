@@ -165,17 +165,16 @@ async def _watchdog_loop(interval_secs: int) -> None:
 
 
 async def _warn_if_hnsw_threads_unset() -> None:
-    """Warn if hnsw:num_threads != 1 after a collection reopen.
+    """Verify hnsw:num_threads == 1 after a collection reopen; warn if not.
 
-    ChromaDB 1.5.x does not persist HNSW metadata across reopens (MemPalace
-    issue #1161). After any cache clear the collection silently reverts to
-    parallel inserts, risking SIGSEGV under concurrent writes.
+    Opens the collection via _get_collection() so _pin_hnsw_threads() runs,
+    then reads the resulting metadata. Previously used a protocol-level ping
+    which never touches the collection — so after any cache clear the check
+    always found _collection_cache=None and fired a false-positive warning.
     """
     try:
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, _mp.handle_request, {
-            "jsonrpc": "2.0", "id": "hnsw-check", "method": "ping", "params": {}
-        })
+        await loop.run_in_executor(None, _mp._get_collection)
         col = _mp._collection_cache
         meta = (col and getattr(col, "_collection", None) and
                 getattr(col._collection, "metadata", None)) or {}
@@ -183,8 +182,7 @@ async def _warn_if_hnsw_threads_unset() -> None:
         if threads != 1:
             _log.warning(
                 "HNSW num_threads=%s after collection reopen — parallel inserts active. "
-                "Concurrent writes risk SIGSEGV. See MemPalace issue #1161. "
-                "Upgrade to mempalace >=3.3.4 when available.",
+                "Concurrent writes risk SIGSEGV. See MemPalace issue #1161.",
                 threads,
             )
     except Exception:
