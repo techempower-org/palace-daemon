@@ -766,6 +766,48 @@ def _theme_session_start(wing: str, response: dict) -> str:
     return f"✦ palace ready — wing:{display} holds {total:,} diary {plural}"
 
 
+def _extract_diary_context(response: dict, max_chars: int = 4000) -> str:
+    """Extract recent diary entries from a diary_read MCP response.
+
+    Returns a formatted context block for injection into the session
+    greeting, or empty string if no entries found. Truncates to
+    max_chars (~1500 tokens) to stay within the disruption budget.
+    """
+    try:
+        content = response.get("result", {}).get("content", []) if isinstance(response, dict) else []
+        if not content or not isinstance(content[0], dict):
+            return ""
+        inner = json.loads(content[0].get("text", "{}"))
+    except Exception:
+        return ""
+
+    entries = inner.get("entries", [])
+    if not entries:
+        return ""
+
+    lines = ["Recent session context:"]
+    total_len = len(lines[0])
+    for entry in entries:
+        text = entry.get("entry", "") or entry.get("content", "") or ""
+        topic = entry.get("topic", "") or ""
+        ts = entry.get("timestamp", "") or entry.get("created_at", "") or ""
+        if not text:
+            continue
+        preview = text[:400]
+        if len(text) > 400:
+            preview += "..."
+        header = f"  [{topic}]" if topic else ""
+        if ts:
+            header += f" ({ts[:10]})"
+        line = f"{header}\n  {preview}" if header else f"  {preview}"
+        if total_len + len(line) + 1 > max_chars:
+            break
+        lines.append(line)
+        total_len += len(line) + 1
+
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
 def _theme_precompact_save(wing: str, response: dict, palace_count: str) -> str:
     """Themed message for the pre-compact diary save (context boundary marker).
 
@@ -962,13 +1004,25 @@ def hook_session_start(data: dict, harness: str):
         "room": "sessions",
         "limit": 1,
     })
-    if ok:
-        sys_msg = _theme_session_start(wing, response)
-        _log(f"SESSION GREETING: {sys_msg}")
-        _output({"systemMessage": sys_msg})
-    else:
+    if not ok:
         _log(f"SESSION GREETING skipped (daemon unreachable for wing={wing})")
         _output({})
+        return
+
+    sys_msg = _theme_session_start(wing, response)
+
+    diary_ok, diary_resp = _post_mcp(daemon_url, "mempalace_diary_read", {
+        "agent_name": "claude-code",
+        "wing": wing,
+        "last_n": 2,
+    })
+    if diary_ok:
+        diary_context = _extract_diary_context(diary_resp)
+        if diary_context:
+            sys_msg += "\n" + diary_context
+
+    _log(f"SESSION GREETING: {sys_msg}")
+    _output({"systemMessage": sys_msg})
 
 
 def hook_stop(data: dict, harness: str):
