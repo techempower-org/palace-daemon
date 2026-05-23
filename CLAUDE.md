@@ -20,12 +20,11 @@
 - **Wing/room layout:** Per the palace-taxonomy spec, `wing = project slug` (no `wing_` prefix), `room ∈ {architecture, decisions, problems, planning, sessions, references, discoveries}`. The session hooks already enforce this on auto-saves.
 
 ### 5. Upgrading mempalace
-After `pipx upgrade mempalace`, always re-apply local patches and restart:
+After `pipx upgrade mempalace`, re-apply any local patches and restart:
 
     bash /home/jp/Projects/palace-daemon/scripts/apply_patches.sh
     sudo systemctl restart palace-daemon
 
 If a patch conflicts, the script will say so. Check whether upstream fixed the issue — if so, delete the patch file. Otherwise update the patch to match the new code.
 
-Patches live in `patches/`. Current patches:
-- `mcp_server_get_collection.patch` — `_get_collection`: exception logging + auto-retry on cache failure (clears `_client_cache` / `_collection_cache` between attempts so a stale cache self-heals without a daemon restart). The original `hnsw:num_threads=1` portion landed upstream via `_pin_hnsw_threads()` and is no longer in this patch.
+Patches live in `patches/`. No active patches as of 2026-05-23 — the last patch (`mcp_server_get_collection.patch`) was absorbed into mempalace 3.3.5's `_get_collection_chroma` backend.

@@ -24,7 +24,7 @@ import sys
 import fcntl
 import signal
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -96,6 +96,40 @@ _repair_state: dict[str, Any] = {"in_progress": False, "mode": None, "started_at
 _repair_lock = asyncio.Lock()
 
 _log = logging.getLogger("palace-daemon")
+
+# ── Crash-loop detection ───────────────────────────────────────────────────────
+_CRASH_LOOP_DIR = Path.home() / ".cache" / "palace-daemon"
+_RESTART_HISTORY_PATH = _CRASH_LOOP_DIR / "restart_history.json"
+_CRASH_LOOP_WINDOW = 600
+_CRASH_LOOP_THRESHOLD = 3
+
+
+def _record_restart() -> None:
+    _CRASH_LOOP_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        data = json.loads(_RESTART_HISTORY_PATH.read_text()) if _RESTART_HISTORY_PATH.exists() else {}
+    except Exception:
+        data = {}
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=_CRASH_LOOP_WINDOW)
+    restarts = [r for r in data.get("restarts", []) if datetime.fromisoformat(r) > cutoff]
+    restarts.append(now.isoformat())
+    _RESTART_HISTORY_PATH.write_text(json.dumps({"restarts": restarts}))
+
+
+def _crash_loop_state() -> dict:
+    try:
+        data = json.loads(_RESTART_HISTORY_PATH.read_text()) if _RESTART_HISTORY_PATH.exists() else {}
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(seconds=_CRASH_LOOP_WINDOW)
+        recent = [r for r in data.get("restarts", []) if datetime.fromisoformat(r) > cutoff]
+        return {
+            "crash_loop": len(recent) >= _CRASH_LOOP_THRESHOLD,
+            "restart_count": len(recent),
+            "window_seconds": _CRASH_LOOP_WINDOW,
+        }
+    except Exception:
+        return {"crash_loop": False, "restart_count": 0, "window_seconds": _CRASH_LOOP_WINDOW}
 
 
 # ── Rebuild progress capture (palace-daemon#12) ──────────────────────────────
@@ -761,7 +795,9 @@ async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
 async def lifespan(app: FastAPI):
     import logging
     logger = logging.getLogger(__name__)
-    
+
+    _record_restart()
+
     # Uvicorn installs its own SIGINT/SIGTERM handlers that shut down gracefully;
     # we don't need to override them. Calling sys.exit() from inside an asyncio
     # signal handler tears the event loop down mid-coroutine and skips lifespan
@@ -986,9 +1022,15 @@ async def health():
         palace_ok = col is not None
     except Exception:
         pass
-    status = "ok" if palace_ok else "degraded"
-    payload = {"status": status, "daemon": "palace-daemon", "version": VERSION, "palace": result}
+    cl = _crash_loop_state()
     if not palace_ok:
+        status = "degraded"
+    elif cl["crash_loop"]:
+        status = "crash_loop"
+    else:
+        status = "ok"
+    payload = {"status": status, "daemon": "palace-daemon", "version": VERSION, "palace": result, **cl}
+    if status != "ok":
         return JSONResponse(content=payload, status_code=503)
     return payload
 
