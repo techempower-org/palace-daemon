@@ -23,7 +23,7 @@ import sys
 import fcntl
 import signal
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +43,7 @@ import messages
 
 # ── Config (env vars override CLI defaults) ───────────────────────────────────
 
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 DEFAULT_HOST = os.getenv("PALACE_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.getenv("PALACE_PORT", "8085"))
 DEFAULT_PALACE = os.getenv("PALACE_PATH", "")
@@ -82,6 +82,42 @@ _repair_lock = asyncio.Lock()
 
 _log = logging.getLogger("palace-daemon")
 
+# ── Crash-loop detection ───────────────────────────────────────────────────────
+_CRASH_LOOP_DIR = Path.home() / ".cache" / "palace-daemon"
+_RESTART_HISTORY_PATH = _CRASH_LOOP_DIR / "restart_history.json"
+_CRASH_LOOP_WINDOW = 600   # seconds — rolling window for restart counting
+_CRASH_LOOP_THRESHOLD = 3  # restarts within window = crash loop
+
+
+def _record_restart() -> None:
+    """Append this startup timestamp to the ring buffer; prune expired entries."""
+    _CRASH_LOOP_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        data = json.loads(_RESTART_HISTORY_PATH.read_text()) if _RESTART_HISTORY_PATH.exists() else {}
+    except Exception:
+        data = {}
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=_CRASH_LOOP_WINDOW)
+    restarts = [r for r in data.get("restarts", []) if datetime.fromisoformat(r) > cutoff]
+    restarts.append(now.isoformat())
+    _RESTART_HISTORY_PATH.write_text(json.dumps({"restarts": restarts}))
+
+
+def _crash_loop_state() -> dict:
+    """Return crash-loop metadata: crash_loop bool, restart_count, window_seconds."""
+    try:
+        data = json.loads(_RESTART_HISTORY_PATH.read_text()) if _RESTART_HISTORY_PATH.exists() else {}
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(seconds=_CRASH_LOOP_WINDOW)
+        recent = [r for r in data.get("restarts", []) if datetime.fromisoformat(r) > cutoff]
+        return {
+            "crash_loop": len(recent) >= _CRASH_LOOP_THRESHOLD,
+            "restart_count": len(recent),
+            "window_seconds": _CRASH_LOOP_WINDOW,
+        }
+    except Exception:
+        return {"crash_loop": False, "restart_count": 0, "window_seconds": _CRASH_LOOP_WINDOW}
+
 
 # ── Systemd watchdog / sd_notify ─────────────────────────────────────────────
 
@@ -113,6 +149,10 @@ async def _watchdog_loop(interval_secs: int) -> None:
     tick = max(10, interval_secs // 2)
     while True:
         await asyncio.sleep(tick)
+        # Skip during rebuild — the collection swap deletes + recreates SQLite/HNSW
+        # files; a concurrent _get_collection() corrupts the WAL (code 522).
+        if _repair_state.get("in_progress") and _repair_state.get("mode") == "rebuild":
+            continue
         try:
             loop = asyncio.get_running_loop()
             col = await loop.run_in_executor(None, _mp._get_collection)
@@ -493,6 +533,9 @@ async def lifespan(app: FastAPI):
     # Signal systemd that startup is complete (Type=notify in service file).
     _sd_notify("READY=1\n")
 
+    # Record this startup in the crash-loop ring buffer.
+    _record_restart()
+
     # Start systemd watchdog loop if WatchdogSec is configured.
     wdog_secs = _watchdog_interval()
     if wdog_secs > 0:
@@ -545,9 +588,21 @@ async def health():
         palace_ok = col is not None
     except Exception:
         pass
-    status = "ok" if palace_ok else "degraded"
-    payload = {"status": status, "daemon": "palace-daemon", "version": VERSION, "palace": result}
+    cl = _crash_loop_state()
     if not palace_ok:
+        status = "degraded"
+    elif cl["crash_loop"]:
+        status = "crash_loop"
+    else:
+        status = "ok"
+    payload = {
+        "status": status,
+        "daemon": "palace-daemon",
+        "version": VERSION,
+        "palace": result,
+        **cl,
+    }
+    if status != "ok":
         return JSONResponse(content=payload, status_code=503)
     return payload
 

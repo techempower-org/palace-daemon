@@ -1,7 +1,15 @@
 ## [Unreleased]
 
+# Changelog — continued
+
+## [1.7.1] - 2026-05-23
+
+### Added
+- **Crash-loop detection** — daemon tracks restart timestamps in a ring buffer (`~/.cache/palace-daemon/restart_history.json`). If ≥3 restarts occur within 10 minutes, `/health` returns 503 with `status: "crash_loop"` and `restart_count` / `window_seconds` fields, making persistent failures visible to monitoring. `palace-daemon.service` now adds `StartLimitBurst=5` / `StartLimitIntervalSec=600` so systemd stops retrying after 5 crashes in 10 minutes.
+
 ### Fixed
 - **`GET /stats` concurrent HNSW race** — serialized the three parallel `mempalace_kg_stats` / `mempalace_graph_stats` / `mempalace_status` calls; concurrent execution raced on the ChromaDB HNSW index (issues #974/#965) causing SIGBUS on palaces with stale or rebuilding segments.
+- **Watchdog/rebuild race** — systemd watchdog loop now skips the `_get_collection()` probe during `mode=rebuild` repairs. Previously the watchdog fired concurrently mid-collection-swap, opening a SQLite read handle while the rebuild was rewriting WAL files, causing `SQLITE_IOERR_READ` (code 522) and database corruption on the next open.
 
 # Changelog
 
