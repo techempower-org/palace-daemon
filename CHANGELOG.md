@@ -2,6 +2,11 @@
 
 # Changelog — continued
 
+## [1.7.3] - 2026-05-23
+
+### Fixed
+- **Watchdog kills rebuild** — `_watchdog_loop` was `continue`-ing past `_sd_notify("WATCHDOG=1\n")` during `mode=rebuild`, so systemd received no keepalive and killed the process at the 2-minute watchdog timeout (SIGABRT). Fix: send `WATCHDOG=1` unconditionally before `continue`-ing — the collection probe is still skipped (to prevent the WAL race from v1.7.1), but systemd gets its ping and the rebuild runs to completion.
+
 ## [1.7.2] - 2026-05-23
 
 ### Fixed

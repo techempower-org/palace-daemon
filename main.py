@@ -43,7 +43,7 @@ import messages
 
 # ── Config (env vars override CLI defaults) ───────────────────────────────────
 
-VERSION = "1.7.2"
+VERSION = "1.7.3"
 DEFAULT_HOST = os.getenv("PALACE_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.getenv("PALACE_PORT", "8085"))
 DEFAULT_PALACE = os.getenv("PALACE_PATH", "")
@@ -149,9 +149,11 @@ async def _watchdog_loop(interval_secs: int) -> None:
     tick = max(10, interval_secs // 2)
     while True:
         await asyncio.sleep(tick)
-        # Skip during rebuild — the collection swap deletes + recreates SQLite/HNSW
-        # files; a concurrent _get_collection() corrupts the WAL (code 522).
+        # During rebuild, skip the _get_collection() probe (it would race the
+        # collection swap and corrupt the WAL), but still send WATCHDOG=1 so
+        # systemd doesn't kill the process mid-rebuild.
         if _repair_state.get("in_progress") and _repair_state.get("mode") == "rebuild":
+            _sd_notify("WATCHDOG=1\n")
             continue
         try:
             loop = asyncio.get_running_loop()
