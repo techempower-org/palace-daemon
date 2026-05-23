@@ -43,12 +43,12 @@ step() { printf '\n\033[1m▸ %s\033[0m\n' "$1"; }
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
 fail() { printf '  \033[31m✗\033[0m %s\n' "$1" >&2; exit 1; }
 
-step "1/5  push to origin"
+step "1/6  push to origin"
 local_sha=$(git rev-parse HEAD)
 git push origin main >/dev/null 2>&1 || fail "git push failed"
 ok "pushed $local_sha → origin/main"
 
-step "2/5  wait for sync to $HOST"
+step "2/6  wait for sync to $HOST"
 sleep "$SYNC_GRACE"
 remote_sha=$(ssh "$HOST" "cd /mnt/raid/projects/palace-daemon && git rev-parse HEAD 2>/dev/null || git log -1 --format=%H 2>/dev/null" 2>/dev/null || echo "")
 if [ "$remote_sha" = "$local_sha" ]; then
@@ -63,13 +63,23 @@ else
     [ "$remote_sha" = "$local_sha" ] && ok "remote caught up to $local_sha" || fail "sync lag persists; aborting"
 fi
 
-step "3/5  restart palace-daemon on $HOST"
+step "3/6  sync memorypalace git state on $HOST"
+# Syncthing keeps the working tree in sync, but .git is excluded from sync
+# (.stignore). The editable install reads the working tree so Python sees the
+# right code, but git HEAD drifts behind. Fix that here so `git log` on disks
+# is consistent and `git pull` doesn't choke on "local changes" next time.
+MEMPALACE_DIR="/mnt/raid/projects/memorypalace"
+ssh "$HOST" "cd $MEMPALACE_DIR && git fetch origin --quiet 2>/dev/null && git reset --hard origin/main --quiet 2>/dev/null" \
+    && ok "memorypalace git synced to origin/main" \
+    || echo "  ! memorypalace git sync skipped (non-fatal)"
+
+step "4/6  restart palace-daemon on $HOST"
 # System service, not user service. sudo without password requires passwordless
 # sudo on the target (jp has this on the homelab hosts per CLAUDE.md).
 ssh "$HOST" "sudo systemctl restart palace-daemon" || fail "restart failed"
 ok "restart issued"
 
-step "4/5  wait for daemon health"
+step "5/6  wait for daemon health"
 deadline=$((SECONDS + HEALTH_TIMEOUT))
 while (( SECONDS < deadline )); do
     if curl -fs --max-time 3 "$URL/health" >/dev/null 2>&1; then
@@ -81,7 +91,7 @@ while (( SECONDS < deadline )); do
 done
 (( SECONDS >= deadline )) && fail "daemon did not respond on $URL within ${HEALTH_TIMEOUT}s"
 
-step "5/5  smoke-test routes"
+step "6/6  smoke-test routes"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 PALACE_DAEMON_URL="$URL" PALACE_API_KEY="$KEY" \
     bash "$SCRIPT_DIR/verify-routes.sh" \
