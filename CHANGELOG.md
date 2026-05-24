@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### Added — 2026-05-24 — *FlashRank cross-encoder reranking (spike)*
+
+Spike for [techempower-org/familiar.realm.watch#43](https://github.com/techempower-org/familiar.realm.watch/issues/43).
+All four `/search*` endpoints now run a neural-rerank pass after
+hybrid retrieval and before the response leaves the daemon.
+
+- **New module `rerank.py`** — lazy-loaded singleton FlashRank ranker
+  (`ms-marco-TinyBERT-L-2-v2`, ~4 MB ONNX, CPU-friendly). Cached for the
+  daemon's lifetime; ~90–100 ms cold load, ~15–40 ms per request for
+  n ≤ 20 hits.
+- **Endpoints touched**: `/search`, `/search/hybrid`, `/search/keyword`,
+  `/search/age-fused`. The reranker pulls `text` (or `document` for
+  graph-only stubs) from each hit, scores against the query, and reorders
+  in place. Graph-only stubs with no rerankable text sink to the tail.
+- **Response contract preserved**: same `results` list, same per-hit
+  fields. Each hit gains a `rerank_score` float (numpy scalars coerced
+  to JSON-safe Python floats). A new `rerank` block attaches to the
+  response with `{enabled, model, n_input, n_reranked, latency_ms, status}`.
+- **Toggle**: `PALACE_RERANK_ENABLED` env var (default: `"true"`). Read
+  live per-request so operators can flip via systemd `Environment=` +
+  restart without a code change. Model override: `PALACE_RERANK_MODEL`.
+- **Graceful fallback**: import failure, missing model, or a ranker
+  exception during the request all return the original ordering plus
+  `status=failed` + reason. The endpoint never hard-errors on rerank
+  trouble.
+- **Tests**: 15 cases in `tests/test_rerank.py` covering env-var gating,
+  empty/None input, graph-stub handling, response-shape preservation,
+  load-failure fallback, and a live smoke test against the real ONNX
+  model (auto-skipped when `flashrank` isn't installed).
+- **Requirements**: `flashrank>=0.2.10` added to `requirements.txt`.
+
 ### Added — 2026-05-23 — *Crash-loop detection + `monitor.py`*
 
 Cherry-picked from upstream (`rboarescu/palace-daemon`, implements

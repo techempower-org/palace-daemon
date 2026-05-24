@@ -57,6 +57,7 @@ from mempalace import repair as _mp_repair
 from mempalace.backends.chroma import quarantine_stale_hnsw
 
 import messages
+import rerank as _rerank
 
 # ── Config (env vars override CLI defaults) ───────────────────────────────────
 
@@ -1119,7 +1120,7 @@ async def search(
         "method": "tools/call",
         "params": {"name": "mempalace_search", "arguments": args},
     })
-    return _unwrap(result)
+    return _rerank.rerank_response(q, _unwrap(result))
 
 
 # ── Postgres-native BM25 search ──────────────────────────────────────
@@ -1204,7 +1205,7 @@ async def search_hybrid(request: Request, x_api_key: str | None = Header(default
         "method": "tools/call",
         "params": {"name": "mempalace_search", "arguments": args},
     })
-    return _unwrap(result)
+    return _rerank.rerank_response(query, _unwrap(result))
 
 
 @app.post("/search/keyword")
@@ -1259,7 +1260,7 @@ async def search_keyword(request: Request, x_api_key: str | None = Header(defaul
 
     from mempalace.searcher import _bm25_only_via_postgres
     result = _bm25_only_via_postgres(query, dsn, wing=wing, room=room, n_results=limit)
-    return result
+    return _rerank.rerank_response(query, result)
 
 
 @app.post("/search/age-fused")
@@ -1337,11 +1338,11 @@ async def search_age_fused(request: Request, x_api_key: str | None = Header(defa
     if not dsn:
         # No AGE access — fall through to vector-only with a warning trace.
         if include_trace:
-            return {"results": vec_hits[:limit], "trace": {
+            return _rerank.rerank_response(query, {"results": vec_hits[:limit], "trace": {
                 "n_vector": len(vec_hits), "n_graph": 0, "n_after_fusion": min(limit, len(vec_hits)),
                 "warning": "MEMPALACE_POSTGRES_DSN not set; age-fused falls back to vector-only",
-            }}
-        return {"results": vec_hits[:limit]}
+            }})
+        return _rerank.rerank_response(query, {"results": vec_hits[:limit]})
 
     # Initialize *before* the AGE lookup so the trace block can read it
     # even when the lookup raises before extraction happens.
@@ -1428,7 +1429,7 @@ async def search_age_fused(request: Request, x_api_key: str | None = Header(defa
             "n_after_fusion": len(out_hits),
             "query_entities": [e.name for e in query_entities],
         }
-    return response
+    return _rerank.rerank_response(query, response)
 
 
 def _load_age_extractor():
