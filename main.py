@@ -2501,6 +2501,101 @@ async def mine(request: Request, x_api_key: str | None = Header(default=None)):
     return result
 
 
+_backfill_state: dict[str, Any] = {"in_progress": False}
+_backfill_lock = asyncio.Lock()
+
+@app.post("/backfill-age")
+async def backfill_age(request: Request, x_api_key: str | None = Header(default=None)):
+    """Trigger AGE graph backfill from existing drawer rows.
+
+    Runs `mempalace-backfill-age` (or `python -m mempalace.backfill_age`)
+    as a background subprocess. Returns immediately with status; poll
+    /backfill-age/status for progress.
+
+    Body (all optional)::
+
+        {
+          "wing":          null,    // restrict to one wing
+          "skip_palace":   false,   // skip Wing/Room/Drawer structure
+          "skip_entities": false,   // skip per-drawer entity extraction
+          "restart":       false    // clear checkpoint, start fresh
+        }
+
+    Requires MEMPALACE_BACKEND=postgres.
+    """
+    _check_auth(x_api_key)
+    if _mp._config.backend != "postgres":
+        raise HTTPException(status_code=503, detail="backfill-age requires postgres backend")
+
+    async with _backfill_lock:
+        if _backfill_state["in_progress"]:
+            return {"status": "already_running", "started_at": _backfill_state.get("started_at")}
+
+        dsn = os.environ.get("MEMPALACE_POSTGRES_DSN")
+        if not dsn:
+            cfg = _mp.MempalaceConfig()
+            dsn = cfg.postgres_dsn
+        if not dsn:
+            raise HTTPException(status_code=500, detail="no postgres DSN available")
+
+        body = await request.json() if request.headers.get("content-type") == "application/json" else {}
+        cmd = [sys.executable, "-m", "mempalace.backfill_age", "--dsn", dsn]
+        if body.get("wing"):
+            cmd += ["--wing", body["wing"]]
+        if body.get("skip_palace"):
+            cmd.append("--skip-palace")
+        if body.get("skip_entities"):
+            cmd.append("--skip-entities")
+        if body.get("restart"):
+            cmd.append("--restart")
+
+        _backfill_state["in_progress"] = True
+        _backfill_state["started_at"] = _time.monotonic()
+        _backfill_state["output_lines"] = []
+
+    async def _run_backfill():
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            async for line in proc.stdout:
+                decoded = line.decode().rstrip()
+                _backfill_state.setdefault("output_lines", []).append(decoded)
+                if len(_backfill_state["output_lines"]) > 200:
+                    _backfill_state["output_lines"] = _backfill_state["output_lines"][-100:]
+            await proc.wait()
+            _backfill_state["returncode"] = proc.returncode
+        except Exception as e:
+            _backfill_state["error"] = str(e)
+        finally:
+            _backfill_state["in_progress"] = False
+            _backfill_state["finished_at"] = _time.monotonic()
+
+    asyncio.create_task(_run_backfill())
+    return {"status": "started", "command": " ".join(cmd[:4]) + " ..."}
+
+
+@app.get("/backfill-age/status")
+async def backfill_age_status(x_api_key: str | None = Header(default=None)):
+    """Poll backfill-age progress."""
+    _check_auth(x_api_key)
+    result = {
+        "in_progress": _backfill_state["in_progress"],
+    }
+    if _backfill_state.get("started_at"):
+        elapsed = _time.monotonic() - _backfill_state["started_at"]
+        result["elapsed_seconds"] = round(elapsed, 1)
+    if _backfill_state.get("output_lines"):
+        result["recent_output"] = _backfill_state["output_lines"][-10:]
+    if _backfill_state.get("returncode") is not None:
+        result["returncode"] = _backfill_state["returncode"]
+    if _backfill_state.get("error"):
+        result["error"] = _backfill_state["error"]
+    return result
+
+
 @app.get("/watch")
 async def watch_list(x_api_key: str | None = Header(default=None)):
     """List the directories the file-watcher is currently monitoring.
