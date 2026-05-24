@@ -2490,7 +2490,12 @@ async def mine(request: Request, x_api_key: str | None = Header(default=None)):
         "stdout": out,
         "stderr": err,
     }
-    if proc.returncode == 0 and not out.strip():
+    # mempalace's mcp_server.py redirects stdout → stderr at import time
+    # (protects MCP JSON-RPC transport). When mine_sessions imports
+    # _get_collection from mcp_server, all print() output lands on stderr.
+    # Check both streams before declaring "no output".
+    combined = (out.strip() or "") + (err.strip() or "")
+    if proc.returncode == 0 and not combined:
         import logging
         logging.warning(
             "POST /mine produced no output for dir=%s wing=%s mode=%s — "
