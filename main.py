@@ -2430,7 +2430,7 @@ async def mine(request: Request, x_api_key: str | None = Header(default=None)):
     extract = body.get("extract")
     limit = body.get("limit")
 
-    _VALID_MODES = {"convos", "projects"}
+    _VALID_MODES = {"convos", "projects", "session"}
     _VALID_EXTRACTS = {"exchange", "general"}
     if mode not in _VALID_MODES:
         raise HTTPException(status_code=400, detail=f"'mode' must be one of: {', '.join(_VALID_MODES)}")

@@ -983,6 +983,18 @@ def _ingest_transcript_via_daemon(daemon_url: str, transcript_path: str, wing: s
             slot.close()
         except OSError:
             pass
+
+    # Session manifest: one addressable drawer per session file with
+    # structured metadata (timestamps, exchange count, first/last message).
+    # Complements the chunked convos drawers with a navigable anchor that
+    # answers "what did session X cover?" queries. Fast (no LLM), idempotent.
+    try:
+        _post_mine(daemon_url, mine_dir,
+                   timeout=settings.get("mine_timeout_s", 60),
+                   mode="session", wing=wing)
+    except Exception:
+        pass  # best-effort; convos mine is the primary
+
     return ok
 
 
