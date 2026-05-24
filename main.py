@@ -2482,11 +2482,22 @@ async def mine(request: Request, x_api_key: str | None = Header(default=None)):
         )
         stdout, stderr = await proc.communicate()
 
-    return {
+    out = stdout.decode()
+    err = stderr.decode()
+    result = {
         "returncode": proc.returncode,
-        "stdout": stdout.decode(),
-        "stderr": stderr.decode(),
+        "stdout": out,
+        "stderr": err,
     }
+    if proc.returncode == 0 and not out.strip():
+        import logging
+        logging.warning(
+            "POST /mine produced no output for dir=%s wing=%s mode=%s — "
+            "directory may be empty or contain no mineable files",
+            directory, wing, mode,
+        )
+        result["warning"] = f"mine produced no output — {directory} may be empty or inaccessible"
+    return result
 
 
 @app.get("/watch")

@@ -969,6 +969,9 @@ def _ingest_transcript_via_daemon(daemon_url: str, transcript_path: str, wing: s
                                   timeout=settings.get("mine_timeout_s", 60),
                                   mode="convos", wing=wing)
         if ok:
+            warning = (response or {}).get("warning", "")
+            if warning:
+                _log(f"Transcript ingest WARNING: {warning}")
             _log(f"Transcript ingest queued: {path.name} → wing={wing}")
         else:
             err = (response or {}).get("error", "unknown")
