@@ -30,6 +30,9 @@ Environment=PALACE_MAX_WRITE_CONCURRENCY=1
 # Setting STRICT=0 here forces the in-process path regardless of
 # whether DAEMON_URL leaks in. See palace-daemon#11.
 Environment=PALACE_DAEMON_STRICT=0
+# Inline AGE KG entity extraction on every drawer write. Populates
+# MENTIONS edges so hybrid search can fuse graph + vector + BM25 signals.
+Environment=MEMPALACE_KG_WRITETHROUGH=1
 
 [Install]
 WantedBy=multi-user.target
