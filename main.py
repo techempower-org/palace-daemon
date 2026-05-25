@@ -2235,20 +2235,22 @@ def _read_kg_postgres_stats() -> dict | None:
     except Exception:
         return None
     try:
+        graph = getattr(kg, "GRAPH_NAME", "mempalace_kg")
+        entities = 0
+        mentions = 0
         try:
-            rows = kg._run_cypher(
-                "MATCH (e:Entity) RETURN count(e) AS n", {}, fetch=True
-            )
-            entities = int(kg._unwrap_agtype(rows[0][0])) if rows else 0
+            with kg._conn.cursor() as cur:
+                cur.execute(f'SELECT count(*) FROM {graph}."Entity"')
+                row = cur.fetchone()
+                entities = int(row[0]) if row else 0
+                cur.execute(f'SELECT count(*) FROM {graph}."MENTIONS"')
+                row = cur.fetchone()
+                mentions = int(row[0]) if row else 0
         except Exception:
-            entities = 0
-        try:
-            rows = kg._run_cypher(
-                "MATCH ()-[r:MENTIONS]->() RETURN count(r) AS n", {}, fetch=True
-            )
-            mentions = int(kg._unwrap_agtype(rows[0][0])) if rows else 0
-        except Exception:
-            mentions = 0
+            try:
+                kg._conn.rollback()
+            except Exception:
+                pass
     finally:
         try:
             kg.close()

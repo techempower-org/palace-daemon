@@ -209,29 +209,50 @@ class TestReadKgStatsAGE(unittest.TestCase):
     must reflect live AGE counts under the postgres backend, not the
     legacy `mempalace_kg_stats` MCP output (which counts the near-empty
     RELATION table and shows `triples: 1` while AGE holds millions of
-    MENTIONS edges). These tests stub `KnowledgeGraphAGE._run_cypher` so
-    the wiring is verifiable without a live Postgres + AGE.
+    MENTIONS edges).
+
+    Implementation note: the helper avoids Cypher (`MATCH ()-[r:MENTIONS]->()
+    RETURN count(r)`) because AGE materializes the full edge scan and
+    exhausts Postgres shared memory at 5M+ rows. It SELECT-counts the
+    backing label tables in the `mempalace_kg` schema instead. These
+    tests stub `kg._conn.cursor()` to capture the SQL and feed counts
+    back, no live Postgres needed.
     """
 
-    def _make_kg_class(self, entity_count, mentions_count):
-        captured = {"calls": []}
+    def _make_kg_class(self, entity_count, mentions_count, raise_on=None):
+        captured = {"sql": []}
+
+        class _StubCursor:
+            def __init__(self):
+                self._last = None
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def execute(self, sql, params=None):
+                captured["sql"].append(sql)
+                if raise_on and raise_on in sql:
+                    raise RuntimeError("simulated backing-table failure")
+                if '"Entity"' in sql:
+                    self._last = (entity_count,)
+                elif '"MENTIONS"' in sql:
+                    self._last = (mentions_count,)
+                else:
+                    self._last = (0,)
+            def fetchone(self):
+                return self._last
+
+        class _StubConn:
+            def cursor(self):
+                return _StubCursor()
+            def rollback(self):
+                captured["sql"].append("ROLLBACK")
 
         class _StubKG:
+            GRAPH_NAME = "mempalace_kg"
             def __init__(self, dsn=None):
                 self.dsn = dsn
-
-            def _run_cypher(self, cypher, params, fetch=True):
-                captured["calls"].append(cypher)
-                if "Entity" in cypher and "MENTIONS" not in cypher:
-                    return [[entity_count]]
-                if "MENTIONS" in cypher:
-                    return [[mentions_count]]
-                return []
-
-            @staticmethod
-            def _unwrap_agtype(v):
-                return v
-
+                self._conn = _StubConn()
             def close(self):
                 pass
 
@@ -241,7 +262,8 @@ class TestReadKgStatsAGE(unittest.TestCase):
         """The projection must split entity vs. MENTIONS counts and
         report a relationship_types list of just MENTIONS — under
         postgres the daemon doesn't carry the chroma KG's expired-facts
-        bookkeeping, so expired_facts is always 0.
+        bookkeeping, so expired_facts is always 0. SQL must be table-
+        scoped to the graph's schema and use quoted-identifier names.
         """
         StubKG, captured = self._make_kg_class(267_519, 5_580_000)
         import sys
@@ -252,9 +274,12 @@ class TestReadKgStatsAGE(unittest.TestCase):
             mp._config = _Cfg("postgres")
             mp._config.postgres_dsn = "postgres://stub"
             stats = main._read_kg_postgres_stats()
-        self.assertEqual(len(captured["calls"]), 2)
-        self.assertIn("MATCH (e:Entity)", captured["calls"][0])
-        self.assertIn("MENTIONS", captured["calls"][1])
+        self.assertEqual(len(captured["sql"]), 2)
+        self.assertIn('mempalace_kg."Entity"', captured["sql"][0])
+        self.assertIn('mempalace_kg."MENTIONS"', captured["sql"][1])
+        # AGE preserves identifier case — lowercased table names would 404.
+        self.assertIn('"Entity"', captured["sql"][0])
+        self.assertIn('"MENTIONS"', captured["sql"][1])
         self.assertEqual(stats, {
             "entities": 267_519,
             "triples": 5_580_000,
@@ -274,42 +299,33 @@ class TestReadKgStatsAGE(unittest.TestCase):
             stats = main._read_kg_postgres_stats()
         self.assertIsNone(stats)
 
-    def test_age_stats_cypher_failure_degrades_to_zero(self):
-        """A Cypher exception on either count must not bubble — degrade
-        the affected counter to 0 so the rest of `/graph` still renders.
+    def test_age_stats_sql_failure_preserves_partial_truth(self):
+        """A SQL exception on the MENTIONS count must not bubble. The
+        Entity count succeeded before the raise, so we keep it — a
+        partially-true payload is more useful than wiping a known-good
+        counter to 0. The failed counter degrades to 0 and rollback must
+        fire so the shared psycopg2 connection isn't left in an aborted
+        txn state (which would poison every subsequent /graph call).
         """
-        captured = {"calls": []}
-
-        class _RaisingKG:
-            def __init__(self, dsn=None):
-                pass
-
-            def _run_cypher(self, cypher, params, fetch=True):
-                captured["calls"].append(cypher)
-                raise RuntimeError("AGE unavailable")
-
-            @staticmethod
-            def _unwrap_agtype(v):
-                return v
-
-            def close(self):
-                pass
-
+        StubKG, captured = self._make_kg_class(
+            entity_count=10, mentions_count=20, raise_on='"MENTIONS"'
+        )
         import sys
         stub_mod = type(sys)("mempalace.knowledge_graph_age")
-        stub_mod.KnowledgeGraphAGE = _RaisingKG
+        stub_mod.KnowledgeGraphAGE = StubKG
         with patch.dict(sys.modules, {"mempalace.knowledge_graph_age": stub_mod}), \
              patch.object(main, "_mp") as mp:
             mp._config = _Cfg("postgres")
             mp._config.postgres_dsn = "postgres://stub"
             stats = main._read_kg_postgres_stats()
         self.assertEqual(stats, {
-            "entities": 0,
+            "entities": 10,
             "triples": 0,
             "current_facts": 0,
             "expired_facts": 0,
             "relationship_types": ["MENTIONS"],
         })
+        self.assertIn("ROLLBACK", captured["sql"])
 
 
 class TestReadKgStatsDirectDispatch(unittest.TestCase):

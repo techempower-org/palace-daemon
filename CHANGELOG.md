@@ -12,11 +12,19 @@ entities and 1,000 sampled MENTIONS edges but reported
 `kg_stats.triples: 1` — the single leftover `RELATION` row.
 
 - **AGE-backed stats under `MEMPALACE_BACKEND=postgres`**:
-  `_read_kg_postgres_stats` runs two Cypher count queries via
-  `KnowledgeGraphAGE._run_cypher`:
+  `_read_kg_postgres_stats` SELECT-counts the AGE backing label tables
+  directly through `kg._conn`:
 
-      MATCH (e:Entity) RETURN count(e) AS n
-      MATCH ()-[r:MENTIONS]->() RETURN count(r) AS n
+      SELECT count(*) FROM mempalace_kg."Entity"
+      SELECT count(*) FROM mempalace_kg."MENTIONS"
+
+  Cypher (`MATCH ()-[r:MENTIONS]->() RETURN count(r)`) is the obvious
+  shape but it materializes the full 5.58M-edge scan through AGE's
+  agtype wrapper, which exhausts Postgres shared memory
+  (`could not resize shared memory segment to 67108864 bytes`).
+  Counting the backing table reaches the same answer at SQL-table-scan
+  speed (the visibility map allows an index-only count). AGE preserves
+  identifier case, so the quoted-identifier table names are required.
 
   Projection: `{entities, triples, current_facts, expired_facts: 0,
   relationship_types: ["MENTIONS"]}`. `expired_facts` is hard-zero —
