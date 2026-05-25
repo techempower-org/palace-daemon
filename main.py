@@ -2179,8 +2179,7 @@ def _read_kg_postgres(
                 """
                 MATCH (d:Drawer)-[r:MENTIONS]->(e:Entity)
                 RETURN d.id AS subject, e.name AS object,
-                       r.count AS count, r.etype AS etype,
-                       r.confidence AS confidence
+                       r.etype AS etype, r.confidence AS confidence
                 LIMIT $n
                 """,
                 {"n": int(triple_limit)},
@@ -2199,8 +2198,8 @@ def _read_kg_postgres(
                 "object": obj,
                 "valid_from": None,
                 "valid_to": None,
-                "confidence": kg._unwrap_agtype(r[4]),
-                "source_file": kg._unwrap_agtype(r[3]),
+                "confidence": kg._unwrap_agtype(r[3]),
+                "source_file": kg._unwrap_agtype(r[2]),
             })
     finally:
         try:

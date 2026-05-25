@@ -153,8 +153,8 @@ class TestReadKgPostgresAGE(unittest.TestCase):
     def test_age_projection_and_limits(self):
         ent_rows = [["alpha"], ["beta"]]
         trip_rows = [
-            ["drawer-1", "alpha", 2, "PROPER_NOUN", 0.5],
-            ["drawer-2", "beta", 1, "TECH_IDENT", 0.5],
+            ["drawer-1", "alpha", "PROPER_NOUN", 0.5],
+            ["drawer-2", "beta", "TECH_IDENT", 0.5],
         ]
         StubKG, captured = self._make_kg_class(ent_rows, trip_rows)
 
