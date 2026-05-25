@@ -1703,6 +1703,104 @@ async def stats(x_api_key: str | None = Header(default=None)):
     return {"kg": kg, "graph": graph, "status": status}
 
 
+# ── Fast direct-SQL endpoints ───────────────────────────────────────
+#
+# Bypass the MCP dispatch + semaphore + executor pipeline entirely.
+# Pure SQL against postgres with a short statement_timeout — never
+# blocked by AGE graph locks, backfill workers, or collection-level
+# operations. Designed for CLI tools that need sub-second responses.
+
+
+@app.get("/status/fast")
+async def status_fast(x_api_key: str | None = Header(default=None)):
+    """Fast palace status via direct SQL — no MCP, no AGE, no locks."""
+    _check_auth(x_api_key)
+    dsn = os.environ.get("MEMPALACE_POSTGRES_DSN") or getattr(
+        _mp._config, "postgres_dsn", None
+    )
+    if not dsn:
+        raise HTTPException(status_code=503, detail="postgres backend not configured")
+
+    loop = asyncio.get_running_loop()
+    def _query():
+        import psycopg2
+        with psycopg2.connect(dsn, connect_timeout=3) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = '3s'")
+                cur.execute("SELECT count(*) FROM mempalace_drawers")
+                total = cur.fetchone()[0]
+                cur.execute(
+                    "SELECT wing, count(*) FROM mempalace_drawers GROUP BY wing ORDER BY count(*) DESC"
+                )
+                wings = {r[0]: r[1] for r in cur.fetchall()}
+                cur.execute(
+                    "SELECT room, count(*) FROM mempalace_drawers WHERE room IS NOT NULL GROUP BY room ORDER BY count(*) DESC"
+                )
+                rooms = {r[0]: r[1] for r in cur.fetchall()}
+        return {"total_drawers": total, "wings": wings, "rooms": rooms}
+
+    try:
+        return await loop.run_in_executor(None, _query)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/search/fast")
+async def search_fast(
+    q: str,
+    limit: int = 5,
+    wing: str | None = None,
+    x_api_key: str | None = Header(default=None),
+):
+    """Fast BM25 text search via direct SQL — no vector, no AGE locks."""
+    _check_auth(x_api_key)
+    dsn = os.environ.get("MEMPALACE_POSTGRES_DSN") or getattr(
+        _mp._config, "postgres_dsn", None
+    )
+    if not dsn:
+        raise HTTPException(status_code=503, detail="postgres backend not configured")
+
+    loop = asyncio.get_running_loop()
+    def _query():
+        import psycopg2
+        with psycopg2.connect(dsn, connect_timeout=3) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = '5s'")
+                sql = """
+                    SELECT id, wing, room, metadata,
+                           ts_rank_cd(doc_tsv, plainto_tsquery('english', %s)) AS rank,
+                           left(document, 500) AS snippet
+                    FROM mempalace_drawers
+                    WHERE doc_tsv @@ plainto_tsquery('english', %s)
+                """
+                params = [q, q]
+                if wing:
+                    sql += " AND wing = %s"
+                    params.append(wing)
+                sql += " ORDER BY rank DESC LIMIT %s"
+                params.append(limit)
+                cur.execute(sql, params)
+                results = []
+                for row in cur.fetchall():
+                    drawer_id, w, r, meta_raw, rank, snippet = row
+                    meta = json.loads(meta_raw) if isinstance(meta_raw, str) else (meta_raw or {})
+                    results.append({
+                        "id": drawer_id,
+                        "wing": w,
+                        "room": r,
+                        "rank": rank,
+                        "snippet": snippet,
+                        "source_file": meta.get("source_file"),
+                        "tags": meta.get("tags"),
+                    })
+                return results
+
+    try:
+        return await loop.run_in_executor(None, _query)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── Postgres-native helper endpoints ────────────────────────────────
 #
 # These two endpoints expose Postgres-backend value-adds that don't have
