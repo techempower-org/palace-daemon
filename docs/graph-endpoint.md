@@ -202,7 +202,7 @@ special permissions — `/graph` is read-only.
 ## Part 2 — Fix `mempalace_list_tunnels` inconsistency
 
 Live observation 2026-04-25 against the 151K-drawer palace at
-`disks.jphe.in:8085`:
+`familiar.jphe.in:8085`:
 
 - `GET /stats` → `"graph": {"tunnel_rooms": 9, ...}`
 - `POST /mcp { "name": "mempalace_list_tunnels" }` → `[]`
@@ -281,8 +281,8 @@ default). No SME-side change needed at deploy time.
    - Fixed `mempalace_list_tunnels` returning [] while
      `mempalace_graph_stats.tunnel_rooms > 0`.
    ```
-3. Deploy to disks
-   (`disks.jphe.in:8085`).
+3. Deploy to familiar
+   (`familiar.jphe.in:8085`).
 4. Notify SME side — adapter starts using `/graph` automatically; the
    MCP fallback stays in place for upstream forks / older daemons.
 

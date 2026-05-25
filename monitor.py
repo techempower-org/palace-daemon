@@ -12,7 +12,7 @@ prints a live dashboard. Alerts on:
 Usage:
   python monitor.py                          # defaults: http://localhost:8085, 5s interval
   python monitor.py --url http://artemis:8086 --interval 3 --log palace-monitor.log
-  python monitor.py --url http://disks:8085 --interval 10   # watch production
+  python monitor.py --url http://familiar:8085 --interval 10   # watch production
 """
 
 import argparse

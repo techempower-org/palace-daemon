@@ -170,7 +170,7 @@ binary and binds a port.
 `/search`, `/context` via subprocess bridge to Python mempalace. Direct
 sqlite reads for the wing/room/KG aggregation parts — those don't go
 through subprocess, just bun:sqlite. Smoke-test against
-`http://disks.jphe.in:8085`'s palace via parity diffs (TS daemon points
+`http://familiar.jphe.in:8085`'s palace via parity diffs (TS daemon points
 at the same palace path; outputs should match the Python daemon byte-
 for-byte modulo timing fields).
 
@@ -216,7 +216,7 @@ for reference.
    we trust it.
 5. **Static binary distribution.** Where does the TS daemon binary
    live? GitHub releases? A Docker image? An apt PPA? We have
-   deploy.sh today; the equivalent for "drop a Bun binary on disks"
+   deploy.sh today; the equivalent for "drop a Bun binary on familiar"
    needs a story.
 6. **Familiar's adapter.** Familiar talks to palace-daemon over HTTP.
    It shouldn't care which daemon answers — but if we add new endpoints

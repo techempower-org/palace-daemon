@@ -5,7 +5,7 @@ graph) retrieval gets a neural-rerank pass before results leave the daemon
 so callers don't have to wire up a cross-encoder themselves.
 
 Model: ``ms-marco-TinyBERT-L-2-v2`` ("nano", ~4 MB ONNX) — chosen because
-the daemon's production host (``disks``) is CPU-only. Typical rerank
+the daemon's production host (``familiar``) is CPU-only. Typical rerank
 latency is ~15–40 ms for n<=20 passages on commodity hardware; the model
 load is one-shot at first call and cached for the daemon's lifetime.
 

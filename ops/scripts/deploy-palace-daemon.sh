@@ -6,21 +6,21 @@
 # palace-daemon.service), installs venv deps, restarts the systemd
 # service, and smoke-tests the /health endpoint.
 #
-# The canonical WorkingDirectory on disks is /mnt/raid/projects/palace-
+# The canonical WorkingDirectory on familiar is /mnt/raid/projects/palace-
 # daemon/ — same path Caddy / our health checks expect to find it.
 # Manual scp's to /home/jp/.local/share/palace-daemon/ were kept in
 # sync by syncthing but that's a hidden dependency; this script writes
 # directly to the canonical path.
 #
 # Usage:
-#   deploy-palace-daemon.sh                            # defaults: --host disks --root /mnt/raid/projects/palace-daemon
+#   deploy-palace-daemon.sh                            # defaults: --host familiar --root /mnt/raid/projects/palace-daemon
 #   deploy-palace-daemon.sh --host <h> --root <path>
 #   deploy-palace-daemon.sh --no-restart               # rsync only, skip systemctl
 #   deploy-palace-daemon.sh --venv-path <p>            # alt venv (default /home/jp/.local/share/palace-daemon/venv)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-DEST_HOST="disks"
+DEST_HOST="familiar"
 DEST_ROOT="/mnt/raid/projects/palace-daemon"
 VENV_PATH="/home/jp/.local/share/palace-daemon/venv"
 DO_RESTART=1

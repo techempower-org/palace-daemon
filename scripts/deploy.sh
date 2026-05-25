@@ -18,12 +18,12 @@
 #     works for installs since the venv's pip works.
 #
 # Usage:
-#   scripts/deploy.sh                       # default host: disks
+#   scripts/deploy.sh                       # default host: familiar
 #   PALACE_HOST=otherhost scripts/deploy.sh
 
 set -euo pipefail
 
-HOST="${PALACE_HOST:-disks}"
+HOST="${PALACE_HOST:-familiar}"
 URL="${PALACE_DAEMON_URL:-http://${HOST}.jphe.in:8085}"
 KEY="${PALACE_API_KEY:-}"
 
@@ -66,7 +66,7 @@ fi
 step "3/6  sync memorypalace git state on $HOST"
 # Syncthing keeps the working tree in sync, but .git is excluded from sync
 # (.stignore). The editable install reads the working tree so Python sees the
-# right code, but git HEAD drifts behind. Fix that here so `git log` on disks
+# right code, but git HEAD drifts behind. Fix that here so `git log` on the host
 # is consistent and `git pull` doesn't choke on "local changes" next time.
 MEMPALACE_DIR="/mnt/raid/projects/memorypalace"
 ssh "$HOST" "cd $MEMPALACE_DIR && git fetch origin --quiet 2>/dev/null && git reset --hard origin/main --quiet 2>/dev/null" \

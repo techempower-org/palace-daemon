@@ -8,7 +8,7 @@
 
 ---
 
-Fork of [rboarescu/palace-daemon](https://github.com/rboarescu/palace-daemon), tracking `upstream/main` through the 2026-04-27 sync (upstream is at [v1.5.1](https://github.com/rboarescu/palace-daemon/commit/d0aabb9); this fork is at v1.7.2-with-unreleased-fork-work — the `/graph` endpoint, `/viz` status dashboard, auto-repair-on-startup, and post-merge deployment tooling that 1.7.2 captured, **plus** the substantial 2026-05-11 → 2026-05-15 reliability + hybrid-retrieval push captured under `[Unreleased]` in the CHANGELOG). Running in production since 2026-04-24, currently fronting the [techempower-org/mempalace](https://github.com/techempower-org/mempalace) **273k-drawer Postgres + pgvector + Apache AGE** palace on [`disks.jphe.in:8085`](https://palace.jphe.in/health). The bulk of the v1.5.0 daemon work (cold-start warmup, `/repair`, `/silent-save`, themed messages, `--palace` flag, MCP timeout) was contributed back to upstream as [PR #4](https://github.com/rboarescu/palace-daemon/pull/4); rboarescu cherry-picked the contents into upstream `main` directly as [`ef6ac03`](https://github.com/rboarescu/palace-daemon/commit/ef6ac03) on 2026-04-25 and closed the PR.
+Fork of [rboarescu/palace-daemon](https://github.com/rboarescu/palace-daemon), tracking `upstream/main` through the 2026-04-27 sync (upstream is at [v1.5.1](https://github.com/rboarescu/palace-daemon/commit/d0aabb9); this fork is at v1.7.2-with-unreleased-fork-work — the `/graph` endpoint, `/viz` status dashboard, auto-repair-on-startup, and post-merge deployment tooling that 1.7.2 captured, **plus** the substantial 2026-05-11 → 2026-05-15 reliability + hybrid-retrieval push captured under `[Unreleased]` in the CHANGELOG). Running in production since 2026-04-24, currently fronting the [techempower-org/mempalace](https://github.com/techempower-org/mempalace) **273k-drawer Postgres + pgvector + Apache AGE** palace on [`familiar.jphe.in:8085`](https://palace.jphe.in/health). The bulk of the v1.5.0 daemon work (cold-start warmup, `/repair`, `/silent-save`, themed messages, `--palace` flag, MCP timeout) was contributed back to upstream as [PR #4](https://github.com/rboarescu/palace-daemon/pull/4); rboarescu cherry-picked the contents into upstream `main` directly as [`ef6ac03`](https://github.com/rboarescu/palace-daemon/commit/ef6ac03) on 2026-04-25 and closed the PR.
 
 **2026-05-11 → 2026-05-17 fork-side push (unreleased, on `main`):** hybrid-retrieval endpoints (`POST /search/hybrid` + `POST /search/keyword` — vector ∪ tsvector-BM25 ∪ AGE-graph candidates, hybrid-reranked), `POST /cypher` + `POST /embed` for direct AGE / pgvector access, the `Stop`/`PreCompact` hook detach fix (fork + setsid + `dup2` all three FDs so claude's harness pipes can close), canonical-room boundary validation in `/memory`, and [`ops/scripts/deploy-palace-daemon.sh`](ops/scripts/deploy-palace-daemon.sh) — a one-shot deployer that replaces the previous syncthing-based mirror path. **New 2026-05-17**: `POST /search/age-fused` endpoint — Phase 5 of the multi-project AGE-integration plan (see [`techempower-org/palace-daemon#25`](https://github.com/techempower-org/palace-daemon/pull/25) and [companion mempalace PR #101](https://github.com/techempower-org/mempalace/pull/101)). Combines vector retrieval with AGE entity-overlap via RRF fusion — graph_only beats vector by +5pp R@5 on a 2026-05-17 [n=200 git-derived probe spike](https://github.com/techempower-org/multipass-structural-memory-eval/blob/feat/rlm-adapter/docs/benchmarks/2026-05-17-age-write-through-spike.md); fusion adds another +4pp on top. Full day-by-day in [CHANGELOG](CHANGELOG.md).
 
@@ -35,7 +35,7 @@ Per [PR #4 issue comment](https://github.com/rboarescu/palace-daemon/pull/4#issu
 | [#17](https://github.com/rboarescu/palace-daemon/pull/17) | OPEN, awaiting review | `feat: DELETE /memory/{id} + PATCH /memory/{id}` — REST CRUD over `mempalace_delete_drawer` / `mempalace_update_drawer`. Both tools have been in mempalace since 3.x; this just exposes them over HTTP for curation UIs. 29 lines of `main.py`. |
 | [#18](https://github.com/rboarescu/palace-daemon/pull/18) | OPEN, awaiting review | `feat(lifespan): auto-migrate Stop-hook checkpoints to recovery collection on startup` — calls `mempalace.migrate.migrate_checkpoints_to_recovery()` during lifespan startup so operators don't have to run the manual `mempalace repair --mode reorganize` after upgrading. ImportError-gated, env-overridable via `PALACE_AUTO_MIGRATE_CHECKPOINTS=0`. |
 
-**Note:** PRs #8, #9, #10, #11, #12, #13 were each amended once on 2026-04-27 to address Copilot review feedback (force-pushed). Caught real bugs in several cases: PR #9's `/health` 503-hiding (curl `-sS` body grep masked HTTP status), PR #10's GNU-only `readlink -f` (failed on macOS), PR #13's rooms-from-wings-only logic bug (silent data loss on partial schema-drift) and `_read_sem`-bypass concurrency concern. Fixes also backported to fork main + deployed to disks (`152e428`). PR #13 was rebased on 2026-04-30 to clear a `CHANGELOG.md` conflict with upstream's `b4aee82` patch sync; PRs #15–#18 followed the same day after the rebase cleared the way.
+**Note:** PRs #8, #9, #10, #11, #12, #13 were each amended once on 2026-04-27 to address Copilot review feedback (force-pushed). Caught real bugs in several cases: PR #9's `/health` 503-hiding (curl `-sS` body grep masked HTTP status), PR #10's GNU-only `readlink -f` (failed on macOS), PR #13's rooms-from-wings-only logic bug (silent data loss on partial schema-drift) and `_read_sem`-bypass concurrency concern. Fixes also backported to fork main + deployed to production (`152e428`). PR #13 was rebased on 2026-04-30 to clear a `CHANGELOG.md` conflict with upstream's `b4aee82` patch sync; PRs #15–#18 followed the same day after the rebase cleared the way.
 
 ### Recently landed in upstream
 
@@ -62,7 +62,7 @@ These have working fork-side implementations but bake in JP-specific assumptions
 
 | Area | Change | What needs generalizing | Files |
 |---|---|---|---|
-| **Tooling** | `scripts/deploy.sh` — one-command `git push → wait for sync → systemctl restart → /health poll → verify-routes` deploy. | Defaults to `PALACE_HOST=disks`; reads `PALACE_API_KEY` from `~/.claude/settings.local.json`; assumes a Syncthing-mirrored source tree on the deploy host; ssh user paths hardcoded; the post-restart verify hook imports fork-mempalace-only symbols (`_segment_appears_healthy`, `_quarantined_paths`, `_SESSION_RECOVERY_COLLECTION`, `migrate_checkpoints_to_recovery`) that would fail on upstream-mempalace installs. Likely splits into "universal three-step deploy" + "private verify hook." | `scripts/deploy.sh` |
+| **Tooling** | `scripts/deploy.sh` — one-command `git push → wait for sync → systemctl restart → /health poll → verify-routes` deploy. | Defaults to `PALACE_HOST=familiar`; reads `PALACE_API_KEY` from `~/.claude/settings.local.json`; assumes a Syncthing-mirrored source tree on the deploy host; ssh user paths hardcoded; the post-restart verify hook imports fork-mempalace-only symbols (`_segment_appears_healthy`, `_quarantined_paths`, `_SESSION_RECOVERY_COLLECTION`, `migrate_checkpoints_to_recovery`) that would fail on upstream-mempalace installs. Likely splits into "universal three-step deploy" + "private verify hook." | `scripts/deploy.sh` |
 | **Clients** | `clients/palace-mode` — `install`/`verify` subcommands that re-apply plugin-cache customizations after a Claude Code plugin update. The base mode-switching part shipped via PR #12. | The `install` subcommand assumes the Claude Code plugin cache layout under `~/.claude/plugins/cache/mempalace/...`. Needs to be parameterized or removed for the upstream version. | `clients/palace-mode` |
 | **Ops** | `scripts/auto-repair-if-empty.sh` — `ExecStartPost` script that probes `/search` after the daemon binds, detects the "vector ranked 0" warning, and fires `/repair {mode:rebuild}` non-blocking in the background. **Now safety-net-only** since mempalace `645ba20` (integrity gate) shipped — a healthy 151K palace no longer triggers it. | Assumes a `systemctl --user` unit + a specific service unit shape with `ExecStartPost`. The probe-and-repair logic itself is generic; the systemd integration is what's JP-shaped. The ~4:48 HNSW-segment-load timeout (`PALACE_AUTO_REPAIR_WAIT_SECS=240`) is calibrated to the 151K canonical palace; smaller palaces can use the 30s default. | `scripts/auto-repair-if-empty.sh`, `palace-daemon.service` |
 
@@ -92,25 +92,25 @@ Deploy is a single command that catches sync-lag footguns (Syncthing-mirrored de
 ```bash
 $ scripts/deploy.sh
 ▸ 1/5  push to origin           ✓ pushed 00ec6be → origin/main
-▸ 2/5  wait for sync to disks   ✓ remote at 00ec6be
+▸ 2/5  wait for sync to familiar ✓ remote at 00ec6be
 ▸ 3/5  restart palace-daemon    ✓ restart issued
 ▸ 4/5  wait for daemon health   ✓ healthy on v1.7.0 (after 3s)
 ▸ 5/5  smoke-test routes        ✓ all 12 routes verified
 
-✦ deploy complete: 00ec6be on http://disks.jphe.in:8085
+✦ deploy complete: 00ec6be on http://familiar.jphe.in:8085
 ```
 
 Local↔remote palace switching is one command:
 
 ```bash
 $ palace-mode status
-Mode: remote (http://disks.jphe.in:8085)
+Mode: remote (http://familiar.jphe.in:8085)
 
 $ palace-mode local
 → local mode
 
-$ palace-mode remote http://staging:8085
-→ remote mode (PALACE_DAEMON_URL=http://staging:8085)
+$ palace-mode remote http://familiar:8085
+→ remote mode (PALACE_DAEMON_URL=http://familiar:8085)
 ```
 
 A Stop hook fires from any Claude Code session and routes through the daemon without ever loading mempalace locally:
@@ -285,7 +285,7 @@ scripts/deploy.sh
 palace-mode {status,local,remote [URL],install,verify}
 
 # Live integrity monitor — ANSI dashboard with alerts
-python monitor.py --url http://disks:8085 --interval 5
+python monitor.py --url http://familiar:8085 --interval 5
 ```
 
 ### Scripts & tooling
@@ -297,7 +297,7 @@ python monitor.py --url http://disks:8085 --interval 5
 | `clients/palace-mode` | Local↔remote palace switching (`status`, `local`, `remote [URL]`, `install`, `verify`). |
 | `clients/palace-mcp-dispatch.sh` | Picks daemon vs. in-process MCP based on `PALACE_DAEMON_URL`. |
 | `clients/mempal-fast.py` | Stdlib-only Stop/PreCompact hook handler — POSTs to `/silent-save` without importing mempalace. |
-| `monitor.py` | Standalone live integrity monitor. Polls `/health`, `/stats`, `/repair/status` and prints an ANSI dashboard with alerts for unreachable, degraded, drawer-count drops, and active repairs. Usage: `python monitor.py --url http://disks:8085 --interval 5` |
+| `monitor.py` | Standalone live integrity monitor. Polls `/health`, `/stats`, `/repair/status` and prints an ANSI dashboard with alerts for unreachable, degraded, drawer-count drops, and active repairs. Usage: `python monitor.py --url http://familiar:8085 --interval 5` |
 
 ## Sources
 
