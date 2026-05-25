@@ -418,7 +418,7 @@ def _parse_path_map(raw=_PATH_MAP_USE_ENV) -> list[tuple[str, str]]:
 
     Example::
 
-        PALACE_DAEMON_PATH_MAP="/home/jp/.claude/=/mnt/raid/claude-config/,/home/jp/Projects/=/mnt/raid/projects/"
+        PALACE_DAEMON_PATH_MAP="/home/jp/.claude/=/home/jp/.claude/,/home/jp/Projects/=/home/jp/Projects/"
     """
     if raw is _PATH_MAP_USE_ENV:
         raw = os.environ.get("PALACE_DAEMON_PATH_MAP", "")
@@ -443,15 +443,15 @@ def _translate_client_path(path: str) -> str:
 
     Hooks running on a client machine (e.g. katana) speak in their own
     filesystem namespace (``/home/jp/.claude/...``); the daemon may see the
-    same files at a different mount (``/mnt/raid/claude-config/...`` via
-    Syncthing). ``PALACE_DAEMON_PATH_MAP`` lets the operator declare those
-    rewrites without coupling client code to deployment specifics.
+    same files at a different path (e.g. via Syncthing). When client and
+    daemon paths are identical (Syncthing to same absolute paths), the map
+    is identity — still set it so the mechanism is explicit.
 
     The first matching prefix wins; non-matching paths pass through
     unchanged so daemon-side absolute paths still work.
 
     Joining is normalized so mismatched trailing/leading slashes between
-    the two prefixes can't produce paths like ``/mnt/raid/ccprojects/...``
+    the two prefixes can't produce mangled paths
     (Copilot finding on jphein/palace-daemon#1).
     """
     for client_prefix, daemon_prefix in _parse_path_map():

@@ -50,7 +50,7 @@ ok "pushed $local_sha → origin/main"
 
 step "2/6  wait for sync to $HOST"
 sleep "$SYNC_GRACE"
-remote_sha=$(ssh "$HOST" "cd /mnt/raid/projects/palace-daemon && git rev-parse HEAD 2>/dev/null || git log -1 --format=%H 2>/dev/null" 2>/dev/null || echo "")
+remote_sha=$(ssh "$HOST" "cd /home/jp/Projects/palace-daemon && git rev-parse HEAD 2>/dev/null || git log -1 --format=%H 2>/dev/null" 2>/dev/null || echo "")
 if [ "$remote_sha" = "$local_sha" ]; then
     ok "remote at $local_sha"
 elif [ -z "$remote_sha" ]; then
@@ -59,7 +59,7 @@ else
     echo "  ! remote at $remote_sha (expected $local_sha)"
     echo "  ! Syncthing may need more time; sleeping ${SYNC_GRACE}s and retrying"
     sleep "$SYNC_GRACE"
-    remote_sha=$(ssh "$HOST" "cd /mnt/raid/projects/palace-daemon && git rev-parse HEAD" 2>/dev/null || echo "")
+    remote_sha=$(ssh "$HOST" "cd /home/jp/Projects/palace-daemon && git rev-parse HEAD" 2>/dev/null || echo "")
     [ "$remote_sha" = "$local_sha" ] && ok "remote caught up to $local_sha" || fail "sync lag persists; aborting"
 fi
 
@@ -68,7 +68,7 @@ step "3/6  sync memorypalace git state on $HOST"
 # (.stignore). The editable install reads the working tree so Python sees the
 # right code, but git HEAD drifts behind. Fix that here so `git log` on the host
 # is consistent and `git pull` doesn't choke on "local changes" next time.
-MEMPALACE_DIR="/mnt/raid/projects/memorypalace"
+MEMPALACE_DIR="/home/jp/Projects/memorypalace"
 ssh "$HOST" "cd $MEMPALACE_DIR && git fetch origin --quiet 2>/dev/null && git reset --hard origin/main --quiet 2>/dev/null" \
     && ok "memorypalace git synced to origin/main" \
     || echo "  ! memorypalace git sync skipped (non-fatal)"

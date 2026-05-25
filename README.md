@@ -206,7 +206,7 @@ uv is preferred; the stdlib `venv + pip` path is legacy and noted only for hosts
 python main.py
 
 # Custom palace path + auth
-PALACE_API_KEY=$(openssl rand -hex 32) python main.py --palace /mnt/raid/projects/mempalace-data/palace
+PALACE_API_KEY=$(openssl rand -hex 32) python main.py --palace /srv/mempalace-data/palace
 ```
 
 ### Run (systemd system service — preferred)

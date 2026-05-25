@@ -115,8 +115,8 @@ def parse_watch_dirs(
     daemon-side ``is_dir()`` check. Operators may write watch paths in
     the client namespace (``/home/jp/Projects/...``); without translation
     those would be silently rejected as "not a directory" on the daemon
-    even though the same files live at ``/mnt/raid/projects/...`` via
-    Syncthing. Closes Copilot finding on jphein/palace-daemon#2.
+    even though the same files live at a different path via Syncthing.
+    Closes Copilot finding on jphein/palace-daemon#2.
     """
     if raw is None:
         raw = os.environ.get("PALACE_WATCH_DIRS", "")
