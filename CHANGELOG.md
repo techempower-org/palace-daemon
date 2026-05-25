@@ -2,6 +2,67 @@
 
 ## [Unreleased]
 
+### Milestone — 2026-05-25 — *AGE knowledge-graph backfill complete (629k nodes / 5.95M edges)*
+
+The `/backfill-age` endpoint (added in commit `b4016c6`) finished its first
+full pass on the 273k-drawer production palace. The AGE graph at
+`mempalace_kg` is now fully populated and graph-fused retrieval has real
+material to traverse.
+
+**Final stats** (from `GET /backfill-age/status` after the run):
+
+- `drawers_seen`: 364,394
+- `drawers_skipped_checkpoint`: 352,951 (idempotent resume — most rows were
+  already processed in earlier partial runs by parallel workers)
+- `entities_added`: 142,315 (this run; cumulative entity total: 263,982)
+- `errors`: 0
+- `wall_clock_s`: 3,660.9 (~61 min)
+- `returncode`: 0
+- `progress_pct`: 100.0
+
+**AGE graph shape now visible** (via `POST /cypher`):
+
+| Layer | Nodes | Edges (outgoing) |
+|---|---|---|
+| Wing | 89 | 197 `CONTAINS` (→ Room), 3,139 `SHARED_VIA` (tunnel edges) |
+| Room | 8 (canonical taxonomy) | 365,481 `CONTAINS` (→ Drawer) |
+| Drawer | 365,496 | 5,576,602 `MENTIONS` (→ Entity) |
+| Entity | 263,982 | — (leaves) |
+| **Total** | **629,575** | **5,945,419** |
+
+What this unlocks now that the graph is populated:
+
+- **`POST /search/age-fused`** (Phase 5, shipped 2026-05-17) — the vector ⊕
+  AGE entity-overlap RRF fusion path was effectively vector-only against an
+  empty graph for the first week. With 5.58M `MENTIONS` edges live, the
+  graph-only candidate set is now meaningful. The +5pp R@5 graph-only lift
+  on the n=200 git-derived probe spike should reproduce against the full
+  palace — re-running the [age-write-through-spike eval](https://github.com/techempower-org/multipass-structural-memory-eval/blob/feat/rlm-adapter/docs/benchmarks/2026-05-17-age-write-through-spike.md)
+  is the next planning item.
+- **`POST /cypher`** — entity-anchored Cypher queries are now production-
+  viable. `MATCH (d:Drawer)-[:MENTIONS]->(e:Entity {name:'familiar'})
+  RETURN d` returns real candidate sets, not empty rows.
+- **`mempalace_walk_palace`** (MCP tool) — wing/room/entity walks at
+  depth 2–3 return non-trivial subgraphs.
+- **`GET /graph`** still uses the legacy sqlite KG path; switching it to
+  read from AGE is a pending follow-up (sqlite KG is now a stale shadow of
+  the AGE state).
+
+**Roadmap follow-ups**:
+
+1. Investigate the 4-drawer discrepancy (`total=364,398` vs `seen=364,394`)
+   — likely NULL-content or unicode rows the entity extractor rejected.
+   Probably surface as a counter in `/backfill-age/status`.
+2. Re-run the age-fused eval against the full palace and capture lift
+   numbers in a new benchmark doc under `multipass-structural-memory-eval`.
+3. Switch `GET /graph`'s KG section from `knowledge_graph.sqlite3` to a
+   live AGE `MATCH (e:Entity) RETURN e LIMIT N` (the daemon already has
+   the cypher path internally).
+4. Caddy reverse proxy at `palace.jphe.in` returned 502 during this session
+   while the daemon was healthy on `localhost:8085` — investigate whether
+   upstream timeout / health check is tripping during long-running graph
+   queries.
+
 ### Added — 2026-05-24 — *Gzip-NCD novelty scoring at drawer write time*
 
 Implements [#45](https://github.com/techempower-org/palace-daemon/issues/45),

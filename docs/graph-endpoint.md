@@ -11,6 +11,20 @@
 > 9 tunnels, 6 KG entities, 3 KG triples) on the 151K-drawer palace.
 > SME's `MemPalaceDaemonAdapter.get_graph_snapshot()` lands in 0.7s
 > against this — a 430× speedup over the MCP fallback.
+>
+> **2026-05-25 update — KG source needs migration to AGE.** The
+> `_read_kg_direct()` helper documented in Part 1 reads from
+> `~/.mempalace/knowledge_graph.sqlite3`, which is now the **legacy**
+> KG path. After the [2026-05-25 AGE backfill](../CHANGELOG.md#milestone--2026-05-25--age-knowledge-graph-backfill-complete-629k-nodes--595m-edges)
+> the live knowledge graph lives in Postgres + Apache AGE (graph
+> `mempalace_kg`) — 263,982 entities, 5.58M `MENTIONS` edges. The
+> sqlite KG file is now a stale shadow (a few entities and triples
+> from the old write-through path). `/graph` continues to serve the
+> sqlite snapshot for backwards compatibility, but consumers that
+> need current KG state should hit `POST /cypher` directly. **Pending
+> follow-up:** switch the `kg_entities` / `kg_triples` / `kg_stats`
+> sections of `/graph` to read from AGE via the existing internal
+> cypher path, and version-bump (1.7.x → 1.8.0).
 
 ## Context
 
