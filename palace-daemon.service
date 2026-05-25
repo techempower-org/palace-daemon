@@ -1,38 +1,32 @@
 [Unit]
-Description=palace-daemon — MemPalace HTTP/MCP gateway
-After=network.target
+Description=palace-daemon — mempalace HTTP/MCP gateway (system unit)
+Documentation=https://github.com/techempower-org/palace-daemon
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
 
 [Service]
-Type=notify
-NotifyAccess=main
-User=user
-WorkingDirectory=/home/user/palace-daemon
+Type=simple
+User=jp
+Group=jp
+WorkingDirectory=/home/jp/Projects/palace-daemon
 ExecStartPre=-/usr/bin/fuser -k 8085/tcp
-ExecStartPre=-/usr/bin/rm -f /home/user/.cache/palace-daemon/daemon-8085.lock
-ExecStart=/home/user/.local/share/pipx/venvs/mempalace/bin/python main.py
-# After the daemon binds, probe /search for the empty-HNSW warning and
-# auto-trigger /repair {mode:rebuild} in the background if detected.
-# Idempotent + non-blocking — see scripts/auto-repair-if-empty.sh.
-ExecStartPost=/home/user/palace-daemon/scripts/auto-repair-if-empty.sh
-Restart=on-failure
+ExecStartPre=-/bin/rm -f /home/jp/.cache/palace-daemon/daemon-8085.lock
+# Wait up to 60s for postgres in Docker container
+ExecStartPre=/bin/bash -c 'until docker exec mempalace-db pg_isready -U palace -q 2>/dev/null; do sleep 2; done'
+ExecStart=/home/jp/.local/share/palace-daemon/venv/bin/python main.py --palace /srv/mempalace-data/palace
+Environment=PALACE_PORT=8085
+Environment=PALACE_MAX_CONCURRENCY=4
+# CRITICAL: forces in-process path, prevents recursive self-call deadlock.
+# See palace-daemon#11.
+Environment=PALACE_DAEMON_STRICT=0
+EnvironmentFile=/home/jp/.config/palace-daemon/env
+Restart=always
 RestartSec=5
-WatchdogSec=120
+TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
-Environment=PYTHONUNBUFFERED=1
-Environment=PALACE_MAX_READ_CONCURRENCY=4
-Environment=PALACE_MAX_WRITE_CONCURRENCY=1
-# CRITICAL: the daemon hosts mempalace's MCP server in-process. If
-# PALACE_DAEMON_URL leaks into this process (e.g. via a shared
-# EnvironmentFile that's also sourced by client tools), mempalace's
-# mcp_server detects it and forwards every /mcp call back to the
-# daemon — recursive self-call that deadlocks at the 120s timeout.
-# Setting STRICT=0 here forces the in-process path regardless of
-# whether DAEMON_URL leaks in. See palace-daemon#11.
-Environment=PALACE_DAEMON_STRICT=0
-# Inline AGE KG entity extraction on every drawer write. Populates
-# MENTIONS edges so hybrid search can fuse graph + vector + BM25 signals.
-Environment=MEMPALACE_KG_WRITETHROUGH=1
+KillMode=mixed
 
 [Install]
 WantedBy=multi-user.target
