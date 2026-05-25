@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### Added — 2026-05-24 — *Gzip-NCD novelty scoring at drawer write time*
+
+Implements [#45](https://github.com/techempower-org/palace-daemon/issues/45),
+derived from the True Memory paper (arXiv:2605.04897, Section 5.3).
+
+- **New module `novelty.py`** — pure-stdlib gzip-NCD scorer. Computes
+  Normalized Compression Distance between incoming drawer content and a
+  rolling window of recent drawers in the same wing/room. No model deps
+  — uses Python's `gzip.compress()` as the scoring function.
+- **Wired into `POST /memory`**: novelty scoring runs in parallel with
+  the drawer write via `asyncio.gather`, adding zero latency to the
+  write path. The response gains a `novelty` block with
+  `{enabled, novelty_score, window_size, most_similar_index, status}`.
+- **Tag, not a gate**: all drawers are stored regardless of score. The
+  `novelty_score` (0=duplicate, 1=novel) is informational metadata for
+  downstream retrieval boosting or curation UIs.
+- **Toggle**: `PALACE_NOVELTY_ENABLED` env var (default: `"true"`). Read
+  live per-request. Window size: `PALACE_NOVELTY_WINDOW` (default: `20`).
+- **Graceful fallback**: if the list-drawers call fails, returns
+  `novelty_score=1.0` with `status=failed` — the write succeeds either
+  way.
+- **Tests**: 27 cases in `tests/test_novelty.py` covering NCD math,
+  env-var gating, window configuration, edge cases, and async
+  integration with mocked `_call`.
+
 ### Added — 2026-05-24 — *FlashRank cross-encoder reranking (spike)*
 
 Spike for [techempower-org/familiar.realm.watch#43](https://github.com/techempower-org/familiar.realm.watch/issues/43).

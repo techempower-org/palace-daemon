@@ -1636,7 +1636,12 @@ async def store_memory(request: Request, x_api_key: str | None = Header(default=
             },
         )
 
-    result = await _call({
+    # Novelty scoring runs in parallel with the write — the score is
+    # informational metadata, not a gate.  Fire both concurrently so NCD
+    # doesn't add latency to the write path.
+    from novelty import compute_novelty_for_write
+
+    write_coro = _call({
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
         "params": {
@@ -1644,9 +1649,14 @@ async def store_memory(request: Request, x_api_key: str | None = Header(default=
             "arguments": {"wing": wing, "room": room, "content": content},
         },
     })
+    novelty_coro = compute_novelty_for_write(content, wing, room, _call)
+    result, novelty_info = await asyncio.gather(write_coro, novelty_coro)
+
     unwrapped = _unwrap(result)
     if isinstance(unwrapped, dict) and unwrapped.get('success'):
         unwrapped['toast'] = f'Filed to {wing}/{room}'
+    if isinstance(unwrapped, dict):
+        unwrapped['novelty'] = novelty_info
     # mempalace#86: bubble warnings/errors up to the client. Default to
     # empty lists when paired with a mempalace that doesn't emit them.
     return _ensure_warnings_fields(unwrapped)
@@ -2585,7 +2595,11 @@ async def backfill_age(request: Request, x_api_key: str | None = Header(default=
 
 @app.get("/backfill-age/status")
 async def backfill_age_status(x_api_key: str | None = Header(default=None)):
-    """Poll backfill-age progress."""
+    """Poll backfill-age progress.
+
+    Detects both daemon-spawned and externally-launched (parallel) workers
+    by checking the checkpoint table and OS process list.
+    """
     _check_auth(x_api_key)
     result = {
         "in_progress": _backfill_state["in_progress"],
@@ -2599,6 +2613,41 @@ async def backfill_age_status(x_api_key: str | None = Header(default=None)):
         result["returncode"] = _backfill_state["returncode"]
     if _backfill_state.get("error"):
         result["error"] = _backfill_state["error"]
+
+    try:
+        import psycopg2, subprocess as _sp
+        dsn = os.environ.get("MEMPALACE_POSTGRES_DSN") or getattr(_mp.MempalaceConfig(), "postgres_dsn", None)
+        if dsn:
+            with psycopg2.connect(dsn, connect_timeout=5) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SET LOCAL statement_timeout = '5s'; "
+                        "SELECT COUNT(*) FROM mempalace_kg_backfill_state WHERE phase = 'drawer'"
+                    )
+                    checkpointed = cur.fetchone()[0]
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SET LOCAL statement_timeout = '5s'; "
+                        "SELECT COUNT(*) FROM mempalace_drawers"
+                    )
+                    total = cur.fetchone()[0]
+            result["checkpointed_drawers"] = checkpointed
+            result["total_drawers"] = total
+            if total > 0:
+                result["progress_pct"] = round(100 * checkpointed / total, 1)
+
+            proc = _sp.run(
+                ["pgrep", "-fc", "mempalace.backfill_age"],
+                capture_output=True, text=True, timeout=3,
+            )
+            workers = int(proc.stdout.strip()) if proc.returncode == 0 else 0
+            if workers > 0:
+                result["in_progress"] = True
+                result["workers"] = workers
+    except Exception as exc:
+        import logging
+        logging.getLogger("palace-daemon").warning("backfill-age/status enrichment failed: %s", exc)
+
     return result
 
 
