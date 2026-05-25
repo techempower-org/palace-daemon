@@ -1,5 +1,48 @@
 # Changelog
 
+## 1.8.1 — 2026-05-25
+
+### Fixed — *`GET /graph` `kg_stats` now reflects live AGE counts*
+
+Cosmetic but misleading follow-up to 1.8.0. `/graph` migrated the
+`kg_entities`/`kg_triples` lists to AGE but still pulled `kg_stats` from
+the legacy `mempalace_kg_stats` MCP tool, which counts the near-empty
+`RELATION` table. Result: a `/graph` response that listed 500 sampled
+entities and 1,000 sampled MENTIONS edges but reported
+`kg_stats.triples: 1` — the single leftover `RELATION` row.
+
+- **AGE-backed stats under `MEMPALACE_BACKEND=postgres`**:
+  `_read_kg_postgres_stats` runs two Cypher count queries via
+  `KnowledgeGraphAGE._run_cypher`:
+
+      MATCH (e:Entity) RETURN count(e) AS n
+      MATCH ()-[r:MENTIONS]->() RETURN count(r) AS n
+
+  Projection: `{entities, triples, current_facts, expired_facts: 0,
+  relationship_types: ["MENTIONS"]}`. `expired_facts` is hard-zero —
+  the daemon doesn't carry temporal expiry on MENTIONS edges (it was a
+  `RELATION`-table concept under the chroma KG).
+
+- **Dispatcher**: `_read_kg_stats_direct` returns the AGE payload under
+  postgres and `None` under chroma. `None` keeps the legacy MCP path
+  authoritative for chroma palaces rather than forcing the AGE branch.
+
+- **`/graph` wiring**: the gather block now fans out a third direct task
+  (`kg_stats_direct_task`) alongside wings/rooms and KG entities/triples.
+  Final field is `kg_stats_age or _unwrap(kg_stats_resp) or {}` —
+  postgres palaces get live AGE counts, chroma palaces get the MCP tool,
+  unreachable AGE degrades to the MCP fallback rather than crashing.
+
+- **Test coverage**: 4 new tests in `tests/test_graph_wings_dispatch.py`
+  pin the projection, the no-DSN degrade-to-None branch, Cypher-failure
+  degrade-to-zero, and the chroma/postgres dispatch split. Stubs
+  `KnowledgeGraphAGE` via `sys.modules` injection — no live Postgres
+  needed.
+
+Verified live on familiar: `kg_stats` now reports the real entity +
+MENTIONS counts; sampled `kg_entities`/`kg_triples` lists stay
+consistent with the headline figures.
+
 ## 1.8.0 — 2026-05-25
 
 ### Changed — *`GET /graph` KG section migrated from sqlite to live Apache AGE*

@@ -204,5 +204,139 @@ class TestReadKgPostgresAGE(unittest.TestCase):
         self.assertEqual(triples, [])
 
 
+class TestReadKgStatsAGE(unittest.TestCase):
+    """`_read_kg_postgres_stats` pins the 1.8.1 fix: `/graph` `kg_stats`
+    must reflect live AGE counts under the postgres backend, not the
+    legacy `mempalace_kg_stats` MCP output (which counts the near-empty
+    RELATION table and shows `triples: 1` while AGE holds millions of
+    MENTIONS edges). These tests stub `KnowledgeGraphAGE._run_cypher` so
+    the wiring is verifiable without a live Postgres + AGE.
+    """
+
+    def _make_kg_class(self, entity_count, mentions_count):
+        captured = {"calls": []}
+
+        class _StubKG:
+            def __init__(self, dsn=None):
+                self.dsn = dsn
+
+            def _run_cypher(self, cypher, params, fetch=True):
+                captured["calls"].append(cypher)
+                if "Entity" in cypher and "MENTIONS" not in cypher:
+                    return [[entity_count]]
+                if "MENTIONS" in cypher:
+                    return [[mentions_count]]
+                return []
+
+            @staticmethod
+            def _unwrap_agtype(v):
+                return v
+
+            def close(self):
+                pass
+
+        return _StubKG, captured
+
+    def test_age_stats_projection(self):
+        """The projection must split entity vs. MENTIONS counts and
+        report a relationship_types list of just MENTIONS — under
+        postgres the daemon doesn't carry the chroma KG's expired-facts
+        bookkeeping, so expired_facts is always 0.
+        """
+        StubKG, captured = self._make_kg_class(267_519, 5_580_000)
+        import sys
+        stub_mod = type(sys)("mempalace.knowledge_graph_age")
+        stub_mod.KnowledgeGraphAGE = StubKG
+        with patch.dict(sys.modules, {"mempalace.knowledge_graph_age": stub_mod}), \
+             patch.object(main, "_mp") as mp:
+            mp._config = _Cfg("postgres")
+            mp._config.postgres_dsn = "postgres://stub"
+            stats = main._read_kg_postgres_stats()
+        self.assertEqual(len(captured["calls"]), 2)
+        self.assertIn("MATCH (e:Entity)", captured["calls"][0])
+        self.assertIn("MENTIONS", captured["calls"][1])
+        self.assertEqual(stats, {
+            "entities": 267_519,
+            "triples": 5_580_000,
+            "current_facts": 5_580_000,
+            "expired_facts": 0,
+            "relationship_types": ["MENTIONS"],
+        })
+
+    def test_age_stats_no_dsn_returns_none(self):
+        """No DSN → return None so the `/graph` handler falls back to
+        the MCP `kg_stats` path rather than reporting bogus zeros.
+        """
+        with patch.object(main, "_mp") as mp, \
+             patch.dict(os.environ, {"MEMPALACE_POSTGRES_DSN": ""}, clear=False):
+            mp._config = _Cfg("postgres")
+            mp._config.postgres_dsn = None
+            stats = main._read_kg_postgres_stats()
+        self.assertIsNone(stats)
+
+    def test_age_stats_cypher_failure_degrades_to_zero(self):
+        """A Cypher exception on either count must not bubble — degrade
+        the affected counter to 0 so the rest of `/graph` still renders.
+        """
+        captured = {"calls": []}
+
+        class _RaisingKG:
+            def __init__(self, dsn=None):
+                pass
+
+            def _run_cypher(self, cypher, params, fetch=True):
+                captured["calls"].append(cypher)
+                raise RuntimeError("AGE unavailable")
+
+            @staticmethod
+            def _unwrap_agtype(v):
+                return v
+
+            def close(self):
+                pass
+
+        import sys
+        stub_mod = type(sys)("mempalace.knowledge_graph_age")
+        stub_mod.KnowledgeGraphAGE = _RaisingKG
+        with patch.dict(sys.modules, {"mempalace.knowledge_graph_age": stub_mod}), \
+             patch.object(main, "_mp") as mp:
+            mp._config = _Cfg("postgres")
+            mp._config.postgres_dsn = "postgres://stub"
+            stats = main._read_kg_postgres_stats()
+        self.assertEqual(stats, {
+            "entities": 0,
+            "triples": 0,
+            "current_facts": 0,
+            "expired_facts": 0,
+            "relationship_types": ["MENTIONS"],
+        })
+
+
+class TestReadKgStatsDirectDispatch(unittest.TestCase):
+    def test_postgres_backend_dispatches_to_age_stats(self):
+        sentinel = {
+            "entities": 1, "triples": 2, "current_facts": 2,
+            "expired_facts": 0, "relationship_types": ["MENTIONS"],
+        }
+        with patch.object(main, "_mp") as mp, \
+             patch.object(main, "_read_kg_postgres_stats", return_value=sentinel) as pg:
+            mp._config = _Cfg("postgres")
+            stats = main._read_kg_stats_direct()
+        pg.assert_called_once()
+        self.assertIs(stats, sentinel)
+
+    def test_chroma_backend_returns_none(self):
+        """Under chroma the legacy MCP `kg_stats` is still authoritative;
+        the dispatcher must return None so `/graph` falls back to it
+        instead of forcing the postgres helper.
+        """
+        with patch.object(main, "_mp") as mp, \
+             patch.object(main, "_read_kg_postgres_stats") as pg:
+            mp._config = _Cfg("chroma")
+            stats = main._read_kg_stats_direct()
+        pg.assert_not_called()
+        self.assertIsNone(stats)
+
+
 if __name__ == "__main__":
     unittest.main()

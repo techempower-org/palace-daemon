@@ -61,7 +61,7 @@ import rerank as _rerank
 
 # ── Config (env vars override CLI defaults) ───────────────────────────────────
 
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 DEFAULT_HOST = os.getenv("PALACE_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.getenv("PALACE_PORT", "8085"))
 DEFAULT_PALACE = os.getenv("PALACE_PATH", "")
@@ -2210,6 +2210,73 @@ def _read_kg_postgres(
     return entities, triples
 
 
+def _read_kg_postgres_stats() -> dict | None:
+    """Live KG stats from Apache AGE — entity count + MENTIONS edge count.
+
+    Under postgres, the legacy ``mempalace_kg_stats`` MCP tool returns the
+    near-empty `RELATION` table counts (`triples: 1` in the live palace
+    while AGE holds 5.58M MENTIONS edges). This helper queries AGE
+    directly so the `/graph` `kg_stats` block reflects what the response's
+    own `kg_entities`/`kg_triples` lists are sampled from.
+
+    Returns ``None`` when AGE is unreachable so the caller falls back to
+    the MCP-derived payload (which is still correct under the chroma
+    backend).
+    """
+    dsn = getattr(_mp._config, "postgres_dsn", None) or os.environ.get(
+        "MEMPALACE_POSTGRES_DSN"
+    )
+    if not dsn:
+        return None
+    try:
+        from mempalace.knowledge_graph_age import KnowledgeGraphAGE
+
+        kg = KnowledgeGraphAGE(dsn=dsn)
+    except Exception:
+        return None
+    try:
+        try:
+            rows = kg._run_cypher(
+                "MATCH (e:Entity) RETURN count(e) AS n", {}, fetch=True
+            )
+            entities = int(kg._unwrap_agtype(rows[0][0])) if rows else 0
+        except Exception:
+            entities = 0
+        try:
+            rows = kg._run_cypher(
+                "MATCH ()-[r:MENTIONS]->() RETURN count(r) AS n", {}, fetch=True
+            )
+            mentions = int(kg._unwrap_agtype(rows[0][0])) if rows else 0
+        except Exception:
+            mentions = 0
+    finally:
+        try:
+            kg.close()
+        except Exception:
+            pass
+    return {
+        "entities": entities,
+        "triples": mentions,
+        "current_facts": mentions,
+        "expired_facts": 0,
+        "relationship_types": ["MENTIONS"],
+    }
+
+
+def _read_kg_stats_direct() -> dict | None:
+    """Dispatcher mirroring `_read_kg_direct`: AGE under postgres, else
+    None so the `/graph` handler falls back to the MCP `kg_stats` call.
+
+    Returning ``None`` for the chroma branch (rather than reading sqlite
+    here) keeps the legacy MCP-tool path authoritative for chroma palaces
+    — `_read_kg_postgres_stats` is the only place the daemon needs to
+    bypass the legacy RELATION counts that broke under postgres.
+    """
+    if getattr(_mp._config, "backend", None) == "postgres":
+        return _read_kg_postgres_stats()
+    return None
+
+
 def _read_kg_direct(
     entity_limit: int = 500, triple_limit: int = 1000
 ) -> tuple[list[dict], list[dict]]:
@@ -2362,14 +2429,20 @@ async def graph(
             entity_limit=entity_limit, triple_limit=triple_limit
         )
     )
+    kg_stats_direct_task = _direct_under_sem(_read_kg_stats_direct)
 
-    graph_stats_resp, kg_stats_resp, (wings, rooms), (kg_entities, kg_triples) = (
-        await asyncio.gather(
-            graph_stats_task,
-            kg_stats_task,
-            wings_rooms_task,
-            kg_direct_task,
-        )
+    (
+        graph_stats_resp,
+        kg_stats_resp,
+        (wings, rooms),
+        (kg_entities, kg_triples),
+        kg_stats_age,
+    ) = await asyncio.gather(
+        graph_stats_task,
+        kg_stats_task,
+        wings_rooms_task,
+        kg_direct_task,
+        kg_stats_direct_task,
     )
 
     graph_payload = _unwrap(graph_stats_resp) or {}
@@ -2384,7 +2457,7 @@ async def graph(
         "tunnels": tunnels,
         "kg_entities": kg_entities,
         "kg_triples": kg_triples,
-        "kg_stats": _unwrap(kg_stats_resp) or {},
+        "kg_stats": kg_stats_age or _unwrap(kg_stats_resp) or {},
     }
 
 
