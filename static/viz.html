@@ -339,16 +339,27 @@ function highlightWings(wings, clickedEl) {
 }
 
 function renderKGStats(graph) {
+  // 1.8.2 split: triples (entity→entity RELATION facts) and mentions
+  // (drawer→entity MENTIONS links) are distinct edge types and live in
+  // distinct response fields. Total counts come from kg_stats (the live
+  // AGE backing-table count); the kg_triples / kg_mentions arrays in the
+  // response are sampled previews and would under-report here.
   const s = (graph && graph.kg_stats) || {};
-  const ent = ((graph && graph.kg_entities) || []).length;
-  const tri = ((graph && graph.kg_triples) || []).length;
+  const ent = s.entities != null
+    ? s.entities
+    : ((graph && graph.kg_entities) || []).length;
+  const tri = s.triples != null
+    ? s.triples
+    : ((graph && graph.kg_triples) || []).length;
+  const men = s.mentions != null
+    ? s.mentions
+    : ((graph && graph.kg_mentions) || []).length;
   const root = document.getElementById("kg-stats");
   clear(root);
   const rows = [
     ["entities", ent],
     ["triples", tri],
-    ["current facts", s.current_facts || 0],
-    ["expired facts", s.expired_facts || 0],
+    ["mentions", men],
   ];
   rows.forEach(([label, value]) => {
     root.appendChild(el("div", { class: "wing-row" },
@@ -409,7 +420,13 @@ function renderHierarchy(graph) {
 
 function renderKG(graph) {
   const entities = (graph && graph.kg_entities) || [];
-  const triples = (graph && graph.kg_triples) || [];
+  // Both RELATION (entity→entity, semantic) and MENTIONS (drawer→entity,
+  // provenance) are edge candidates. The idIndex filter below quietly
+  // drops MENTIONS rows because their subject is a drawer id that isn't
+  // in the entity list — so RELATION wins by construction without us
+  // having to special-case the edge type.
+  const triples = ((graph && graph.kg_triples) || [])
+    .concat((graph && graph.kg_mentions) || []);
   const svg = d3.select("#kg");
   svg.selectAll("*").remove();
   const w = svg.node().clientWidth || 600;

@@ -77,13 +77,17 @@ $ time curl -sS -H "X-Api-Key: $KEY" https://palace.jphe.in/graph | jq '{
     wings: (.wings | length),
     pairs: ([.rooms[] | .rooms | length] | add),
     tunnels: (.tunnels | length),
-    kg: {entities: (.kg_entities | length), triples: (.kg_triples | length)}
+    kg: {
+      entities: (.kg_entities | length),
+      triples:  (.kg_triples  | length),
+      mentions: (.kg_mentions | length)
+    }
   }'
 {
   "wings": 36,
   "pairs": 165,
   "tunnels": 9,
-  "kg": { "entities": 6, "triples": 3 }
+  "kg": { "entities": 6, "triples": 1, "mentions": 5 }
 }
 
 real    0m0.876s

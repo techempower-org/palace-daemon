@@ -26,6 +26,23 @@
 > `POST /cypher`. The legacy "_read_kg_direct sqlite reader" sketch
 > below is preserved as the historical chroma-backend implementation;
 > the actual `_read_kg_direct` in `main.py` now dispatches by backend.
+>
+> **Shipped in 1.8.2 (2026-05-25) — triples and mentions are now distinct
+> fields.** 1.8.0 labelled the Drawer→Entity MENTIONS edges as
+> "triples", but a triple is an entity→entity semantic fact (the
+> `RELATION` label), not a mention link. The two are different things
+> and the live corpus has wildly different counts (~1 RELATION row vs.
+> ~5.66M MENTIONS edges). 1.8.2 splits the response into three lists
+> — `kg_entities`, `kg_triples` (RELATION facts), and `kg_mentions`
+> (drawer→entity provenance) — and the `kg_stats` block now carries
+> `{entities, triples, mentions, relationship_types}` instead of the
+> 1.8.1 `{entities, triples, current_facts, expired_facts,
+> relationship_types}` shape. **Breaking change** for any consumer
+> that read `kg_stats.current_facts` / `kg_stats.expired_facts`; those
+> keys were RELATION-only concepts that never made sense in the
+> MENTIONS-dominated world and are gone. The `?limit=N` parameter
+> applies 1× to entities, 2× to triples, and 2× to mentions (capped
+> at the same 50k maximum).
 
 ## Context
 
@@ -82,17 +99,34 @@ Add to `palace-daemon/main.py`, mirroring the `/stats` pattern at
   ],
   "kg_triples": [
     {
-      "subject": "<id>",
-      "predicate": "<predicate>",
-      "object": "<id>",
+      "subject": "<entity-id>",
+      "predicate": "<relation_type>",
+      "object": "<entity-id>",
       "valid_from": "<iso8601>",
       "valid_to": "<iso8601 or null>",
       "confidence": <float>,
-      "source_file": "<path>"
+      "source_file": null
     },
     ...
   ],
-  "kg_stats": {"entities": <int>, "triples": <int>}
+  "kg_mentions": [
+    {
+      "subject": "<drawer-id>",
+      "predicate": "MENTIONS",
+      "object": "<entity-id>",
+      "valid_from": null,
+      "valid_to": null,
+      "confidence": <float>,
+      "source_file": "<etype, e.g. PERSON|ORG|PROJECT>"
+    },
+    ...
+  ],
+  "kg_stats": {
+    "entities": <int>,
+    "triples":  <int>,
+    "mentions": <int>,
+    "relationship_types": ["RELATION", "MENTIONS"]
+  }
 }
 ```
 
@@ -128,8 +162,10 @@ async def graph(x_api_key: str | None = Header(default=None)):
         for w, r in zip(wings, room_responses)
     ]
 
-    # Phase 3: KG entities + triples via direct sqlite read
-    kg_entities, kg_triples = _read_kg_direct()
+    # Phase 3: KG entities + triples + mentions (1.8.2: 3-tuple)
+    kg_entities, kg_triples, kg_mentions = _read_kg_direct(
+        entity_limit, triple_limit, mention_limit,
+    )
 
     return {
         "wings": wings,
@@ -137,6 +173,7 @@ async def graph(x_api_key: str | None = Header(default=None)):
         "tunnels": _unwrap(tunnels_resp) or [],
         "kg_entities": kg_entities,
         "kg_triples": kg_triples,
+        "kg_mentions": kg_mentions,
         "kg_stats": _unwrap(kg_stats_resp) or {},
     }
 ```

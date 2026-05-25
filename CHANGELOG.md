@@ -1,5 +1,61 @@
 # Changelog
 
+## 1.8.2 — 2026-05-25
+
+### Changed — *`/graph` splits RELATION triples and MENTIONS edges*
+
+**Breaking change to `/graph` response shape.** 1.8.0–1.8.1 labelled
+the Drawer→Entity `MENTIONS` edges as "triples" — both in the
+`kg_triples` list and in `kg_stats.triples`. A triple is an
+entity→entity *semantic fact* (the `RELATION` label); a mention is a
+*provenance link* from a drawer to an entity it names. They are not
+the same thing, and the live corpus makes the conflation obvious — ~1
+RELATION row vs. ~5.66M MENTIONS edges. Reporting 5.66M "triples"
+overstated the size of the actual knowledge graph by six orders of
+magnitude.
+
+- **New response field `kg_mentions`**: drawer→entity rows projected
+  from `MATCH (d:Drawer)-[r:MENTIONS]->(e:Entity)`. Shape:
+  `{subject: drawer-id, predicate: "MENTIONS", object: entity-id,
+  source_file: etype, confidence, valid_from: null, valid_to: null}`.
+- **`kg_triples` is now real triples only**: projects
+  `MATCH (a:Entity)-[r:RELATION]->(b:Entity)` with
+  `predicate = r.relation_type`. Returns the ~1 RELATION row in the
+  current corpus rather than the 5.66M mentions stream.
+- **`kg_stats` schema change**:
+  `{entities, triples, mentions, relationship_types}`. Dropped
+  `current_facts` / `expired_facts` (`RELATION`-only concepts that
+  hard-zeroed under the MENTIONS-dominated AGE backend anyway).
+  `relationship_types` is now derived from non-empty counts —
+  `["RELATION", "MENTIONS"]` when both are populated, `["MENTIONS"]`
+  in the current corpus.
+- **Limit semantics**: `?limit=N` now caps entities (×1), triples
+  (×2), and mentions (×2). The mentions sample on `/graph?limit=1`
+  is intentionally tiny — the field is for debug previews; bulk
+  consumers should hit `POST /cypher` directly.
+- **Frontend**: `static/viz.html` `renderKGStats` reads
+  `entities/triples/mentions` straight from `kg_stats` (the AGE
+  backing-table totals) instead of sizing arrays. The D3 force graph
+  concatenates `kg_triples ∪ kg_mentions`; the existing
+  `idIndex.has(subject) && idIndex.has(object)` filter naturally
+  drops MENTIONS rows (drawer ids aren't in the entity index) so
+  RELATION continues to dominate the visualization without a
+  special case.
+- **Test coverage**: `tests/test_graph_wings_dispatch.py` updated to
+  13 tests — `TestReadKgPostgresAGE` now stubs three Cypher queries
+  (entities / RELATION / MENTIONS) and asserts the 3-tuple return;
+  `TestReadKgStatsAGE` covers the new flat schema and adds a new
+  test for the empty-RELATION case (current corpus state) where
+  `relationship_types` correctly excludes the empty label.
+
+Consumers (SME's `MemPalaceDaemonAdapter`, the local viz dashboard,
+ad-hoc `jq` over `/graph`) need to update field references:
+`kg_stats.current_facts/expired_facts` → gone; new `kg_mentions`
+list available; `kg_triples` will look ~empty until the RELATION
+pipeline is wired up. The fork's `/graph` is the only mempalace
+deployment carrying these fields, so the blast radius is limited
+to JP's downstream consumers.
+
 ## 1.8.1 — 2026-05-25
 
 ### Fixed — *`GET /graph` `kg_stats` now reflects live AGE counts*

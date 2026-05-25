@@ -61,7 +61,7 @@ import rerank as _rerank
 
 # ── Config (env vars override CLI defaults) ───────────────────────────────────
 
-VERSION = "1.8.1"
+VERSION = "1.8.2"
 DEFAULT_HOST = os.getenv("PALACE_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.getenv("PALACE_PORT", "8085"))
 DEFAULT_PALACE = os.getenv("PALACE_PATH", "")
@@ -2107,54 +2107,61 @@ def _read_wings_rooms_direct() -> tuple[dict[str, int], list[dict]]:
 
 
 def _read_kg_postgres(
-    entity_limit: int = 500, triple_limit: int = 1000
-) -> tuple[list[dict], list[dict]]:
-    """Read entities + Drawer→Entity MENTIONS edges from the live AGE graph.
+    entity_limit: int = 500,
+    triple_limit: int = 1000,
+    mention_limit: int = 1000,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Read entities, RELATION triples, and MENTIONS edges from AGE.
 
-    Issues two Cypher queries via ``KnowledgeGraphAGE._run_cypher`` (the
-    same internal path ``POST /cypher`` and ``/search/age-fused`` use):
+    Returns three lists because the live graph holds two semantically
+    distinct edge types under the same `/graph` umbrella:
 
-      * ``MATCH (e:Entity) RETURN e.name LIMIT $n``
-      * ``MATCH (d:Drawer)-[r:MENTIONS]->(e:Entity) RETURN ... LIMIT $n``
+      * **RELATION** — classical semantic triples (entity→entity facts
+        like "Alice — works_at — Anthropic"). The graph currently holds
+        ~1 of these (a placeholder); the corpus has not yet been
+        triple-extracted. Projected into ``kg_triples`` so consumers
+        that ask "do we have any semantic facts?" get an honest answer.
 
-    MENTIONS is the dominant edge type in the live graph (5.58M edges as
-    of 2026-05-25), so projecting it as the "triples" section keeps the
-    /graph payload meaningful. Legacy RELATION semantic facts (handful
-    of rows in the live graph) are excluded — consumers that need them
-    can query /cypher directly.
+      * **MENTIONS** — Drawer→Entity mention edges (5.66M as of
+        2026-05-25). These are *not* semantic triples — they're an
+        inverted-index artifact of the backfill saying "this drawer
+        text mentioned this entity." Projected into ``kg_mentions`` so
+        they stop being mislabeled as triples (pre-1.8.2 they lived in
+        ``kg_triples``, which conflated the two).
 
-    Response shape preserved across the sqlite → AGE migration:
-      entity:  {id, name, type, properties}
-      triple:  {subject, predicate, object, valid_from, valid_to,
-                confidence, source_file}
+    All three queries run via ``KnowledgeGraphAGE._run_cypher`` (the
+    same path ``POST /cypher`` uses).
 
-    For MENTIONS edges:
-      - subject  = drawer id   (Drawer.id)
-      - predicate = "MENTIONS"
-      - object   = entity name (Entity.name)
-      - confidence = MENTIONS edge confidence (~0.5 from the extractor)
-      - source_file = etype tag (PROPER_NOUN, TECH_IDENT, ...)
-      - valid_from / valid_to = None (MENTIONS edges are atemporal)
+    Response shape:
+      entity:   {id, name, type, properties}
+      triple:   {subject, predicate, object, valid_from, valid_to,
+                 confidence, source_file}  — RELATION, subject/object
+                 are entity names, predicate is r.relation_type
+      mention:  {subject, predicate, object, valid_from, valid_to,
+                 confidence, source_file}  — MENTIONS, subject is
+                 drawer id, object is entity name, predicate is
+                 hard-coded "MENTIONS", source_file carries the etype
+                 tag (PROPER_NOUN, TECH_IDENT, ...)
 
-    Caps default to 500 entities / 1000 triples to bound /graph latency
-    on the full 264k-entity / 5.58M-edge palace. Callers can lift via
-    the ``limit`` query parameter on /graph.
+    Caps default to 500/1000/1000. Tight to bound /graph latency on the
+    full palace; callers raise via the ``limit`` query parameter.
     """
     dsn = getattr(_mp._config, "postgres_dsn", None) or os.environ.get(
         "MEMPALACE_POSTGRES_DSN"
     )
     if not dsn:
-        return [], []
+        return [], [], []
 
     try:
         from mempalace.knowledge_graph_age import KnowledgeGraphAGE
 
         kg = KnowledgeGraphAGE(dsn=dsn)
     except Exception:
-        return [], []
+        return [], [], []
 
     entities: list[dict] = []
     triples: list[dict] = []
+    mentions: list[dict] = []
     try:
         try:
             ent_rows = kg._run_cypher(
@@ -2175,24 +2182,52 @@ def _read_kg_postgres(
                 })
 
         try:
-            trip_rows = kg._run_cypher(
+            rel_rows = kg._run_cypher(
                 """
-                MATCH (d:Drawer)-[r:MENTIONS]->(e:Entity)
-                RETURN d.id AS subject, e.name AS object,
-                       r.etype AS etype, r.confidence AS confidence
+                MATCH (a:Entity)-[r:RELATION]->(b:Entity)
+                RETURN a.name AS subject, r.relation_type AS predicate,
+                       b.name AS object, r.confidence AS confidence
                 LIMIT $n
                 """,
                 {"n": int(triple_limit)},
                 fetch=True,
             )
         except Exception:
-            trip_rows = []
-        for r in trip_rows:
+            rel_rows = []
+        for r in rel_rows:
+            subj = kg._unwrap_agtype(r[0])
+            obj = kg._unwrap_agtype(r[2])
+            if not (subj and obj):
+                continue
+            triples.append({
+                "subject": subj,
+                "predicate": kg._unwrap_agtype(r[1]) or "RELATION",
+                "object": obj,
+                "valid_from": None,
+                "valid_to": None,
+                "confidence": kg._unwrap_agtype(r[3]),
+                "source_file": None,
+            })
+
+        try:
+            men_rows = kg._run_cypher(
+                """
+                MATCH (d:Drawer)-[r:MENTIONS]->(e:Entity)
+                RETURN d.id AS subject, e.name AS object,
+                       r.etype AS etype, r.confidence AS confidence
+                LIMIT $n
+                """,
+                {"n": int(mention_limit)},
+                fetch=True,
+            )
+        except Exception:
+            men_rows = []
+        for r in men_rows:
             subj = kg._unwrap_agtype(r[0])
             obj = kg._unwrap_agtype(r[1])
             if not (subj and obj):
                 continue
-            triples.append({
+            mentions.append({
                 "subject": subj,
                 "predicate": "MENTIONS",
                 "object": obj,
@@ -2207,21 +2242,31 @@ def _read_kg_postgres(
         except Exception:
             pass
 
-    return entities, triples
+    return entities, triples, mentions
 
 
 def _read_kg_postgres_stats() -> dict | None:
-    """Live KG stats from Apache AGE — entity count + MENTIONS edge count.
+    """Live KG stats from Apache AGE — entity, RELATION, MENTIONS counts.
 
-    Under postgres, the legacy ``mempalace_kg_stats`` MCP tool returns the
-    near-empty `RELATION` table counts (`triples: 1` in the live palace
-    while AGE holds 5.58M MENTIONS edges). This helper queries AGE
-    directly so the `/graph` `kg_stats` block reflects what the response's
-    own `kg_entities`/`kg_triples` lists are sampled from.
+    Three counts straight off the AGE backing label tables (avoiding
+    Cypher because ``MATCH ()-[r:MENTIONS]->() RETURN count(r)`` runs the
+    full 5.66M-row scan through agtype and exhausts Postgres shared
+    memory):
+
+      * ``entities`` — vertex count from ``mempalace_kg."Entity"``
+      * ``triples`` — RELATION edge count (real entity→entity semantic
+        facts). Currently ~1 row; the corpus has not been triple-
+        extracted yet.
+      * ``mentions`` — MENTIONS edge count (Drawer→Entity mention
+        links). 5.66M+ rows on the live palace.
+
+    Pre-1.8.2 this field was named ``triples`` but counted MENTIONS,
+    masking the fact that we have entities but ~zero semantic facts.
 
     Returns ``None`` when AGE is unreachable so the caller falls back to
     the MCP-derived payload (which is still correct under the chroma
-    backend).
+    backend, where the sqlite KG holds RELATION-style triples in its
+    ``triples`` table and has no MENTIONS concept).
     """
     dsn = getattr(_mp._config, "postgres_dsn", None) or os.environ.get(
         "MEMPALACE_POSTGRES_DSN"
@@ -2237,12 +2282,16 @@ def _read_kg_postgres_stats() -> dict | None:
     try:
         graph = getattr(kg, "GRAPH_NAME", "mempalace_kg")
         entities = 0
+        triples = 0
         mentions = 0
         try:
             with kg._conn.cursor() as cur:
                 cur.execute(f'SELECT count(*) FROM {graph}."Entity"')
                 row = cur.fetchone()
                 entities = int(row[0]) if row else 0
+                cur.execute(f'SELECT count(*) FROM {graph}."RELATION"')
+                row = cur.fetchone()
+                triples = int(row[0]) if row else 0
                 cur.execute(f'SELECT count(*) FROM {graph}."MENTIONS"')
                 row = cur.fetchone()
                 mentions = int(row[0]) if row else 0
@@ -2256,12 +2305,15 @@ def _read_kg_postgres_stats() -> dict | None:
             kg.close()
         except Exception:
             pass
+    # relationship_types reports only edge labels with nonzero rows so
+    # consumers can branch on what's actually populated. RELATION is
+    # excluded until/unless triple extraction lands.
+    rel_types = [name for name, n in (("RELATION", triples), ("MENTIONS", mentions)) if n]
     return {
         "entities": entities,
-        "triples": mentions,
-        "current_facts": mentions,
-        "expired_facts": 0,
-        "relationship_types": ["MENTIONS"],
+        "triples": triples,
+        "mentions": mentions,
+        "relationship_types": rel_types,
     }
 
 
@@ -2280,38 +2332,47 @@ def _read_kg_stats_direct() -> dict | None:
 
 
 def _read_kg_direct(
-    entity_limit: int = 500, triple_limit: int = 1000
-) -> tuple[list[dict], list[dict]]:
-    """Read-only snapshot of KG entities + triples.
+    entity_limit: int = 500,
+    triple_limit: int = 1000,
+    mention_limit: int = 1000,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Read-only snapshot of KG entities, semantic triples, and mention edges.
+
+    Returns ``(entities, triples, mentions)``. The third slot is the
+    1.8.2 split — pre-1.8.2 the postgres branch packed MENTIONS edges
+    into the ``triples`` slot, conflating "Drawer mentions Entity"
+    (5.66M atemporal mention links) with "Entity—predicate—Entity"
+    (real semantic facts, currently ~1 placeholder).
 
     Under the chroma backend the KG lives in a sibling SQLite file
     (`knowledge_graph.sqlite3`); a read there does not cross the
     single-writer invariant. Schema differences (older palaces,
     in-progress migrations) are tolerated by catching OperationalError
-    on each query.
+    on each query. There is no MENTIONS concept in the chroma KG, so
+    the third tuple element is always an empty list under chroma.
 
     Under the postgres backend the KG lives in AGE (the `mempalace_kg`
-    graph). We dispatch to ``_read_kg_postgres`` which runs Cypher
-    against the live graph via ``KnowledgeGraphAGE._run_cypher`` — the
-    same internal path used by ``POST /cypher``. Entities are sampled
-    directly (``MATCH (e:Entity)``); triples come from the dominant
-    MENTIONS edge type (Drawer → Entity), not the near-empty legacy
-    RELATION edges. Limits bound /graph latency on the full
-    264k-entity / 5.58M-edge palace; UI surfaces this as a sample, not
-    a full export.
+    graph). We dispatch to ``_read_kg_postgres`` which runs three
+    Cypher queries: entities via ``MATCH (e:Entity)``, semantic triples
+    via ``MATCH (a:Entity)-[r:RELATION]->(b:Entity)``, mentions via
+    ``MATCH (d:Drawer)-[r:MENTIONS]->(e:Entity)``. Limits bound /graph
+    latency on the full palace; UI surfaces these as samples, not full
+    exports.
     """
     if getattr(_mp._config, "backend", None) == "postgres":
         return _read_kg_postgres(
-            entity_limit=entity_limit, triple_limit=triple_limit
+            entity_limit=entity_limit,
+            triple_limit=triple_limit,
+            mention_limit=mention_limit,
         )
     kg_path = _kg_path()
     if not os.path.isfile(kg_path):
-        return [], []
+        return [], [], []
     try:
         conn = sqlite3.connect(f"file:{kg_path}?mode=ro", uri=True, timeout=5)
         conn.row_factory = sqlite3.Row
     except sqlite3.OperationalError:
-        return [], []
+        return [], [], []
 
     entities: list[dict] = []
     triples: list[dict] = []
@@ -2352,7 +2413,8 @@ def _read_kg_direct(
             pass
     finally:
         conn.close()
-    return entities, triples
+    # chroma KG has no mention-edge concept — third slot is always []
+    return entities, triples, []
 
 
 @app.get("/graph")
@@ -2382,15 +2444,27 @@ async def graph(
     HTTP. On the 151K-drawer canonical palace, list_wings alone takes
     ~30s; the gather here finishes in well under that.
 
-    Under the postgres backend (shipped in 1.8.0) the KG section reads
-    live from Apache AGE — entities via ``MATCH (e:Entity)``, triples
-    via ``MATCH (d:Drawer)-[:MENTIONS]->(e:Entity)`` projected as
-    {subject=drawer.id, predicate="MENTIONS", object=entity.name,
-    confidence=r.confidence, source_file=r.etype}.
+    Under the postgres backend the KG section reads live from Apache
+    AGE, returning three separate edge views (1.8.2 split):
+
+    - ``kg_triples`` — RELATION edges, the entity→entity semantic facts
+      consumers expect when they hear "triple." Currently ~1 placeholder
+      row; the corpus has not been triple-extracted.
+    - ``kg_mentions`` — MENTIONS edges (Drawer→Entity), the dominant
+      relationship in the live graph (5.66M+). Atemporal mention links,
+      not semantic facts. Pre-1.8.2 these lived in ``kg_triples`` and
+      were mislabeled.
+    - ``kg_stats`` reports entity, triples, and mentions counts
+      separately.
+
+    Under the chroma backend ``kg_triples`` is sourced from the legacy
+    sqlite ``triples`` table (real semantic facts) and ``kg_mentions``
+    is always ``[]`` (no MENTIONS concept in the chroma KG).
     """
     _check_auth(x_api_key)
     entity_limit = int(limit)
     triple_limit = int(limit) * 2
+    mention_limit = int(limit) * 2
 
     def _mcp(tool: str, args: dict, rid: int) -> dict:
         return {
@@ -2428,7 +2502,9 @@ async def graph(
     wings_rooms_task = _direct_under_sem(_read_wings_rooms_direct)
     kg_direct_task   = _direct_under_sem(
         lambda: _read_kg_direct(
-            entity_limit=entity_limit, triple_limit=triple_limit
+            entity_limit=entity_limit,
+            triple_limit=triple_limit,
+            mention_limit=mention_limit,
         )
     )
     kg_stats_direct_task = _direct_under_sem(_read_kg_stats_direct)
@@ -2437,7 +2513,7 @@ async def graph(
         graph_stats_resp,
         kg_stats_resp,
         (wings, rooms),
-        (kg_entities, kg_triples),
+        (kg_entities, kg_triples, kg_mentions),
         kg_stats_age,
     ) = await asyncio.gather(
         graph_stats_task,
@@ -2459,6 +2535,7 @@ async def graph(
         "tunnels": tunnels,
         "kg_entities": kg_entities,
         "kg_triples": kg_triples,
+        "kg_mentions": kg_mentions,
         "kg_stats": kg_stats_age or _unwrap(kg_stats_resp) or {},
     }
 
