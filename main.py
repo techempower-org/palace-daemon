@@ -2729,8 +2729,17 @@ async def backfill_age_status(x_api_key: str | None = Header(default=None)):
                         "SELECT COUNT(*) FROM mempalace_drawers"
                     )
                     total = cur.fetchone()[0]
+                unprocessed, reason_codes = _backfill_unprocessed_breakdown(conn)
             result["checkpointed_drawers"] = checkpointed
             result["total_drawers"] = total
+            # Drawers that exist in `mempalace_drawers` but have no `drawer`
+            # row in `mempalace_kg_backfill_state`. Categorized by metadata
+            # `filed_at` vs the run window: drawers ingested during or after
+            # the backfill cursor snapshot are the dominant cause on a healthy
+            # palace; a next run picks them up. Non-zero `pre_run_unmarked`
+            # means rows the run could not mark — investigate daemon logs.
+            result["unprocessed_drawers"] = unprocessed
+            result["unprocessed_reason_codes"] = reason_codes
             if total > 0:
                 result["progress_pct"] = round(100 * checkpointed / total, 1)
 
@@ -2747,6 +2756,57 @@ async def backfill_age_status(x_api_key: str | None = Header(default=None)):
         logging.getLogger("palace-daemon").warning("backfill-age/status enrichment failed: %s", exc)
 
     return result
+
+
+def _backfill_unprocessed_breakdown(conn) -> tuple[int, dict[str, int]]:
+    """Bucket drawers missing from the AGE backfill checkpoint by why.
+
+    Buckets keyed off the drawer's `metadata->>'filed_at'` versus the
+    backfill run window (min/max `completed_at` for `phase='drawer'`):
+
+    - `added_during_run`: filed inside the run window — the streaming
+      cursor snapshot pre-dated them.
+    - `added_after_run`: filed after the last checkpoint mark — a fresh
+      backfill run will pick them up.
+    - `pre_run_unmarked`: filed before the run started yet never marked —
+      either errored (rolled back during processing) or a partial run.
+    - `no_filed_at`: metadata lacks `filed_at`; can't be bucketed.
+
+    Returns (total_unprocessed, reason_codes). All-zero codes are omitted.
+    Empty checkpoint table -> all rows are `pre_run_unmarked`.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SET LOCAL statement_timeout = '10s'; "
+            "WITH win AS ("
+            "  SELECT MIN(completed_at) AS run_start, MAX(completed_at) AS run_end "
+            "  FROM mempalace_kg_backfill_state WHERE phase = 'drawer'"
+            "), gap AS ("
+            "  SELECT (d.metadata->>'filed_at')::timestamptz AS filed_at "
+            "  FROM mempalace_drawers d "
+            "  LEFT JOIN mempalace_kg_backfill_state s "
+            "    ON s.phase = 'drawer' AND s.key = d.id "
+            "  WHERE s.key IS NULL"
+            ") "
+            "SELECT "
+            "  COUNT(*) AS total, "
+            "  COUNT(*) FILTER (WHERE filed_at IS NULL) AS no_filed_at, "
+            "  COUNT(*) FILTER (WHERE filed_at IS NOT NULL AND filed_at < (SELECT run_start FROM win)) AS pre_run_unmarked, "
+            "  COUNT(*) FILTER (WHERE filed_at IS NOT NULL "
+            "                   AND filed_at >= (SELECT run_start FROM win) "
+            "                   AND filed_at <= (SELECT run_end FROM win)) AS added_during_run, "
+            "  COUNT(*) FILTER (WHERE filed_at IS NOT NULL AND filed_at > (SELECT run_end FROM win)) AS added_after_run "
+            "FROM gap"
+        )
+        row = cur.fetchone()
+    total, no_filed_at, pre_run, during_run, after_run = row
+    codes: dict[str, int] = {
+        "added_during_run": during_run,
+        "added_after_run": after_run,
+        "pre_run_unmarked": pre_run,
+        "no_filed_at": no_filed_at,
+    }
+    return total, {k: v for k, v in codes.items() if v}
 
 
 @app.get("/watch")
