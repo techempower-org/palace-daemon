@@ -12,19 +12,20 @@
 > SME's `MemPalaceDaemonAdapter.get_graph_snapshot()` lands in 0.7s
 > against this — a 430× speedup over the MCP fallback.
 >
-> **2026-05-25 update — KG source needs migration to AGE.** The
-> `_read_kg_direct()` helper documented in Part 1 reads from
-> `~/.mempalace/knowledge_graph.sqlite3`, which is now the **legacy**
-> KG path. After the [2026-05-25 AGE backfill](../CHANGELOG.md#milestone--2026-05-25--age-knowledge-graph-backfill-complete-629k-nodes--595m-edges)
-> the live knowledge graph lives in Postgres + Apache AGE (graph
-> `mempalace_kg`) — 263,982 entities, 5.58M `MENTIONS` edges. The
-> sqlite KG file is now a stale shadow (a few entities and triples
-> from the old write-through path). `/graph` continues to serve the
-> sqlite snapshot for backwards compatibility, but consumers that
-> need current KG state should hit `POST /cypher` directly. **Pending
-> follow-up:** switch the `kg_entities` / `kg_triples` / `kg_stats`
-> sections of `/graph` to read from AGE via the existing internal
-> cypher path, and version-bump (1.7.x → 1.8.0).
+> **Shipped in 1.8.0 (2026-05-25) — KG source now reads live AGE.**
+> Under `MEMPALACE_BACKEND=postgres` the `kg_entities` and `kg_triples`
+> sections of `/graph` are sourced from Apache AGE (graph
+> `mempalace_kg`) via two Cypher queries (`MATCH (e:Entity)` and
+> `MATCH (d:Drawer)-[r:MENTIONS]->(e:Entity)`), executed through the
+> same internal cypher path `POST /cypher` uses. The legacy
+> `~/.mempalace/knowledge_graph.sqlite3` snapshot is no longer
+> consulted under postgres. A new `?limit=N` query parameter (default
+> 500, max 50000) caps entity count and applies 2× to triples; the
+> full 264k-entity / 5.58M-edge graph is too large for a single
+> response, and callers needing more should query AGE directly via
+> `POST /cypher`. The legacy "_read_kg_direct sqlite reader" sketch
+> below is preserved as the historical chroma-backend implementation;
+> the actual `_read_kg_direct` in `main.py` now dispatches by backend.
 
 ## Context
 

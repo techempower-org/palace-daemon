@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 # Hard fail if hnswlib isn't importable. ChromaDB has no error path for
@@ -61,7 +61,7 @@ import rerank as _rerank
 
 # ── Config (env vars override CLI defaults) ───────────────────────────────────
 
-VERSION = "1.7.2"
+VERSION = "1.8.0"
 DEFAULT_HOST = os.getenv("PALACE_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.getenv("PALACE_PORT", "8085"))
 DEFAULT_PALACE = os.getenv("PALACE_PATH", "")
@@ -2106,23 +2106,39 @@ def _read_wings_rooms_direct() -> tuple[dict[str, int], list[dict]]:
     return wings, rooms
 
 
-def _read_kg_postgres() -> tuple[list[dict], list[dict]]:
-    """Read entities + triples directly from the live AGE graph.
+def _read_kg_postgres(
+    entity_limit: int = 500, triple_limit: int = 1000
+) -> tuple[list[dict], list[dict]]:
+    """Read entities + Drawer→Entity MENTIONS edges from the live AGE graph.
 
-    Shape matches the chroma sqlite KG schema so the /graph response
-    stays stable across backends:
+    Issues two Cypher queries via ``KnowledgeGraphAGE._run_cypher`` (the
+    same internal path ``POST /cypher`` and ``/search/age-fused`` use):
+
+      * ``MATCH (e:Entity) RETURN e.name LIMIT $n``
+      * ``MATCH (d:Drawer)-[r:MENTIONS]->(e:Entity) RETURN ... LIMIT $n``
+
+    MENTIONS is the dominant edge type in the live graph (5.58M edges as
+    of 2026-05-25), so projecting it as the "triples" section keeps the
+    /graph payload meaningful. Legacy RELATION semantic facts (handful
+    of rows in the live graph) are excluded — consumers that need them
+    can query /cypher directly.
+
+    Response shape preserved across the sqlite → AGE migration:
       entity:  {id, name, type, properties}
       triple:  {subject, predicate, object, valid_from, valid_to,
                 confidence, source_file}
 
-    AGE entities don't have a separate `id`/`type`/`properties` model —
-    they're MERGE'd by name when a triple is added, so we map
-    id=name=name, type='entity', properties={}. `source_file` is
-    populated from the relation's `source` field if present.
+    For MENTIONS edges:
+      - subject  = drawer id   (Drawer.id)
+      - predicate = "MENTIONS"
+      - object   = entity name (Entity.name)
+      - confidence = MENTIONS edge confidence (~0.5 from the extractor)
+      - source_file = etype tag (PROPER_NOUN, TECH_IDENT, ...)
+      - valid_from / valid_to = None (MENTIONS edges are atemporal)
 
-    Limited to 500 triples to bound /graph latency on large palaces;
-    callers that need the full graph should query AGE directly via
-    /cypher.
+    Caps default to 500 entities / 1000 triples to bound /graph latency
+    on the full 264k-entity / 5.58M-edge palace. Callers can lift via
+    the ``limit`` query parameter on /graph.
     """
     dsn = getattr(_mp._config, "postgres_dsn", None) or os.environ.get(
         "MEMPALACE_POSTGRES_DSN"
@@ -2131,57 +2147,73 @@ def _read_kg_postgres() -> tuple[list[dict], list[dict]]:
         return [], []
 
     try:
-        # Construct on-demand. The AGE helper's __init__ is cheap once
-        # the extension is loaded; the explicit close() in finally
-        # releases the connection we opened here.
         from mempalace.knowledge_graph_age import KnowledgeGraphAGE
 
         kg = KnowledgeGraphAGE(dsn=dsn)
     except Exception:
         return [], []
 
+    entities: list[dict] = []
+    triples: list[dict] = []
     try:
-        # query_triples() returns dicts with keys subject, relation_type,
-        # object, source, valid_from, valid_to, confidence.
-        rows = kg.query_triples()
-    except Exception:
-        rows = []
+        try:
+            ent_rows = kg._run_cypher(
+                "MATCH (e:Entity) RETURN e.name AS name LIMIT $n",
+                {"n": int(entity_limit)},
+                fetch=True,
+            )
+        except Exception:
+            ent_rows = []
+        for r in ent_rows:
+            name = kg._unwrap_agtype(r[0])
+            if name:
+                entities.append({
+                    "id": name,
+                    "name": name,
+                    "type": "entity",
+                    "properties": {},
+                })
+
+        try:
+            trip_rows = kg._run_cypher(
+                """
+                MATCH (d:Drawer)-[r:MENTIONS]->(e:Entity)
+                RETURN d.id AS subject, e.name AS object,
+                       r.count AS count, r.etype AS etype,
+                       r.confidence AS confidence
+                LIMIT $n
+                """,
+                {"n": int(triple_limit)},
+                fetch=True,
+            )
+        except Exception:
+            trip_rows = []
+        for r in trip_rows:
+            subj = kg._unwrap_agtype(r[0])
+            obj = kg._unwrap_agtype(r[1])
+            if not (subj and obj):
+                continue
+            triples.append({
+                "subject": subj,
+                "predicate": "MENTIONS",
+                "object": obj,
+                "valid_from": None,
+                "valid_to": None,
+                "confidence": kg._unwrap_agtype(r[4]),
+                "source_file": kg._unwrap_agtype(r[3]),
+            })
     finally:
         try:
             kg.close()
         except Exception:
             pass
 
-    rows = rows[:500]  # cap to bound payload
-
-    triples: list[dict] = []
-    entity_names: set[str] = set()
-    for r in rows:
-        subj = r.get("subject")
-        pred = r.get("relation_type")
-        obj = r.get("object")
-        if not (subj and pred and obj):
-            continue
-        triples.append({
-            "subject": subj,
-            "predicate": pred,
-            "object": obj,
-            "valid_from": r.get("valid_from"),
-            "valid_to": r.get("valid_to"),
-            "confidence": r.get("confidence"),
-            "source_file": r.get("source"),
-        })
-        entity_names.add(subj)
-        entity_names.add(obj)
-
-    entities = [
-        {"id": n, "name": n, "type": "entity", "properties": {}}
-        for n in sorted(entity_names)
-    ]
     return entities, triples
 
 
-def _read_kg_direct() -> tuple[list[dict], list[dict]]:
+def _read_kg_direct(
+    entity_limit: int = 500, triple_limit: int = 1000
+) -> tuple[list[dict], list[dict]]:
     """Read-only snapshot of KG entities + triples.
 
     Under the chroma backend the KG lives in a sibling SQLite file
@@ -2191,15 +2223,19 @@ def _read_kg_direct() -> tuple[list[dict], list[dict]]:
     on each query.
 
     Under the postgres backend the KG lives in AGE (the `mempalace_kg`
-    graph). We use `KnowledgeGraphAGE` to read the live graph directly —
-    one Cypher MATCH for triples, then derive the entity list from the
-    union of subjects+objects (AGE schema has no separate entity-row
-    concept; entities are MERGE'd by name when triples are inserted).
-    Limited to 500 triples to bound `/graph` latency on large palaces;
-    UI surfaces this as a sample, not a full export.
+    graph). We dispatch to ``_read_kg_postgres`` which runs Cypher
+    against the live graph via ``KnowledgeGraphAGE._run_cypher`` — the
+    same internal path used by ``POST /cypher``. Entities are sampled
+    directly (``MATCH (e:Entity)``); triples come from the dominant
+    MENTIONS edge type (Drawer → Entity), not the near-empty legacy
+    RELATION edges. Limits bound /graph latency on the full
+    264k-entity / 5.58M-edge palace; UI surfaces this as a sample, not
+    a full export.
     """
     if getattr(_mp._config, "backend", None) == "postgres":
-        return _read_kg_postgres()
+        return _read_kg_postgres(
+            entity_limit=entity_limit, triple_limit=triple_limit
+        )
     kg_path = _kg_path()
     if not os.path.isfile(kg_path):
         return [], []
@@ -2213,7 +2249,10 @@ def _read_kg_direct() -> tuple[list[dict], list[dict]]:
     triples: list[dict] = []
     try:
         try:
-            for r in conn.execute("SELECT id, name, type, properties FROM entities"):
+            for r in conn.execute(
+                "SELECT id, name, type, properties FROM entities LIMIT ?",
+                (int(entity_limit),),
+            ):
                 try:
                     props = json.loads(r["properties"] or "{}")
                 except (TypeError, ValueError):
@@ -2229,7 +2268,8 @@ def _read_kg_direct() -> tuple[list[dict], list[dict]]:
         try:
             for r in conn.execute(
                 "SELECT subject, predicate, object, valid_from, valid_to, "
-                "confidence, source_file FROM triples"
+                "confidence, source_file FROM triples LIMIT ?",
+                (int(triple_limit),),
             ):
                 triples.append({
                     "subject": r["subject"],
@@ -2248,19 +2288,41 @@ def _read_kg_direct() -> tuple[list[dict], list[dict]]:
 
 
 @app.get("/graph")
-async def graph(x_api_key: str | None = Header(default=None)):
+async def graph(
+    x_api_key: str | None = Header(default=None),
+    limit: int = Query(
+        500,
+        ge=1,
+        le=50000,
+        description=(
+            "Cap on KG entity count returned (and 2× this on MENTIONS "
+            "triples). Default 500 keeps /graph fast on the full 264k-"
+            "entity / 5.58M-edge palace. Callers needing more should "
+            "query AGE directly via POST /cypher."
+        ),
+    ),
+):
     """Single-shot structural snapshot for SME-style consumers.
 
     Mirrors `/stats`'s asyncio.gather pattern but adds:
     - rooms-per-wing fan-out (parallel)
-    - direct sqlite read of the KG (no extra MCP roundtrip)
+    - direct read of the KG from the active backend (sqlite under
+      chroma; AGE Cypher under postgres) — no extra MCP roundtrip
 
     Replaces what an SME adapter would otherwise compose by serially
     calling list_wings + list_rooms × N + list_tunnels + kg_stats over
     HTTP. On the 151K-drawer canonical palace, list_wings alone takes
     ~30s; the gather here finishes in well under that.
+
+    Under the postgres backend (shipped in 1.8.0) the KG section reads
+    live from Apache AGE — entities via ``MATCH (e:Entity)``, triples
+    via ``MATCH (d:Drawer)-[:MENTIONS]->(e:Entity)`` projected as
+    {subject=drawer.id, predicate="MENTIONS", object=entity.name,
+    confidence=r.confidence, source_file=r.etype}.
     """
     _check_auth(x_api_key)
+    entity_limit = int(limit)
+    triple_limit = int(limit) * 2
 
     def _mcp(tool: str, args: dict, rid: int) -> dict:
         return {
@@ -2296,7 +2358,11 @@ async def graph(x_api_key: str | None = Header(default=None)):
             return await asyncio.to_thread(work)
 
     wings_rooms_task = _direct_under_sem(_read_wings_rooms_direct)
-    kg_direct_task   = _direct_under_sem(_read_kg_direct)
+    kg_direct_task   = _direct_under_sem(
+        lambda: _read_kg_direct(
+            entity_limit=entity_limit, triple_limit=triple_limit
+        )
+    )
 
     graph_stats_resp, kg_stats_resp, (wings, rooms), (kg_entities, kg_triples) = (
         await asyncio.gather(

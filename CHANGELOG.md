@@ -1,5 +1,54 @@
 # Changelog
 
+## 1.8.0 — 2026-05-25
+
+### Changed — *`GET /graph` KG section migrated from sqlite to live Apache AGE*
+
+Resolves roadmap item #3 from the [2026-05-25 backfill
+milestone](#milestone--2026-05-25--age-knowledge-graph-backfill-complete-629k-nodes--595m-edges)
+("Switch `GET /graph`'s KG section from `knowledge_graph.sqlite3` to a
+live AGE `MATCH ... RETURN ...`"). Before this release, `/graph` served
+the legacy `~/.mempalace/knowledge_graph.sqlite3` snapshot — a stale
+shadow that holds a handful of `RELATION` rows from the pre-backfill
+write-through path. The live KG (264k entities, 5.58M `MENTIONS` edges)
+has lived in Postgres + Apache AGE since the 2026-05-25 backfill, so
+consumers were getting the wrong picture.
+
+- **AGE-backed KG read under `MEMPALACE_BACKEND=postgres`**:
+  `_read_kg_postgres` now drives two Cypher queries via
+  `KnowledgeGraphAGE._run_cypher` (the same internal path `POST /cypher`
+  and `POST /search/age-fused` use):
+
+      MATCH (e:Entity) RETURN e.name AS name LIMIT $n
+
+      MATCH (d:Drawer)-[r:MENTIONS]->(e:Entity)
+      RETURN d.id AS subject, e.name AS object,
+             r.count AS count, r.etype AS etype,
+             r.confidence AS confidence
+      LIMIT $n
+
+  The MENTIONS projection lands in the `kg_triples` slot with the
+  existing keys preserved: `subject=drawer.id`, `predicate="MENTIONS"`,
+  `object=entity.name`, `confidence=r.confidence`, `source_file=r.etype`
+  (re-used as the entity-type tag), `valid_from`/`valid_to`=null
+  (MENTIONS edges are atemporal).
+- **New `?limit=N` query param on `GET /graph`** (default 500, max
+  50000): caps the entity-row count and applies 2× this to triples.
+  The full 264k-entity / 5.58M-edge graph is too large for a single
+  response — callers needing more should query AGE directly via
+  `POST /cypher`. The chroma sqlite branch also honors the limit so
+  /graph stays bounded under either backend.
+- **Response shape unchanged**: all six top-level keys (`wings`,
+  `rooms`, `tunnels`, `kg_entities`, `kg_triples`, `kg_stats`) keep
+  their existing schema; SME's `MemPalaceDaemonAdapter` and the `/viz`
+  D3 force-graph need no client-side change.
+- **Tests**: two new cases in `tests/test_graph_wings_dispatch.py`
+  (`TestReadKgPostgresAGE`) stub `KnowledgeGraphAGE` to pin the Cypher
+  text, the `LIMIT $n` bindings, and the row → response-key projection.
+- **Docs**: `docs/graph-endpoint.md` updated — the "2026-05-25 update"
+  pending-migration banner is replaced by a "shipped in 1.8.0"
+  historical note documenting the new `limit` parameter.
+
 ## [Unreleased]
 
 ### Milestone — 2026-05-25 — *AGE knowledge-graph backfill complete (629k nodes / 5.95M edges)*

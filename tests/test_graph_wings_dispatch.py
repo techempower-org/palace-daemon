@@ -120,5 +120,89 @@ class TestReadKgDirectDispatch(unittest.TestCase):
         self.assertEqual(triples, [])
 
 
+class TestReadKgPostgresAGE(unittest.TestCase):
+    """`_read_kg_postgres` (1.8.0+) runs Cypher against AGE for entities
+    and Drawer→Entity MENTIONS edges. These tests stub the
+    ``KnowledgeGraphAGE`` import so the wiring (which queries run, what
+    LIMITs they carry, how rows project into the public schema) is
+    pinned without needing a live Postgres + AGE.
+    """
+
+    def _make_kg_class(self, ent_rows, trip_rows):
+        captured = {"calls": []}
+
+        class _StubKG:
+            def __init__(self, dsn=None):
+                self.dsn = dsn
+
+            def _run_cypher(self, cypher, params, fetch=True):
+                captured["calls"].append((cypher, dict(params)))
+                if "Entity)" in cypher and "MENTIONS" not in cypher:
+                    return ent_rows
+                return trip_rows
+
+            @staticmethod
+            def _unwrap_agtype(v):
+                return v
+
+            def close(self):
+                pass
+
+        return _StubKG, captured
+
+    def test_age_projection_and_limits(self):
+        ent_rows = [["alpha"], ["beta"]]
+        trip_rows = [
+            ["drawer-1", "alpha", 2, "PROPER_NOUN", 0.5],
+            ["drawer-2", "beta", 1, "TECH_IDENT", 0.5],
+        ]
+        StubKG, captured = self._make_kg_class(ent_rows, trip_rows)
+
+        import sys
+        stub_mod = type(sys)("mempalace.knowledge_graph_age")
+        stub_mod.KnowledgeGraphAGE = StubKG
+        with patch.dict(sys.modules, {"mempalace.knowledge_graph_age": stub_mod}), \
+             patch.object(main, "_mp") as mp:
+            mp._config = _Cfg("postgres")
+            mp._config.postgres_dsn = "postgres://stub"
+            entities, triples = main._read_kg_postgres(
+                entity_limit=50, triple_limit=120
+            )
+
+        self.assertEqual(len(captured["calls"]), 2)
+        ent_call_cypher, ent_params = captured["calls"][0]
+        self.assertIn("MATCH (e:Entity)", ent_call_cypher)
+        self.assertEqual(ent_params, {"n": 50})
+        trip_call_cypher, trip_params = captured["calls"][1]
+        self.assertIn("(d:Drawer)-[r:MENTIONS]->(e:Entity)", trip_call_cypher)
+        self.assertEqual(trip_params, {"n": 120})
+
+        self.assertEqual(entities, [
+            {"id": "alpha", "name": "alpha", "type": "entity", "properties": {}},
+            {"id": "beta", "name": "beta", "type": "entity", "properties": {}},
+        ])
+        self.assertEqual(triples, [
+            {
+                "subject": "drawer-1", "predicate": "MENTIONS",
+                "object": "alpha", "valid_from": None, "valid_to": None,
+                "confidence": 0.5, "source_file": "PROPER_NOUN",
+            },
+            {
+                "subject": "drawer-2", "predicate": "MENTIONS",
+                "object": "beta", "valid_from": None, "valid_to": None,
+                "confidence": 0.5, "source_file": "TECH_IDENT",
+            },
+        ])
+
+    def test_age_no_dsn_degrades_to_empty(self):
+        with patch.object(main, "_mp") as mp, \
+             patch.dict(os.environ, {"MEMPALACE_POSTGRES_DSN": ""}, clear=False):
+            mp._config = _Cfg("postgres")
+            mp._config.postgres_dsn = None
+            entities, triples = main._read_kg_postgres()
+        self.assertEqual(entities, [])
+        self.assertEqual(triples, [])
+
+
 if __name__ == "__main__":
     unittest.main()
