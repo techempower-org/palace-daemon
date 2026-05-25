@@ -49,6 +49,10 @@ consumers were getting the wrong picture.
   pending-migration banner is replaced by a "shipped in 1.8.0"
   historical note documenting the new `limit` parameter.
 
+### Added — *`/backfill-age/status` exposes unprocessed-drawer breakdown*
+
+`GET /backfill-age/status` now returns two additional keys, `unprocessed_drawers` (int) and `unprocessed_reason_codes` (dict, nonzero buckets only), exposing drawers present in `mempalace_drawers` but missing from the AGE backfill checkpoint. Buckets — `added_during_run` / `added_after_run` / `pre_run_unmarked` / `no_filed_at` — distinguish "expected gap from a streaming-cursor snapshot pre-dating new ingest" (the dominant cause on a healthy palace) from "rows the run failed to mark" (which warrants log review). Diagnosis on the live palace: 1,676 `added_during_run` + 1 `added_after_run`, all storyvox ingest landing during the backfill window. Backed by a single CTE+anti-join query with `SET LOCAL statement_timeout='10s'`. Tests in `tests/test_backfill_unprocessed.py`.
+
 ## [Unreleased]
 
 ### Milestone — 2026-05-25 — *AGE knowledge-graph backfill complete (629k nodes / 5.95M edges)*
