@@ -158,6 +158,33 @@
     .mermaid-wrap { background: var(--panel); border-radius: 4px; overflow: auto; max-height: 540px; }
     .mermaid { font-size: 0.85rem; }
 
+    /* Backfill + extraction card */
+    .bf-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
+    @media (max-width: 900px) { .bf-grid { grid-template-columns: 1fr; } }
+    .bf-section h3 {
+      font-size: 0.78rem; margin: 0 0 0.5rem 0; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent);
+    }
+    .bf-row { display: flex; justify-content: space-between; gap: 0.5rem; font-size: 0.82rem; padding: 0.12rem 0; }
+    .bf-row .label { color: var(--muted); }
+    .bf-row .value { font-variant-numeric: tabular-nums; }
+    .bf-row .value.dim { color: var(--muted); }
+    .bf-row .value.warn { color: var(--warn); }
+    .bf-row .value.good { color: var(--good); }
+    .progress {
+      display: block; width: 100%; height: 0.55rem;
+      background: var(--border); border-radius: 999px;
+      overflow: hidden; margin: 0.35rem 0 0.55rem 0;
+    }
+    .progress .fill {
+      display: block; height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      transition: width 0.4s ease-out;
+    }
+    .progress .fill.warn { background: var(--warn); }
+    .progress .fill.busy { animation: pulse 1.4s ease-in-out infinite; }
+    .bf-note { font-size: 0.72rem; color: var(--muted); margin-top: 0.45rem; line-height: 1.45; }
+
     footer {
       margin-top: 1rem; padding: 0.6rem 0.75rem; font-size: 0.72rem; color: var(--muted);
       display: flex; justify-content: space-between; gap: 1rem;
@@ -210,6 +237,11 @@
   <div class="panel">
     <h2>KG stats</h2>
     <div id="kg-stats"></div>
+  </div>
+
+  <div class="panel" style="grid-column: 1 / -1;">
+    <h2>Backfill &amp; extraction <span class="h2-sub">— pipeline progress</span></h2>
+    <div id="backfill" class="bf-grid"></div>
   </div>
 </section>
 
@@ -370,6 +402,112 @@ function renderKGStats(graph) {
   });
 }
 
+function renderBackfill(backfill, graph) {
+  // Two sub-sections in one card:
+  //
+  //   1. AGE backfill — live data from /backfill-age/status. This is the
+  //      parallel-worker-aware checkpointing job that walks drawers and
+  //      writes the (:Drawer)-[:MENTIONS]->(:Entity) edges into AGE.
+  //
+  //   2. KG triple extraction — placeholder. The upstream semantic-triples
+  //      extraction pipeline (entity→entity RELATION facts) is not yet
+  //      wired; the lone RELATION row in the live corpus is an AGE setup
+  //      placeholder. Surface this honestly rather than hiding it: a warn-
+  //      coloured 0% bar makes the missing pipeline visible.
+  const root = document.getElementById("backfill");
+  clear(root);
+
+  // ============= AGE backfill =============
+  const bf = backfill || {};
+  const pct = typeof bf.progress_pct === "number" ? bf.progress_pct : null;
+  const chkd = bf.checkpointed_drawers || 0;
+  const tot  = bf.total_drawers || 0;
+  const unproc = bf.unprocessed_drawers || 0;
+  const inProgress = !!bf.in_progress;
+
+  const ageSection = el("div", { class: "bf-section" });
+  ageSection.appendChild(el("h3", null, "AGE backfill"));
+
+  const ageProgress = el("div", { class: "progress", role: "progressbar",
+    "aria-valuemin": "0", "aria-valuemax": "100",
+    "aria-valuenow": String(pct == null ? 0 : pct.toFixed(1)),
+    "aria-label": "AGE backfill progress" });
+  const fillWidth = (pct == null ? 0 : Math.max(0, Math.min(100, pct))).toFixed(1) + "%";
+  ageProgress.appendChild(el("span", {
+    class: "fill" + (inProgress ? " busy" : ""),
+    style: "width: " + fillWidth + ";"
+  }));
+  ageSection.appendChild(ageProgress);
+
+  ageSection.appendChild(el("div", { class: "bf-row" },
+    el("span", { class: "label" }, "progress"),
+    el("span", { class: "value" + (pct == null ? " dim" : (pct >= 99 ? " good" : "")) },
+      pct == null ? "—" : pct.toFixed(1) + "%"
+    )
+  ));
+  ageSection.appendChild(el("div", { class: "bf-row" },
+    el("span", { class: "label" }, "checkpointed"),
+    el("span", { class: "value" }, chkd.toLocaleString() + " / " + tot.toLocaleString())
+  ));
+  ageSection.appendChild(el("div", { class: "bf-row" },
+    el("span", { class: "label" }, "unprocessed"),
+    el("span", { class: "value" + (unproc > 0 ? " warn" : "") }, unproc.toLocaleString())
+  ));
+  ageSection.appendChild(el("div", { class: "bf-row" },
+    el("span", { class: "label" }, "status"),
+    el("span", { class: "value" + (inProgress ? " warn" : " good") },
+      inProgress ? "running" : "idle"
+    )
+  ));
+
+  const reasons = bf.unprocessed_reason_codes || {};
+  const reasonKeys = Object.keys(reasons);
+  if (reasonKeys.length > 0) {
+    const text = "unprocessed breakdown — "
+      + reasonKeys.map(k => k.replace(/_/g, " ") + ": " + reasons[k].toLocaleString()).join(" · ");
+    ageSection.appendChild(el("div", { class: "bf-note" }, text));
+  }
+  root.appendChild(ageSection);
+
+  // ============= KG triple extraction =============
+  const stats = (graph && graph.kg_stats) || {};
+  const entities = stats.entities || 0;
+  const triples = stats.triples || 0;
+  const mentions = stats.mentions || 0;
+
+  const triSection = el("div", { class: "bf-section" });
+  triSection.appendChild(el("h3", null, "KG triple extraction"));
+
+  const triProgress = el("div", { class: "progress", role: "progressbar",
+    "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": "0",
+    "aria-label": "KG triple extraction progress" });
+  triProgress.appendChild(el("span", { class: "fill warn", style: "width: 0%;" }));
+  triSection.appendChild(triProgress);
+
+  triSection.appendChild(el("div", { class: "bf-row" },
+    el("span", { class: "label" }, "pipeline"),
+    el("span", { class: "value warn" }, "not wired")
+  ));
+  triSection.appendChild(el("div", { class: "bf-row" },
+    el("span", { class: "label" }, "RELATION facts"),
+    el("span", { class: "value" }, triples.toLocaleString())
+  ));
+  triSection.appendChild(el("div", { class: "bf-row" },
+    el("span", { class: "label" }, "MENTIONS provenance"),
+    el("span", { class: "value" }, mentions.toLocaleString())
+  ));
+  triSection.appendChild(el("div", { class: "bf-row" },
+    el("span", { class: "label" }, "entities"),
+    el("span", { class: "value" }, entities.toLocaleString())
+  ));
+  triSection.appendChild(el("div", { class: "bf-note" },
+    "Upstream semantic-triples extraction pipeline isn't wired yet — current "
+    + "RELATION rows are AGE seed placeholders. MENTIONS edges dominate the "
+    + "graph until extraction lands."
+  ));
+  root.appendChild(triSection);
+}
+
 // Mermaid label sanitizer — allow only chars that don't blow up the parser.
 // (Mermaid escapes its own labels but a label containing `]` or `"` will
 // terminate the node definition early.) Also strips ASCII control chars
@@ -491,15 +629,19 @@ function renderKG(graph) {
 //------------------------------------------------------------------ load + refresh
 async function loadAll() {
   try {
-    const [health, repairStatus, graph] = await Promise.all([
+    // /backfill-age/status is wrapped in catch(null) so older daemons that
+    // don't expose it (pre-84fb3ae) still render the rest of the dashboard.
+    const [health, repairStatus, graph, backfill] = await Promise.all([
       fetchJSON("/health"),
       fetchJSON("/repair/status"),
       fetchJSON("/graph"),
+      fetchJSON("/backfill-age/status").catch(() => null),
     ]);
     renderHeader(health, repairStatus, graph);
     renderWings(graph);
     renderTunnels(graph);
     renderKGStats(graph);
+    renderBackfill(backfill, graph);
     renderHierarchy(graph);
     renderKG(graph);
   } catch (e) {
