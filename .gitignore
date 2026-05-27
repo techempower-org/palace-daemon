@@ -4,6 +4,10 @@
 !.gemini/config.yaml
 .claude/
 
+# Site-local deploy config (PALACE_* overrides) — keep the .example tracked.
+scripts/deploy.conf
+scripts/auto-repair.conf
+
 # Python
 __pycache__/
 *.py[cod]

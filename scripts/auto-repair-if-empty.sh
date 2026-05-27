@@ -1,19 +1,32 @@
 #!/usr/bin/env bash
 # auto-repair-if-empty.sh — palace-daemon startup self-heal
 #
-# Runs as ExecStartPost on the palace-daemon systemd unit. After the daemon
-# binds, probes /search for the "vector ranked 0 — rest only reachable by
-# keyword match" warning that the jphein-fork emits when the HNSW index is
-# empty/quarantined despite a populated SQLite. If detected, fires
+# After the daemon binds, probes /search for the "vector ranked 0 — rest only
+# reachable by keyword match" warning the daemon emits when the HNSW index is
+# empty/quarantined despite a populated store. If detected, fires
 # /repair {mode:"rebuild"} asynchronously so the daemon self-heals without
 # operator intervention.
 #
 # Idempotent — if HNSW is healthy, this is a no-op (one /search probe).
 # Safe to run on every restart.
 #
-# Why ExecStartPost: ExecStartPre would block daemon startup; ExecStart=
-# already the daemon itself. Post means daemon is up and responding before
-# this runs, so we can probe its own /search.
+# Wiring it in (any process supervisor works — the script is host-agnostic):
+#   systemd:  add to the palace-daemon unit's [Service] section as
+#               ExecStartPost=-/path/to/auto-repair-if-empty.sh
+#             ExecStartPre would block startup and ExecStart= is the daemon
+#             itself; Post means the daemon is up and can answer its own
+#             /search before this runs. The leading "-" keeps a probe failure
+#             from faulting the unit.
+#   manual:   run it after starting the daemon by hand.
+#
+# Configuration (env var → default):
+#   PALACE_PORT                  daemon port                 (8085)
+#   PALACE_ENV_FILE              file sourced for the API key (~/.config/palace-daemon/env)
+#   PALACE_API_KEY               x-api-key (or via env file)  (empty → no auth)
+#   PALACE_AUTO_REPAIR_WAIT_SECS seconds to wait for /health  (240)
+#       Large palaces (100K+ drawers) take 1-2 min to load HNSW segments from
+#       disk on first start; 240s gives runway. Smaller palaces can drop this
+#       to ~30. It never hangs forever — past the deadline it exits cleanly.
 
 set -uo pipefail
 
@@ -39,10 +52,6 @@ HEADERS=()
 [ -n "$KEY" ] && HEADERS=(-H "x-api-key: $KEY")
 
 # Wait up to WAIT_SECS for the daemon to start responding to /health.
-# 151K-drawer palaces take ~60-120s to load HNSW segments from disk on
-# first startup; 30s wasn't enough and the script bailed exactly when
-# auto-repair was most useful. 240s gives generous runway without making
-# the unit hang forever if the daemon is genuinely broken.
 WAIT_SECS="${PALACE_AUTO_REPAIR_WAIT_SECS:-240}"
 log "waiting up to ${WAIT_SECS}s for daemon on ${HOST}:${PORT}..."
 for i in $(seq 1 "$WAIT_SECS"); do
@@ -79,13 +88,14 @@ if echo "$WARN" | grep -qE 'vector ranked 0|vector ranked 1[^0-9]'; then
   log "DETECTED degraded HNSW recall: $(echo "$WARN" | head -1)"
   log "kicking off /repair {mode:\"rebuild\"} in background — daemon stays available"
   # Fire-and-forget; the daemon's /repair endpoint serializes on the rebuild
-  # semaphore, so familiar's silent-saves auto-queue to pending.jsonl during.
+  # semaphore, so concurrent silent-saves auto-queue to pending.jsonl during.
+  repair_log="/tmp/palace-auto-repair-$(date +%s).log"
   nohup curl -sS --max-time 7200 -X POST \
     "${HEADERS[@]}" \
     -H 'content-type: application/json' \
     "http://${HOST}:${PORT}/repair" -d '{"mode":"rebuild"}' \
-    > /tmp/palace-auto-repair-$(date +%s).log 2>&1 &
-  log "auto-rebuild PID=$! — log /tmp/palace-auto-repair-*.log"
+    > "$repair_log" 2>&1 &
+  log "auto-rebuild PID=$! — log $repair_log"
 else
   log "HNSW recall looks healthy (no 'vector ranked 0' warning)"
 fi

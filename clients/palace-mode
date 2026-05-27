@@ -9,9 +9,16 @@
 #   palace-mode verify          # check that all customizations are in place
 #
 # Scope: this tool installs customizations into the Claude Code plugin
-# cache only (~/.claude/plugins/cache/mempalace/...). It deliberately does
-# not modify any plugin source/dev clone the user might have under
-# ~/Projects/, so git status on those clones stays clean.
+# cache only (default: ~/.claude/plugins/cache/mempalace/mempalace/<ver>/).
+# It deliberately does not modify any plugin source/dev clone the user might
+# have elsewhere, so git status on those clones stays clean.
+#
+# Environment overrides:
+#   PALACE_DAEMON_URL_DEFAULT / PALACE_DAEMON_URL  default daemon URL for `remote`
+#   PALACE_API_KEY                                 x-api-key written for remote mode
+#   PALACE_PLUGIN_CACHE_ROOT                       base of the mempalace plugin cache
+#                                                  (auto-discovers latest version under it)
+#   PALACE_PLUGIN_CACHE_DIR                        pin an exact versioned cache dir
 
 set -euo pipefail
 
@@ -30,8 +37,16 @@ CLIENTS_DIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" &> 
 DISPATCH="$CLIENTS_DIR/palace-mcp-dispatch.sh"
 FAST="$CLIENTS_DIR/mempal-fast.py"
 
-# Auto-discover the latest installed mempalace plugin in the cache.
-PLUGIN_CACHE_DIR="$(ls -1d "$HOME"/.claude/plugins/cache/mempalace/mempalace/*/ 2>/dev/null | sort -V | tail -1 | sed 's:/$::')"
+# Locate the installed mempalace plugin cache. Override the base with
+# PALACE_PLUGIN_CACHE_ROOT (defaults to the standard Claude Code layout) or
+# pin the exact versioned dir with PALACE_PLUGIN_CACHE_DIR. Otherwise we
+# auto-discover the latest version under the base.
+PLUGIN_CACHE_ROOT="${PALACE_PLUGIN_CACHE_ROOT:-$HOME/.claude/plugins/cache/mempalace/mempalace}"
+if [ -n "${PALACE_PLUGIN_CACHE_DIR:-}" ]; then
+    PLUGIN_CACHE_DIR="${PALACE_PLUGIN_CACHE_DIR%/}"
+else
+    PLUGIN_CACHE_DIR="$(find "$PLUGIN_CACHE_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -1)"
+fi
 
 # ------------------------------------------------------------------ helpers
 
@@ -148,7 +163,12 @@ verify() {
     check_grep "$PLUGIN_CACHE_DIR/hooks/mempal-stop-hook.sh" "mempal-fast.py"
     check_grep "$PLUGIN_CACHE_DIR/hooks/mempal-precompact-hook.sh" "mempal-fast.py"
 
-    [ $fail -eq 0 ] && echo "ALL OK" || { echo "FAILED — run: palace-mode install" >&2; exit 1; }
+    if [ $fail -eq 0 ]; then
+        echo "ALL OK"
+    else
+        echo "FAILED — run: palace-mode install" >&2
+        exit 1
+    fi
 }
 
 # ------------------------------------------------------------------ dispatch
