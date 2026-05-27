@@ -54,46 +54,50 @@ def _run(handle, request):
 
 
 class TestResolveMcpMode(unittest.TestCase):
+    def setUp(self):
+        # Isolate os.environ per test: patch.dict restores the original
+        # environment (including any pre-existing PALACE_MCP_MODE) on cleanup,
+        # so popping it below can't leak into other tests.
+        patcher = patch.dict(os.environ, {}, clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("PALACE_MCP_MODE", None)
+
     def test_env_override_beats_config(self):
-        with patch.dict(os.environ, {"PALACE_MCP_MODE": "cli-only"}), \
-             patch.object(proxy, "CONFIG_PATH", "/nonexistent"):
+        os.environ["PALACE_MCP_MODE"] = "cli-only"
+        with patch.object(proxy, "CONFIG_PATH", "/nonexistent"):
             self.assertEqual(proxy.resolve_mcp_mode(), "cli-only")
 
     def test_env_unknown_value_falls_back_to_all(self):
-        with patch.dict(os.environ, {"PALACE_MCP_MODE": "bogus"}):
-            self.assertEqual(proxy.resolve_mcp_mode(), "all")
+        os.environ["PALACE_MCP_MODE"] = "bogus"
+        self.assertEqual(proxy.resolve_mcp_mode(), "all")
 
     def test_config_cli_only_is_honored(self):
         m = unittest.mock.mock_open(read_data=json.dumps({"mcp_mode": "cli-only"}))
         with patch.object(proxy, "CONFIG_PATH", "/cfg.json"), \
              patch("builtins.open", m):
-            os.environ.pop("PALACE_MCP_MODE", None)
             self.assertEqual(proxy.resolve_mcp_mode(), "cli-only")
 
     def test_config_unknown_value_falls_back_to_all(self):
         m = unittest.mock.mock_open(read_data=json.dumps({"mcp_mode": "typo"}))
         with patch.object(proxy, "CONFIG_PATH", "/cfg.json"), \
              patch("builtins.open", m):
-            os.environ.pop("PALACE_MCP_MODE", None)
             self.assertEqual(proxy.resolve_mcp_mode(), "all")
 
     def test_missing_config_falls_back_to_all(self):
         with patch.object(proxy, "CONFIG_PATH", "/definitely/not/here.json"):
-            os.environ.pop("PALACE_MCP_MODE", None)
             self.assertEqual(proxy.resolve_mcp_mode(), "all")
 
     def test_garbled_config_falls_back_to_all(self):
         m = unittest.mock.mock_open(read_data="{not valid json")
         with patch.object(proxy, "CONFIG_PATH", "/cfg.json"), \
              patch("builtins.open", m):
-            os.environ.pop("PALACE_MCP_MODE", None)
             self.assertEqual(proxy.resolve_mcp_mode(), "all")
 
     def test_missing_key_falls_back_to_all(self):
         m = unittest.mock.mock_open(read_data=json.dumps({"collection_name": "x"}))
         with patch.object(proxy, "CONFIG_PATH", "/cfg.json"), \
              patch("builtins.open", m):
-            os.environ.pop("PALACE_MCP_MODE", None)
             self.assertEqual(proxy.resolve_mcp_mode(), "all")
 
 
@@ -140,6 +144,39 @@ class TestAllModePassthrough(unittest.TestCase):
                                        "params": {"name": "mempalace_search", "arguments": {}}})
         self.assertEqual(resp["result"], {"forwarded": True})
         self.assertEqual(len(captured), 1)
+
+
+class TestNonDictRequestGuard(unittest.TestCase):
+    """A non-dict JSON-RPC line (batch list, scalar, null) must not crash —
+    request.get(...) would raise AttributeError. Addresses Gemini review on #59."""
+
+    def test_handle_returns_none_for_non_dict(self):
+        for mode in ("all", "cli-only"):
+            handle = _build_handle(mode)
+            for bad in ([{"jsonrpc": "2.0", "id": 1, "method": "ping"}], "scalar", None, 42):
+                resp, captured = _run(handle, bad)
+                self.assertIsNone(resp, f"mode={mode} input={bad!r}")
+                self.assertEqual(captured, [], f"non-dict must not forward (mode={mode})")
+
+    def test_stdio_loop_skips_non_dict_lines(self):
+        import io
+
+        # A batch list and a bare null on their own lines, then one valid
+        # request. The loop must skip the first two without raising and
+        # still dispatch the third.
+        lines = "[{\"id\": 1}]\nnull\n{\"jsonrpc\": \"2.0\", \"id\": 7, \"method\": \"ping\"}\n"
+        seen = []
+
+        def _handle(req):
+            seen.append(req)
+            return {"jsonrpc": "2.0", "id": req["id"], "result": {}}
+
+        with patch.object(proxy.sys, "stdin", io.StringIO(lines)), \
+             patch("builtins.print"):
+            proxy._stdio_loop(_handle)
+
+        # Only the valid dict request reached the handler.
+        self.assertEqual(seen, [{"jsonrpc": "2.0", "id": 7, "method": "ping"}])
 
 
 if __name__ == "__main__":
