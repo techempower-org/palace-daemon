@@ -238,6 +238,30 @@ class TestComputeNoveltyForWrite(unittest.TestCase):
         # Content matches a window entry, so it must score as low-novelty.
         self.assertLess(info["novelty_score"], 0.5)
 
+    def test_malformed_drawer_entry_is_skipped_not_swallowed(self):
+        """Regression: a non-dict drawer item must not raise inside the loop.
+        If it did, the outer ``except Exception`` would silently fall back to
+        novelty_score=1.0 — re-creating the no-op #63 fixed. The bad entry is
+        skipped; the well-formed sibling still populates the window."""
+        mock_call = AsyncMock(return_value={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [{"type": "text", "text": '{"drawers": ["i am a string not a dict", null, {"content_preview": "real neighbour drawer about gzip ncd scoring"}]}'}]
+            },
+        })
+        with patch.dict(os.environ, {"PALACE_NOVELTY_ENABLED": "true"}):
+            info = self._run(
+                novelty.compute_novelty_for_write(
+                    "real neighbour drawer about gzip ncd scoring",
+                    "wing_test", "discoveries", mock_call,
+                )
+            )
+        # Must reach real scoring (status ok), NOT the failure fallback.
+        self.assertEqual(info["status"], "ok")
+        self.assertEqual(info["window_size"], 1)
+        self.assertLess(info["novelty_score"], 0.5)
+
     def test_call_failure_returns_default(self):
         mock_call = AsyncMock(side_effect=Exception("connection refused"))
         with patch.dict(os.environ, {"PALACE_NOVELTY_ENABLED": "true"}):

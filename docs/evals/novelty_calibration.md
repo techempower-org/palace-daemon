@@ -29,14 +29,14 @@ uses a *block* method:
    `novelty.score_novelty`.
 
 This amortizes to ~1 full-content fetch per scored sample instead of
-`window + 1`, which matters over SSH against a 375k-drawer corpus.
+`window + 1`, which matters against a 375k-drawer corpus.
 
 ### Reproduce — live (against `familiar:8085`)
 
 ```bash
-# On a host where the daemon is reachable (familiar: localhost):
+# PALACE_DAEMON_URL + PALACE_API_KEY come from the env file:
 set -a; . ~/.config/palace-daemon/env; set +a
-python3 scripts/calibrate_novelty.py \
+venv/bin/python scripts/calibrate_novelty.py \
     --groups 60 --per-group 8 --window 20 \
     --out docs/evals/novelty_calibration.json
 ```
@@ -56,36 +56,20 @@ python3 scripts/calibrate_novelty.py --offline-sample \
     --out docs/evals/novelty_calibration_offline.json
 ```
 
-## CRITICAL FINDING — the live scorer is currently a no-op
+## Key finding — the live scorer was a no-op (FIXED in #63)
 
-`compute_novelty_for_write` (`novelty.py:166-172`) reads each window member's
-text from the drawer fields **`text` / `content` / `preview`**:
+`compute_novelty_for_write` originally read each window member's text from the
+drawer fields `text` / `content` / `preview`, but `mempalace_list_drawers`
+returns the body under **`content_preview`** — none of those three. The window
+`texts` list was therefore **always empty**, so every write hit the
+`not existing_texts` branch and returned `status="no_window"`,
+`novelty_score=1.0`. **No write was scored against real neighbours from #45
+until the fix.** The feature was silently dark.
 
-```python
-text = d.get("text") or d.get("content") or d.get("preview") or ""
-```
-
-But `mempalace_list_drawers` (the tool it calls to build the window) returns the
-field **`content_preview`** — not any of those three. Verified against the live
-daemon:
-
-```json
-{"drawers":[{"drawer_id":"...","wing":"storyvox","room":"sessions",
-             "tags":[],"content_preview":"AUTO-SAVE:..."}], "total":375302}
-```
-
-Consequence: the window `texts` list is **always empty**, so every live write
-hits the `not existing_texts` branch in `score_novelty` and returns
-`status="no_window"`, `novelty_score=1.0`. **No write has ever been scored
-against real neighbours since #45 landed.** The feature is dark.
-
-**Fix (one line, the #1 follow-up):** add `content_preview` to the fallback
-chain in `compute_novelty_for_write`:
-
-```python
-text = d.get("text") or d.get("content") or d.get("preview") \
-    or d.get("content_preview") or ""
-```
+**Fixed in #63** by adding `content_preview` to the fallback chain (and, in this
+PR, guarding against malformed non-dict drawer entries so a bad row can't throw
+the loop into the outer `except` and silently re-create the no-op). The live
+distribution above was produced *after* that fix, so it reflects real scoring.
 
 ### Secondary fidelity issue — previews are truncated
 
@@ -102,102 +86,139 @@ The calibration script computes the **full-content** distribution by default
 (what a corrected scorer *should* see). `--use-preview` reproduces the
 truncated distribution for comparison.
 
-## Empirical distribution
+## Empirical distribution (LIVE — `familiar:8085`, full-content, window=20)
 
-> **The numbers below are from the OFFLINE SYNTHETIC corpus** (seed 47,
-> window 20, per_group 12, 588 scored samples) — they validate the harness and
-> the *shape* of the analysis, not the production magnitudes. The live run
-> against `familiar:8085` is the remaining checkbox (see "Status"). Synthetic
-> NCD values are compressed relative to real prose because gzip behaves
-> differently on short, vocabulary-limited strings; the **bimodality and the
-> methodology** are what's demonstrated, not the absolute cutoffs.
+Live run: 35 `(wing, room)` groups, 280 scored drawers, 980 full-content
+fetches, seed 47. Raw: `docs/evals/novelty_calibration.json`.
 
-**Overall (offline-synthetic, `status=ok`, window=20, n=588):**
+**Overall (`status=ok`, n=280):**
 
 | stat | value |
 |------|-------|
-| min | 0.139 |
-| p05 | 0.156 |
-| p10 | 0.160 |
-| p25 | 0.169 |
-| median | 0.182 |
-| mean | 0.354 |
-| p75 | 0.548 |
-| p90 | 0.577 |
-| p95 | 0.588 |
-| max | 0.610 |
-| stdev | 0.191 |
+| min | 0.028 |
+| p05 | 0.126 |
+| p10 | 0.165 |
+| p25 | 0.402 |
+| median | 0.622 |
+| mean | 0.558 |
+| p75 | 0.725 |
+| p90 | 0.785 |
+| p95 | 0.821 |
+| max | 0.952 |
+| stdev | 0.222 |
 
 **Histogram (20 bins, 0=duplicate .. 1=novel):**
 
 ```
-[0.10-0.15)    14 |##
-[0.15-0.20)   286 |##################################################
-[0.20-0.25)     0 |
-... (empty 0.20-0.45) ...
-[0.45-0.50)    20 |###
-[0.50-0.55)   122 |#####################
-[0.55-0.60)   137 |########################
-[0.60-0.65)     9 |##
+[0.00-0.05)     6 |########
+[0.05-0.10)     4 |#####
+[0.10-0.15)    13 |##################
+[0.15-0.20)    10 |##############
+[0.20-0.25)     4 |#####
+[0.25-0.30)    13 |##################
+[0.30-0.35)    11 |###############
+[0.35-0.40)     9 |############
+[0.40-0.45)     5 |#######
+[0.45-0.50)     8 |###########
+[0.50-0.55)    10 |##############
+[0.55-0.60)    34 |##############################################
+[0.60-0.65)    29 |#######################################
+[0.65-0.70)    37 |##################################################
+[0.70-0.75)    37 |##################################################
+[0.75-0.80)    28 |######################################
+[0.80-0.85)    17 |#######################
+[0.85-0.90)     4 |#####
+[0.90-0.95)     0 |
+[0.95-1.00)     1 |#
 ```
 
-**Bimodal vs continuous: clearly BIMODAL.** A tight low cluster at ~0.14-0.20
-(the near-duplicate checkpoint + iterative-edit groups) and a higher cluster at
-~0.45-0.62 (varied prose), separated by an empty valley across 0.20-0.45. This
-is exactly the structure #47 asks about, and it confirms a percentile/valley
-threshold approach is appropriate. The real palace is *expected* to show the
-same qualitative split, given how many drawers are `AUTO-SAVE:...` checkpoints
-sharing a fixed prefix — but the valley location will differ.
+**Bimodal vs continuous: CONTINUOUS and right-skewed — NOT bimodal.** The mass
+sits in a broad "novel" hump across **0.55-0.85** (peak around 0.65-0.75), with
+a long **redundant tail below ~0.20** (p05=0.126, p10=0.165, min 0.028) and the
+0.20-0.55 band populated *throughout* — there is no empty valley separating two
+modes. (The earlier synthetic corpus looked bimodal because its archetypes were
+artificially separated; real palace content varies continuously.)
 
-## Proposed thresholds
+Practically: most drawers are genuinely novel relative to their 20 most-recent
+wing/room siblings, a minority are near-duplicates (the redundant tail), and
+there's a smooth middle. A *single* global cut would mislabel content in rooms
+whose baseline novelty differs — see below.
 
-Because the distribution is bimodal with a clear valley, thresholds are best
-pinned to the **valley** (the empty band between modes), with percentiles as a
-fallback if the live distribution turns out more continuous than the synthetic
-one. Expressed as tunable env vars so they don't require a redeploy (mirroring
-`PALACE_NOVELTY_WINDOW`):
+### Per-room — baselines differ substantially
 
-| label | rule | derivation | synthetic value |
-|-------|------|-----------|-----------------|
-| **redundant** | `score <= PALACE_NOVELTY_REDUNDANT_HI` | top of the low cluster / bottom of the valley | ~0.20 (here) |
-| **borderline** | between the two | review-on-demand band | 0.20-0.45 (here) |
-| **novel** | `score >= PALACE_NOVELTY_NOVEL_LO` | bottom of the high cluster | ~0.45 (here) |
+| room | n | p10 | p25 | median | p75 | p90 | mean |
+|------|---|-----|-----|--------|-----|-----|------|
+| references | 144 | 0.173 | 0.469 | 0.636 | 0.731 | 0.781 | 0.570 |
+| architecture | 40 | 0.363 | 0.561 | 0.649 | 0.718 | 0.776 | 0.610 |
+| discoveries | 40 | 0.126 | 0.147 | **0.304** | 0.587 | 0.705 | 0.387 |
+| planning | 32 | 0.496 | 0.589 | **0.677** | 0.755 | 0.821 | 0.663 |
+| problems | 24 | 0.215 | 0.382 | 0.637 | 0.718 | 0.791 | 0.548 |
 
-Concretely, set `REDUNDANT_HI` at the right edge of the low mode and `NOVEL_LO`
-at the left edge of the high mode (midpoint of the valley if you want a single
-cut). **Re-derive both from the live histogram** — the synthetic 0.20 / 0.45
-are placeholders proving the method, not production cutoffs.
+`discoveries` is far more redundant (median 0.30) than `planning`/`architecture`
+(median ~0.65-0.68) — a ~0.37 spread in medians across rooms. Per-wing variation
+is just as wide (e.g. `palace_daemon` / `projects` wings median ~0.30-0.37 vs
+`storyvox` median 0.73). A global threshold is the wrong tool here.
+
+## Proposed thresholds — per-room percentiles
+
+Because the distribution is continuous and per-room baselines diverge,
+thresholds should be **per-room percentiles of that room's own distribution**,
+not a single global NCD cut:
+
+- **redundant**: `score <= p15(room)` — the room's own low tail. Concretely,
+  ~0.13 for `discoveries`, ~0.40 for `architecture`/`planning`. A drawer in the
+  bottom ~15% of its room's novelty is a near-duplicate *for that room*.
+- **borderline**: `p15(room) < score < p60(room)` — review-on-demand.
+- **novel**: `score >= p60(room)` — the room's upper mass.
+
+Implementation: store per-room percentile cut-points (recomputed periodically
+from a calibration run like this one) rather than hard-coding NCD values. As a
+simpler v1, a single global pair derived from the overall distribution works as
+a coarse default — **redundant `<= ~0.20`** (overall p10-p15), **novel
+`>= ~0.55`** (where the hump begins) — but it will over-flag `planning`/
+`architecture` as redundant and under-flag `discoveries`. Expose the cut-points
+as tunable config (e.g. `PALACE_NOVELTY_REDUNDANT_PCT` / `_NOVEL_PCT`, or a
+per-room JSON map) so they don't require a redeploy, mirroring
+`PALACE_NOVELTY_WINDOW`.
+
+### Offline synthetic baseline (harness validation only)
+
+`docs/evals/novelty_calibration_offline.json` holds the original synthetic run
+(`--offline-sample`, n=588). It was used to validate the harness end-to-end
+while `familiar` was unreachable; its NCD magnitudes are compressed (gzip on
+short vocabulary-limited strings) and its archetypes are artificially separated,
+so it reads as bimodal. **The live numbers above supersede it** for any
+threshold decision — keep the offline file only as a pipeline fixture.
 
 ## Follow-ups (NOT built in this PR)
 
-1. **[bug] Field-name fix** (above) — `content_preview` in the fallback chain.
-   Highest priority: the feature does nothing until this lands. Small, belongs
-   in its own PR/commit with a regression test.
-2. **[bug] Full-content windows** — compare against full neighbour content, not
-   truncated previews.
-3. **Curation endpoint** — `GET /curation/low-novelty?wing=&room=&max_score=`
-   surfacing drawers below `REDUNDANT_HI` for review/dedup. Proposed shape:
-   paginated list of `{drawer_id, wing, room, novelty_score, most_similar_id}`.
-   Requires persisting `novelty_score` to drawer metadata at write time (it is
-   currently returned to the client but not stored).
-4. **Retrieval-time de-weighting** — expose stored `novelty_score` in
-   `/search` results so retrieval can down-weight near-duplicates (multiply
+1. **[bug] Full-content windows** — production scores against truncated
+   `content_preview` (~200 chars), not full neighbour content. NCD on short
+   prefixes is noisier and biased high. Fetch full content per window member
+   (extra `get_drawer`), or have `list_drawers` return full content for small
+   windows.
+2. **Persist `novelty_score`** — the score is returned to the client at write
+   time but not stored on the drawer. Curation and retrieval boosting both need
+   it persisted to drawer metadata first.
+3. **Curation endpoint** — `GET /curation/low-novelty?wing=&room=&max_pct=`
+   surfacing drawers in the bottom percentile band *of their room* for
+   review/dedup. Proposed shape: paginated list of
+   `{drawer_id, wing, room, novelty_score, most_similar_id}`. Needs (2).
+4. **Retrieval-time de-weighting** — expose stored `novelty_score` in `/search`
+   results so retrieval can down-weight near-duplicates (multiply
    `effective_distance` by a mild factor of `novelty_score`, or drop members of
-   a near-duplicate cluster beyond the first). Needs (3)'s persistence first.
+   a near-duplicate cluster beyond the first). Needs (2).
+5. **Per-room threshold map** — wire the per-room percentile cut-points (above)
+   into config and recompute periodically from a calibration run.
 
 ## Status
 
 - [x] Calibration harness (`scripts/calibrate_novelty.py`) — read-only live
       path + `--offline-sample` synthetic path, both through the *same*
       `novelty.score_novelty`. Unit-tested (`tests/test_calibrate_novelty.py`).
-- [x] Pipeline validated end-to-end on the synthetic corpus; distribution is
-      bimodal and the percentile/valley threshold method works.
-- [x] Latent no-op bug identified + one-line fix proposed (the highest-impact
-      outcome of this issue — the feature is currently dark).
-- [x] Methodology + threshold framework documented.
-- [ ] **Live distribution run against `familiar:8085`** — deferred: `familiar`
-      sshd was unresponsive (banner-exchange timeout) and the daemon's port
-      8085 is firewalled from other hosts, so the live corpus is unavailable.
-      Re-run the live command above once `familiar` is reachable to fill the
-      production table/histogram and pin `REDUNDANT_HI` / `NOVEL_LO` from the
-      real valley.
+- [x] No-op field-name bug fixed (#63) + hardened here against malformed rows.
+- [x] **Live distribution captured** against `familiar:8085` (n=280) — the
+      production numbers above. Distribution is **continuous/right-skewed, not
+      bimodal**; per-room baselines vary widely.
+- [x] Methodology + per-room threshold recommendation documented.
+- [x] Closes #47.

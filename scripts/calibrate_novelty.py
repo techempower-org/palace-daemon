@@ -72,7 +72,13 @@ def _mcp_call(url: str, api_key: str, name: str, arguments: dict, timeout: int =
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = resp.read().decode("utf-8")
-    outer = json.loads(raw)
+    # The daemon can return non-JSON on failure (an HTML 502/504 page from a
+    # proxy, an empty body), so parse defensively — a bad response should
+    # yield an empty result, not crash the whole calibration run.
+    try:
+        outer = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
     try:
         text = outer["result"]["content"][0]["text"]
         return json.loads(text)
@@ -172,7 +178,10 @@ def ascii_histogram(scores: list[float], bins: int = 20, width: int = 50) -> str
         return "(no scores)"
     counts = [0] * bins
     for s in scores:
-        counts[min(bins - 1, int(s * bins))] += 1
+        # Clamp on both ends: NCD can slightly exceed 1.0, and a negative
+        # score (shouldn't happen, but defensively) would otherwise wrap into
+        # a high bin via Python's negative indexing.
+        counts[max(0, min(bins - 1, int(s * bins)))] += 1
     peak = max(counts) or 1
     out = []
     for i, c in enumerate(counts):
@@ -207,7 +216,7 @@ def summarize(scores: list[float]) -> dict:
 def _hist_data(scores: list[float], bins: int) -> list[dict]:
     counts = [0] * bins
     for s in scores:
-        counts[min(bins - 1, int(s * bins))] += 1
+        counts[max(0, min(bins - 1, int(s * bins)))] += 1
     return [{"lo": round(i / bins, 3), "hi": round((i + 1) / bins, 3), "count": c}
             for i, c in enumerate(counts)]
 
