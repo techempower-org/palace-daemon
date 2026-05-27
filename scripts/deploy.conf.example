@@ -1,0 +1,36 @@
+# deploy.conf — site-local overrides for scripts/deploy.sh
+#
+# Copy to scripts/deploy.conf (gitignored) or to
+# ~/.config/palace-daemon/deploy.conf and edit. Every value is optional;
+# unset ones fall back to the documented defaults in deploy.sh. This file is
+# sourced as bash, so quote values and don't add side effects.
+
+# ssh target running the daemon (required unless PALACE_DAEMON_URL is set).
+# PALACE_HOST="familiar.jphe.in"
+
+# Base URL to poll for /health. Defaults to http://${PALACE_HOST}:8085.
+# PALACE_DAEMON_URL="http://familiar.jphe.in:8085"
+
+# x-api-key for the post-deploy route smoke test. Leave unset for an
+# auth-less daemon. Prefer sourcing from a secret store over hardcoding.
+# PALACE_API_KEY="..."
+
+# Repo path on the deploy host. Defaults to the local git toplevel, which is
+# correct for Syncthing/rsync mirrors that preserve the path.
+# PALACE_REMOTE_DIR="/home/jp/Projects/palace-daemon"
+
+# How the service is restarted on the host (run via ssh).
+# PALACE_RESTART_CMD="sudo systemctl restart palace-daemon"
+
+# For mirror-based deploys (Syncthing/rsync) where the host is NOT a git
+# remote: seconds to wait for the mirror to catch up after the push. With a
+# real git remote on the host, leave at 0 (SHAs are compared directly).
+# PALACE_SYNC_GRACE=3
+
+# Seconds to wait for /health after the restart.
+# PALACE_HEALTH_TIMEOUT=30
+
+# Optional command run on the host (login shell) before the restart. JP uses
+# this to reset an out-of-tree mempalace clone's git state, since Syncthing
+# excludes .git so the working tree is current but HEAD drifts:
+# PALACE_PRE_RESTART_HOOK="cd /home/jp/Projects/memorypalace && git fetch origin --quiet && git reset --hard origin/main --quiet"

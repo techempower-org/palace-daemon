@@ -60,13 +60,9 @@ _As of 2026-04-30, the queue is empty — every generalisable change ahead of `u
 
 ### Needs generalization before PR
 
-These have working fork-side implementations but bake in JP-specific assumptions (paths, hostnames, install layouts, fork-mempalace symbols) that would fail or surprise other operators. They're held until they can be split into a universally-applicable shape vs. a fork-private layer.
+_All three previously-listed items (deploy.sh, palace-mode install, auto-repair-if-empty.sh) were generalized in #48 — they now read every host/path/auth value from env vars or an optional sourced config file, with portable defaults. Site-local values live in a gitignored `scripts/deploy.conf` (see `scripts/deploy.conf.example`)._
 
-| Area | Change | What needs generalizing | Files |
-|---|---|---|---|
-| **Tooling** | `scripts/deploy.sh` — one-command `git push → wait for sync → systemctl restart → /health poll → verify-routes` deploy. | Defaults to `PALACE_HOST=familiar`; reads `PALACE_API_KEY` from `~/.claude/settings.local.json`; assumes a Syncthing-mirrored source tree on the deploy host; ssh user paths hardcoded; the post-restart verify hook imports fork-mempalace-only symbols (`_segment_appears_healthy`, `_quarantined_paths`, `_SESSION_RECOVERY_COLLECTION`, `migrate_checkpoints_to_recovery`) that would fail on upstream-mempalace installs. Likely splits into "universal three-step deploy" + "private verify hook." | `scripts/deploy.sh` |
-| **Clients** | `clients/palace-mode` — `install`/`verify` subcommands that re-apply plugin-cache customizations after a Claude Code plugin update. The base mode-switching part shipped via PR #12. | The `install` subcommand assumes the Claude Code plugin cache layout under `~/.claude/plugins/cache/mempalace/...`. Needs to be parameterized or removed for the upstream version. | `clients/palace-mode` |
-| **Ops** | `scripts/auto-repair-if-empty.sh` — `ExecStartPost` script that probes `/search` after the daemon binds, detects the "vector ranked 0" warning, and fires `/repair {mode:rebuild}` non-blocking in the background. **Now safety-net-only** since mempalace `645ba20` (integrity gate) shipped — a healthy 151K palace no longer triggers it. | Assumes a `systemctl --user` unit + a specific service unit shape with `ExecStartPost`. The probe-and-repair logic itself is generic; the systemd integration is what's JP-shaped. The ~4:48 HNSW-segment-load timeout (`PALACE_AUTO_REPAIR_WAIT_SECS=240`) is calibrated to the 151K canonical palace; smaller palaces can use the 30s default. | `scripts/auto-repair-if-empty.sh`, `palace-daemon.service` |
+The remaining fork-only items that are not yet PR-able are tracked as separate issues.
 
 ## What this looks like in practice
 
