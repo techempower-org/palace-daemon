@@ -124,5 +124,61 @@ class TestEvaluateCandidatesMode(unittest.TestCase):
         self.assertEqual(pq["reranked_rank"], 1)
 
 
+class TestRetryableHttp(unittest.TestCase):
+    """5xx is transient (retry); 4xx is permanent (propagate). Gemini #64."""
+
+    def _http_error(self, code: int):
+        import requests
+        resp = requests.Response()
+        resp.status_code = code
+        return requests.HTTPError(response=resp)
+
+    def test_5xx_is_retryable(self):
+        for code in (500, 502, 503, 504):
+            self.assertTrue(ev._is_retryable_http(self._http_error(code)), code)
+
+    def test_4xx_not_retryable(self):
+        for code in (400, 401, 403, 404):
+            self.assertFalse(ev._is_retryable_http(self._http_error(code)), code)
+
+    def test_missing_response_not_retryable(self):
+        import requests
+        self.assertFalse(ev._is_retryable_http(requests.HTTPError("no response")))
+
+
+class TestFetchLiveRetry(unittest.TestCase):
+    """fetch_live retries transient 5xx then succeeds; 4xx fails fast."""
+
+    def setUp(self):
+        import requests
+        self.requests = requests
+
+    def _resp(self, code: int, json_body=None):
+        r = self.requests.Response()
+        r.status_code = code
+        if json_body is not None:
+            import json as _json
+            r._content = _json.dumps(json_body).encode()
+        return r
+
+    def test_retries_on_503_then_succeeds(self):
+        from unittest.mock import patch
+        calls = [self._resp(503), self._resp(503), self._resp(200, {"results": []})]
+        with patch.object(ev.requests, "get", side_effect=calls) as mget, \
+                patch.object(ev.time, "sleep"):
+            out = ev.fetch_live("http://x", "k", "q", 5, 1.0, retries=3, backoff=0.0)
+        self.assertEqual(out, {"results": []})
+        self.assertEqual(mget.call_count, 3)
+
+    def test_4xx_propagates_without_retry(self):
+        from unittest.mock import patch
+        with patch.object(ev.requests, "get", side_effect=[self._resp(401)]) as mget, \
+                patch.object(ev.time, "sleep"):
+            with self.assertRaises(self.requests.HTTPError):
+                ev.fetch_live("http://x", "k", "q", 5, 1.0, retries=3, backoff=0.0)
+        # 4xx must not consume retries — exactly one attempt.
+        self.assertEqual(mget.call_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

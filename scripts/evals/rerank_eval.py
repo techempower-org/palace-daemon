@@ -53,6 +53,17 @@ if str(_ROOT) not in sys.path:
 DEFAULT_QUERIES = _HERE / "rerank_eval_queries.json"
 
 
+def _is_retryable_http(e: requests.HTTPError) -> bool:
+    """True for transient 5xx server errors; False for permanent 4xx.
+
+    The contended daemon can return 502/503/504 while a restart settles —
+    worth retrying. A 4xx (401 bad key, 400 bad query) won't fix itself.
+    """
+    resp = getattr(e, "response", None)
+    code = getattr(resp, "status_code", None)
+    return isinstance(code, int) and 500 <= code < 600
+
+
 def _load_env_file(path: Path) -> dict[str, str]:
     """Parse a simple KEY=VALUE env file (no shell expansion)."""
     out: dict[str, str] = {}
@@ -148,9 +159,11 @@ def fetch_live(
 ) -> dict:
     """One read-only GET /search call; returns the parsed JSON response.
 
-    Retries on timeout/connection errors — the production daemon shares a
-    single mempalace writer and gets contended under concurrent load, so a
-    transient timeout is not a verdict on the data.
+    Retries on transient failures — timeouts, connection errors, and 5xx
+    server responses. The production daemon shares a single mempalace writer
+    and gets contended under concurrent load (it OOM-restarted mid-eval on
+    2026-05-27), so a timeout or a 502/503/504 is not a verdict on the data.
+    A 4xx (bad auth, bad request) is permanent and propagates immediately.
     """
     last: Exception | None = None
     for attempt in range(retries + 1):
@@ -167,6 +180,13 @@ def fetch_live(
             last = e
             if attempt < retries:
                 time.sleep(backoff * (attempt + 1))
+        except requests.HTTPError as e:
+            # Only 5xx is transient; 4xx is a permanent client error — don't
+            # waste retries masking bad auth / a malformed request.
+            if not _is_retryable_http(e) or attempt >= retries:
+                raise
+            last = e
+            time.sleep(backoff * (attempt + 1))
     raise last  # type: ignore[misc]
 
 

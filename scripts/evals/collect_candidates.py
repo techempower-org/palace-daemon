@@ -31,6 +31,13 @@ _HERE = Path(__file__).resolve().parent
 DEFAULT_QUERIES = _HERE / "rerank_eval_queries.json"
 
 
+def _is_retryable_http(e: requests.HTTPError) -> bool:
+    """True for transient 5xx server errors; False for permanent 4xx."""
+    resp = getattr(e, "response", None)
+    code = getattr(resp, "status_code", None)
+    return isinstance(code, int) and 500 <= code < 600
+
+
 def _load_env_file(path: Path) -> dict[str, str]:
     out: dict[str, str] = {}
     if not path.exists():
@@ -92,6 +99,17 @@ def main() -> int:
                 last = e
                 if attempt < args.retries:
                     time.sleep(3.0 * (attempt + 1))
+            except requests.HTTPError as e:
+                # 5xx is transient (daemon restart settling) — retry. A 4xx
+                # (bad key/query) is permanent; record it and stop retrying
+                # this query rather than burning the remaining attempts.
+                last = e
+                if _is_retryable_http(e) and attempt < args.retries:
+                    time.sleep(3.0 * (attempt + 1))
+                else:
+                    errors[q["id"]] = f"{type(last).__name__}: {last}"
+                    print(f"FAIL {q['id']:<28} {errors[q['id']]}", file=sys.stderr)
+                    break
         else:
             errors[q["id"]] = f"{type(last).__name__}: {last}"
             print(f"FAIL {q['id']:<28} {errors[q['id']]}", file=sys.stderr)
