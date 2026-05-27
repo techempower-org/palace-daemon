@@ -1,0 +1,5035 @@
+{
+  "config": {
+    "mode": "offline-synthetic",
+    "window": 20,
+    "per_group": 12,
+    "seed": 47,
+    "use_preview": false,
+    "groups_sampled": 49,
+    "groups_empty": 0,
+    "scored": 588,
+    "full_content_fetches": 0
+  },
+  "overall": {
+    "n": 588,
+    "min": 0.139,
+    "p05": 0.156,
+    "p10": 0.1604,
+    "p25": 0.1693,
+    "median": 0.1823,
+    "mean": 0.3535,
+    "p75": 0.5478,
+    "p90": 0.5768,
+    "p95": 0.5882,
+    "max": 0.61,
+    "stdev": 0.1912
+  },
+  "per_room": {
+    "sessions": {
+      "n": 84,
+      "min": 0.139,
+      "p05": 0.1604,
+      "p10": 0.1622,
+      "p25": 0.1676,
+      "median": 0.515,
+      "mean": 0.384,
+      "p75": 0.5542,
+      "p90": 0.5755,
+      "p95": 0.5867,
+      "max": 0.5954,
+      "stdev": 0.1897
+    },
+    "decisions": {
+      "n": 84,
+      "min": 0.1559,
+      "p05": 0.1617,
+      "p10": 0.1658,
+      "p25": 0.1703,
+      "median": 0.1752,
+      "mean": 0.3346,
+      "p75": 0.5462,
+      "p90": 0.5768,
+      "p95": 0.5888,
+      "max": 0.6074,
+      "stdev": 0.1907
+    },
+    "discoveries": {
+      "n": 84,
+      "min": 0.1429,
+      "p05": 0.1539,
+      "p10": 0.1587,
+      "p25": 0.1649,
+      "median": 0.1752,
+      "mean": 0.3261,
+      "p75": 0.5297,
+      "p90": 0.5615,
+      "p95": 0.5669,
+      "max": 0.5955,
+      "stdev": 0.1867
+    },
+    "architecture": {
+      "n": 84,
+      "min": 0.1421,
+      "p05": 0.1511,
+      "p10": 0.1562,
+      "p25": 0.1604,
+      "median": 0.5078,
+      "mean": 0.3837,
+      "p75": 0.5609,
+      "p90": 0.5836,
+      "p95": 0.5906,
+      "max": 0.61,
+      "stdev": 0.1941
+    },
+    "problems": {
+      "n": 84,
+      "min": 0.1622,
+      "p05": 0.1659,
+      "p10": 0.1681,
+      "p25": 0.173,
+      "median": 0.5087,
+      "mean": 0.3857,
+      "p75": 0.5511,
+      "p90": 0.5859,
+      "p95": 0.5941,
+      "max": 0.6017,
+      "stdev": 0.1867
+    },
+    "planning": {
+      "n": 84,
+      "min": 0.1497,
+      "p05": 0.1613,
+      "p10": 0.1657,
+      "p25": 0.1711,
+      "median": 0.1808,
+      "mean": 0.3383,
+      "p75": 0.5567,
+      "p90": 0.5786,
+      "p95": 0.5879,
+      "max": 0.6074,
+      "stdev": 0.1935
+    },
+    "references": {
+      "n": 84,
+      "min": 0.1399,
+      "p05": 0.1488,
+      "p10": 0.1554,
+      "p25": 0.1658,
+      "median": 0.1749,
+      "mean": 0.3222,
+      "p75": 0.5179,
+      "p90": 0.565,
+      "p95": 0.5709,
+      "max": 0.6032,
+      "stdev": 0.1833
+    }
+  },
+  "per_wing": {
+    "storyvox": {
+      "n": 84,
+      "min": 0.139,
+      "p05": 0.1596,
+      "p10": 0.1613,
+      "p25": 0.1658,
+      "median": 0.1715,
+      "mean": 0.3243,
+      "p75": 0.5193,
+      "p90": 0.5661,
+      "p95": 0.5906,
+      "max": 0.61,
+      "stdev": 0.1842
+    },
+    "palace_daemon": {
+      "n": 84,
+      "min": 0.1444,
+      "p05": 0.1573,
+      "p10": 0.1618,
+      "p25": 0.1667,
+      "median": 0.1711,
+      "mean": 0.3326,
+      "p75": 0.5508,
+      "p90": 0.5745,
+      "p95": 0.5873,
+      "max": 0.599,
+      "stdev": 0.1928
+    },
+    "realmwatch": {
+      "n": 84,
+      "min": 0.1429,
+      "p05": 0.1519,
+      "p10": 0.1562,
+      "p25": 0.164,
+      "median": 0.5068,
+      "mean": 0.3803,
+      "p75": 0.5508,
+      "p90": 0.5812,
+      "p95": 0.5867,
+      "max": 0.6074,
+      "stdev": 0.1913
+    },
+    "familiar": {
+      "n": 84,
+      "min": 0.1596,
+      "p05": 0.1668,
+      "p10": 0.1679,
+      "p25": 0.1739,
+      "median": 0.52,
+      "mean": 0.3883,
+      "p75": 0.5584,
+      "p90": 0.5702,
+      "p95": 0.5863,
+      "max": 0.6032,
+      "stdev": 0.1881
+    },
+    "lexicon": {
+      "n": 84,
+      "min": 0.1585,
+      "p05": 0.1676,
+      "p10": 0.1676,
+      "p25": 0.173,
+      "median": 0.1793,
+      "mean": 0.3308,
+      "p75": 0.5323,
+      "p90": 0.5602,
+      "p95": 0.5756,
+      "max": 0.5859,
+      "stdev": 0.183
+    },
+    "ha": {
+      "n": 84,
+      "min": 0.1585,
+      "p05": 0.1661,
+      "p10": 0.1694,
+      "p25": 0.172,
+      "median": 0.1813,
+      "mean": 0.3387,
+      "p75": 0.5572,
+      "p90": 0.5859,
+      "p95": 0.5886,
+      "max": 0.6017,
+      "stdev": 0.1912
+    },
+    "claude_code_switcher": {
+      "n": 84,
+      "min": 0.1399,
+      "p05": 0.1444,
+      "p10": 0.1497,
+      "p25": 0.1588,
+      "median": 0.5138,
+      "mean": 0.3796,
+      "p75": 0.5507,
+      "p90": 0.5777,
+      "p95": 0.59,
+      "max": 0.6074,
+      "stdev": 0.1954
+    }
+  },
+  "histogram_bins": [
+    {
+      "lo": 0.0,
+      "hi": 0.05,
+      "count": 0
+    },
+    {
+      "lo": 0.05,
+      "hi": 0.1,
+      "count": 0
+    },
+    {
+      "lo": 0.1,
+      "hi": 0.15,
+      "count": 14
+    },
+    {
+      "lo": 0.15,
+      "hi": 0.2,
+      "count": 286
+    },
+    {
+      "lo": 0.2,
+      "hi": 0.25,
+      "count": 0
+    },
+    {
+      "lo": 0.25,
+      "hi": 0.3,
+      "count": 0
+    },
+    {
+      "lo": 0.3,
+      "hi": 0.35,
+      "count": 0
+    },
+    {
+      "lo": 0.35,
+      "hi": 0.4,
+      "count": 0
+    },
+    {
+      "lo": 0.4,
+      "hi": 0.45,
+      "count": 0
+    },
+    {
+      "lo": 0.45,
+      "hi": 0.5,
+      "count": 20
+    },
+    {
+      "lo": 0.5,
+      "hi": 0.55,
+      "count": 122
+    },
+    {
+      "lo": 0.55,
+      "hi": 0.6,
+      "count": 137
+    },
+    {
+      "lo": 0.6,
+      "hi": 0.65,
+      "count": 9
+    },
+    {
+      "lo": 0.65,
+      "hi": 0.7,
+      "count": 0
+    },
+    {
+      "lo": 0.7,
+      "hi": 0.75,
+      "count": 0
+    },
+    {
+      "lo": 0.75,
+      "hi": 0.8,
+      "count": 0
+    },
+    {
+      "lo": 0.8,
+      "hi": 0.85,
+      "count": 0
+    },
+    {
+      "lo": 0.85,
+      "hi": 0.9,
+      "count": 0
+    },
+    {
+      "lo": 0.9,
+      "hi": 0.95,
+      "count": 0
+    },
+    {
+      "lo": 0.95,
+      "hi": 1.0,
+      "count": 0
+    }
+  ],
+  "records": [
+    {
+      "drawer_id": "synthetic_storyvox_sessions_20",
+      "wing": "storyvox",
+      "room": "sessions",
+      "novelty_score": 0.1604,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_sessions_21",
+      "wing": "storyvox",
+      "room": "sessions",
+      "novelty_score": 0.1622,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_sessions_22",
+      "wing": "storyvox",
+      "room": "sessions",
+      "novelty_score": 0.1622,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_sessions_23",
+      "wing": "storyvox",
+      "room": "sessions",
+      "novelty_score": 0.1596,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_sessions_24",
+      "wing": "storyvox",
+      "room": "sessions",
+      "novelty_score": 0.1604,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_sessions_25",
+      "wing": "storyvox",
+      "room": "sessions",
+      "novelty_score": 0.1568,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_sessions_26",
+      "wing": "storyvox",
+      "room": "sessions",
+      "novelty_score": 0.139,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_sessions_27",
+      "wing": "storyvox",
+      "room": "sessions",
+      "novelty_score": 0.1551,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_sessions_28",
+      "wing": "storyvox",
+      "room": "sessions",
+      "novelty_score": 0.1676,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_sessions_29",
+      "wing": "storyvox",
+      "room": "sessions",
+      "novelty_score": 0.1622,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_sessions_30",
+      "wing": "storyvox",
+      "room": "sessions",
+      "novelty_score": 0.1658,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_sessions_31",
+      "wing": "storyvox",
+      "room": "sessions",
+      "novelty_score": 0.1667,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_decisions_20",
+      "wing": "storyvox",
+      "room": "decisions",
+      "novelty_score": 0.1711,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_decisions_21",
+      "wing": "storyvox",
+      "room": "decisions",
+      "novelty_score": 0.1693,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_decisions_22",
+      "wing": "storyvox",
+      "room": "decisions",
+      "novelty_score": 0.164,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_decisions_23",
+      "wing": "storyvox",
+      "room": "decisions",
+      "novelty_score": 0.1693,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_decisions_24",
+      "wing": "storyvox",
+      "room": "decisions",
+      "novelty_score": 0.1658,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_decisions_25",
+      "wing": "storyvox",
+      "room": "decisions",
+      "novelty_score": 0.1596,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_decisions_26",
+      "wing": "storyvox",
+      "room": "decisions",
+      "novelty_score": 0.1711,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_decisions_27",
+      "wing": "storyvox",
+      "room": "decisions",
+      "novelty_score": 0.1658,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_decisions_28",
+      "wing": "storyvox",
+      "room": "decisions",
+      "novelty_score": 0.1702,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_decisions_29",
+      "wing": "storyvox",
+      "room": "decisions",
+      "novelty_score": 0.1765,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_decisions_30",
+      "wing": "storyvox",
+      "room": "decisions",
+      "novelty_score": 0.1755,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_decisions_31",
+      "wing": "storyvox",
+      "room": "decisions",
+      "novelty_score": 0.1711,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_discoveries_20",
+      "wing": "storyvox",
+      "room": "discoveries",
+      "novelty_score": 0.5138,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_discoveries_21",
+      "wing": "storyvox",
+      "room": "discoveries",
+      "novelty_score": 0.5351,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_discoveries_22",
+      "wing": "storyvox",
+      "room": "discoveries",
+      "novelty_score": 0.5092,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_discoveries_23",
+      "wing": "storyvox",
+      "room": "discoveries",
+      "novelty_score": 0.5115,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_discoveries_24",
+      "wing": "storyvox",
+      "room": "discoveries",
+      "novelty_score": 0.5517,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_discoveries_25",
+      "wing": "storyvox",
+      "room": "discoveries",
+      "novelty_score": 0.5214,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_discoveries_26",
+      "wing": "storyvox",
+      "room": "discoveries",
+      "novelty_score": 0.4944,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_discoveries_27",
+      "wing": "storyvox",
+      "room": "discoveries",
+      "novelty_score": 0.4757,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_discoveries_28",
+      "wing": "storyvox",
+      "room": "discoveries",
+      "novelty_score": 0.5211,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_discoveries_29",
+      "wing": "storyvox",
+      "room": "discoveries",
+      "novelty_score": 0.536,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_discoveries_30",
+      "wing": "storyvox",
+      "room": "discoveries",
+      "novelty_score": 0.5123,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_discoveries_31",
+      "wing": "storyvox",
+      "room": "discoveries",
+      "novelty_score": 0.528,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_architecture_20",
+      "wing": "storyvox",
+      "room": "architecture",
+      "novelty_score": 0.598,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_architecture_21",
+      "wing": "storyvox",
+      "room": "architecture",
+      "novelty_score": 0.5429,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_architecture_22",
+      "wing": "storyvox",
+      "room": "architecture",
+      "novelty_score": 0.5823,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_architecture_23",
+      "wing": "storyvox",
+      "room": "architecture",
+      "novelty_score": 0.5671,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_architecture_24",
+      "wing": "storyvox",
+      "room": "architecture",
+      "novelty_score": 0.61,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_architecture_25",
+      "wing": "storyvox",
+      "room": "architecture",
+      "novelty_score": 0.5638,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_architecture_26",
+      "wing": "storyvox",
+      "room": "architecture",
+      "novelty_score": 0.5703,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_architecture_27",
+      "wing": "storyvox",
+      "room": "architecture",
+      "novelty_score": 0.5961,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_architecture_28",
+      "wing": "storyvox",
+      "room": "architecture",
+      "novelty_score": 0.5622,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_architecture_29",
+      "wing": "storyvox",
+      "room": "architecture",
+      "novelty_score": 0.59,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_architecture_30",
+      "wing": "storyvox",
+      "room": "architecture",
+      "novelty_score": 0.6018,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_architecture_31",
+      "wing": "storyvox",
+      "room": "architecture",
+      "novelty_score": 0.5907,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_problems_20",
+      "wing": "storyvox",
+      "room": "problems",
+      "novelty_score": 0.1649,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_problems_21",
+      "wing": "storyvox",
+      "room": "problems",
+      "novelty_score": 0.1702,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_problems_22",
+      "wing": "storyvox",
+      "room": "problems",
+      "novelty_score": 0.1711,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_problems_23",
+      "wing": "storyvox",
+      "room": "problems",
+      "novelty_score": 0.1658,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_problems_24",
+      "wing": "storyvox",
+      "room": "problems",
+      "novelty_score": 0.1649,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_problems_25",
+      "wing": "storyvox",
+      "room": "problems",
+      "novelty_score": 0.1702,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_problems_26",
+      "wing": "storyvox",
+      "room": "problems",
+      "novelty_score": 0.1667,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_problems_27",
+      "wing": "storyvox",
+      "room": "problems",
+      "novelty_score": 0.1711,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_problems_28",
+      "wing": "storyvox",
+      "room": "problems",
+      "novelty_score": 0.1649,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_problems_29",
+      "wing": "storyvox",
+      "room": "problems",
+      "novelty_score": 0.1755,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_problems_30",
+      "wing": "storyvox",
+      "room": "problems",
+      "novelty_score": 0.1693,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_problems_31",
+      "wing": "storyvox",
+      "room": "problems",
+      "novelty_score": 0.1702,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_planning_20",
+      "wing": "storyvox",
+      "room": "planning",
+      "novelty_score": 0.1658,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_planning_21",
+      "wing": "storyvox",
+      "room": "planning",
+      "novelty_score": 0.1685,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_planning_22",
+      "wing": "storyvox",
+      "room": "planning",
+      "novelty_score": 0.1613,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_planning_23",
+      "wing": "storyvox",
+      "room": "planning",
+      "novelty_score": 0.172,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_planning_24",
+      "wing": "storyvox",
+      "room": "planning",
+      "novelty_score": 0.1711,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_planning_25",
+      "wing": "storyvox",
+      "room": "planning",
+      "novelty_score": 0.1711,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_planning_26",
+      "wing": "storyvox",
+      "room": "planning",
+      "novelty_score": 0.1765,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_planning_27",
+      "wing": "storyvox",
+      "room": "planning",
+      "novelty_score": 0.1613,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_planning_28",
+      "wing": "storyvox",
+      "room": "planning",
+      "novelty_score": 0.1774,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_planning_29",
+      "wing": "storyvox",
+      "room": "planning",
+      "novelty_score": 0.1497,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_planning_30",
+      "wing": "storyvox",
+      "room": "planning",
+      "novelty_score": 0.1711,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_planning_31",
+      "wing": "storyvox",
+      "room": "planning",
+      "novelty_score": 0.1649,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_references_20",
+      "wing": "storyvox",
+      "room": "references",
+      "novelty_score": 0.5187,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_references_21",
+      "wing": "storyvox",
+      "room": "references",
+      "novelty_score": 0.5039,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_references_22",
+      "wing": "storyvox",
+      "room": "references",
+      "novelty_score": 0.529,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_references_23",
+      "wing": "storyvox",
+      "room": "references",
+      "novelty_score": 0.4942,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_references_24",
+      "wing": "storyvox",
+      "room": "references",
+      "novelty_score": 0.5216,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_references_25",
+      "wing": "storyvox",
+      "room": "references",
+      "novelty_score": 0.4863,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_references_26",
+      "wing": "storyvox",
+      "room": "references",
+      "novelty_score": 0.5159,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_references_27",
+      "wing": "storyvox",
+      "room": "references",
+      "novelty_score": 0.5,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_references_28",
+      "wing": "storyvox",
+      "room": "references",
+      "novelty_score": 0.5253,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_references_29",
+      "wing": "storyvox",
+      "room": "references",
+      "novelty_score": 0.4981,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_references_30",
+      "wing": "storyvox",
+      "room": "references",
+      "novelty_score": 0.4677,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_storyvox_references_31",
+      "wing": "storyvox",
+      "room": "references",
+      "novelty_score": 0.5095,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_sessions_20",
+      "wing": "palace_daemon",
+      "room": "sessions",
+      "novelty_score": 0.5508,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_sessions_21",
+      "wing": "palace_daemon",
+      "room": "sessions",
+      "novelty_score": 0.5529,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_sessions_22",
+      "wing": "palace_daemon",
+      "room": "sessions",
+      "novelty_score": 0.5682,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_sessions_23",
+      "wing": "palace_daemon",
+      "room": "sessions",
+      "novelty_score": 0.5929,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_sessions_24",
+      "wing": "palace_daemon",
+      "room": "sessions",
+      "novelty_score": 0.5583,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_sessions_25",
+      "wing": "palace_daemon",
+      "room": "sessions",
+      "novelty_score": 0.5411,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_sessions_26",
+      "wing": "palace_daemon",
+      "room": "sessions",
+      "novelty_score": 0.5721,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_sessions_27",
+      "wing": "palace_daemon",
+      "room": "sessions",
+      "novelty_score": 0.5954,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_sessions_28",
+      "wing": "palace_daemon",
+      "room": "sessions",
+      "novelty_score": 0.5611,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_sessions_29",
+      "wing": "palace_daemon",
+      "room": "sessions",
+      "novelty_score": 0.5505,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_sessions_30",
+      "wing": "palace_daemon",
+      "room": "sessions",
+      "novelty_score": 0.5749,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_sessions_31",
+      "wing": "palace_daemon",
+      "room": "sessions",
+      "novelty_score": 0.5887,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_decisions_20",
+      "wing": "palace_daemon",
+      "room": "decisions",
+      "novelty_score": 0.1613,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_decisions_21",
+      "wing": "palace_daemon",
+      "room": "decisions",
+      "novelty_score": 0.1676,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_decisions_22",
+      "wing": "palace_daemon",
+      "room": "decisions",
+      "novelty_score": 0.1667,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_decisions_23",
+      "wing": "palace_daemon",
+      "room": "decisions",
+      "novelty_score": 0.1711,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_decisions_24",
+      "wing": "palace_daemon",
+      "room": "decisions",
+      "novelty_score": 0.1711,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_decisions_25",
+      "wing": "palace_daemon",
+      "room": "decisions",
+      "novelty_score": 0.1711,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_decisions_26",
+      "wing": "palace_daemon",
+      "room": "decisions",
+      "novelty_score": 0.1613,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_decisions_27",
+      "wing": "palace_daemon",
+      "room": "decisions",
+      "novelty_score": 0.172,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_decisions_28",
+      "wing": "palace_daemon",
+      "room": "decisions",
+      "novelty_score": 0.1658,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_decisions_29",
+      "wing": "palace_daemon",
+      "room": "decisions",
+      "novelty_score": 0.1711,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_decisions_30",
+      "wing": "palace_daemon",
+      "room": "decisions",
+      "novelty_score": 0.1559,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_decisions_31",
+      "wing": "palace_daemon",
+      "room": "decisions",
+      "novelty_score": 0.1613,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_discoveries_20",
+      "wing": "palace_daemon",
+      "room": "discoveries",
+      "novelty_score": 0.1658,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_discoveries_21",
+      "wing": "palace_daemon",
+      "room": "discoveries",
+      "novelty_score": 0.1667,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_discoveries_22",
+      "wing": "palace_daemon",
+      "room": "discoveries",
+      "novelty_score": 0.1711,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_discoveries_23",
+      "wing": "palace_daemon",
+      "room": "discoveries",
+      "novelty_score": 0.1711,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_discoveries_24",
+      "wing": "palace_daemon",
+      "room": "discoveries",
+      "novelty_score": 0.1649,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_discoveries_25",
+      "wing": "palace_daemon",
+      "room": "discoveries",
+      "novelty_score": 0.1649,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_discoveries_26",
+      "wing": "palace_daemon",
+      "room": "discoveries",
+      "novelty_score": 0.1702,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_discoveries_27",
+      "wing": "palace_daemon",
+      "room": "discoveries",
+      "novelty_score": 0.1711,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_discoveries_28",
+      "wing": "palace_daemon",
+      "room": "discoveries",
+      "novelty_score": 0.1649,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_discoveries_29",
+      "wing": "palace_daemon",
+      "room": "discoveries",
+      "novelty_score": 0.1649,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_discoveries_30",
+      "wing": "palace_daemon",
+      "room": "discoveries",
+      "novelty_score": 0.1711,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_discoveries_31",
+      "wing": "palace_daemon",
+      "room": "discoveries",
+      "novelty_score": 0.1702,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_architecture_20",
+      "wing": "palace_daemon",
+      "room": "architecture",
+      "novelty_score": 0.5174,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_architecture_21",
+      "wing": "palace_daemon",
+      "room": "architecture",
+      "novelty_score": 0.5351,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_architecture_22",
+      "wing": "palace_daemon",
+      "room": "architecture",
+      "novelty_score": 0.5092,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_architecture_23",
+      "wing": "palace_daemon",
+      "room": "architecture",
+      "novelty_score": 0.4981,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_architecture_24",
+      "wing": "palace_daemon",
+      "room": "architecture",
+      "novelty_score": 0.5078,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_architecture_25",
+      "wing": "palace_daemon",
+      "room": "architecture",
+      "novelty_score": 0.5078,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_architecture_26",
+      "wing": "palace_daemon",
+      "room": "architecture",
+      "novelty_score": 0.5156,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_architecture_27",
+      "wing": "palace_daemon",
+      "room": "architecture",
+      "novelty_score": 0.5703,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_architecture_28",
+      "wing": "palace_daemon",
+      "room": "architecture",
+      "novelty_score": 0.5794,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_architecture_29",
+      "wing": "palace_daemon",
+      "room": "architecture",
+      "novelty_score": 0.5622,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_architecture_30",
+      "wing": "palace_daemon",
+      "room": "architecture",
+      "novelty_score": 0.5323,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_architecture_31",
+      "wing": "palace_daemon",
+      "room": "architecture",
+      "novelty_score": 0.5484,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_problems_20",
+      "wing": "palace_daemon",
+      "room": "problems",
+      "novelty_score": 0.5509,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_problems_21",
+      "wing": "palace_daemon",
+      "room": "problems",
+      "novelty_score": 0.5675,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_problems_22",
+      "wing": "palace_daemon",
+      "room": "problems",
+      "novelty_score": 0.5378,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_problems_23",
+      "wing": "palace_daemon",
+      "room": "problems",
+      "novelty_score": 0.5946,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_problems_24",
+      "wing": "palace_daemon",
+      "room": "problems",
+      "novelty_score": 0.567,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_problems_25",
+      "wing": "palace_daemon",
+      "room": "problems",
+      "novelty_score": 0.5785,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_problems_26",
+      "wing": "palace_daemon",
+      "room": "problems",
+      "novelty_score": 0.599,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_problems_27",
+      "wing": "palace_daemon",
+      "room": "problems",
+      "novelty_score": 0.5737,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_problems_28",
+      "wing": "palace_daemon",
+      "room": "problems",
+      "novelty_score": 0.5775,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_problems_29",
+      "wing": "palace_daemon",
+      "room": "problems",
+      "novelty_score": 0.5309,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_problems_30",
+      "wing": "palace_daemon",
+      "room": "problems",
+      "novelty_score": 0.5214,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_problems_31",
+      "wing": "palace_daemon",
+      "room": "problems",
+      "novelty_score": 0.5594,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_planning_20",
+      "wing": "palace_daemon",
+      "room": "planning",
+      "novelty_score": 0.163,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_planning_21",
+      "wing": "palace_daemon",
+      "room": "planning",
+      "novelty_score": 0.173,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_planning_22",
+      "wing": "palace_daemon",
+      "room": "planning",
+      "novelty_score": 0.1676,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_planning_23",
+      "wing": "palace_daemon",
+      "room": "planning",
+      "novelty_score": 0.1514,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_planning_24",
+      "wing": "palace_daemon",
+      "room": "planning",
+      "novelty_score": 0.1676,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_planning_25",
+      "wing": "palace_daemon",
+      "room": "planning",
+      "novelty_score": 0.1676,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_planning_26",
+      "wing": "palace_daemon",
+      "room": "planning",
+      "novelty_score": 0.1667,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_planning_27",
+      "wing": "palace_daemon",
+      "room": "planning",
+      "novelty_score": 0.1667,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_planning_28",
+      "wing": "palace_daemon",
+      "room": "planning",
+      "novelty_score": 0.1676,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_planning_29",
+      "wing": "palace_daemon",
+      "room": "planning",
+      "novelty_score": 0.1568,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_planning_30",
+      "wing": "palace_daemon",
+      "room": "planning",
+      "novelty_score": 0.173,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_planning_31",
+      "wing": "palace_daemon",
+      "room": "planning",
+      "novelty_score": 0.1667,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_references_20",
+      "wing": "palace_daemon",
+      "room": "references",
+      "novelty_score": 0.172,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_references_21",
+      "wing": "palace_daemon",
+      "room": "references",
+      "novelty_score": 0.1711,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_references_22",
+      "wing": "palace_daemon",
+      "room": "references",
+      "novelty_score": 0.1667,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_references_23",
+      "wing": "palace_daemon",
+      "room": "references",
+      "novelty_score": 0.1444,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_references_24",
+      "wing": "palace_daemon",
+      "room": "references",
+      "novelty_score": 0.1658,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_references_25",
+      "wing": "palace_daemon",
+      "room": "references",
+      "novelty_score": 0.1559,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_references_26",
+      "wing": "palace_daemon",
+      "room": "references",
+      "novelty_score": 0.1604,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_references_27",
+      "wing": "palace_daemon",
+      "room": "references",
+      "novelty_score": 0.1711,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_references_28",
+      "wing": "palace_daemon",
+      "room": "references",
+      "novelty_score": 0.1711,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_references_29",
+      "wing": "palace_daemon",
+      "room": "references",
+      "novelty_score": 0.1658,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_references_30",
+      "wing": "palace_daemon",
+      "room": "references",
+      "novelty_score": 0.1711,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_palace_daemon_references_31",
+      "wing": "palace_daemon",
+      "room": "references",
+      "novelty_score": 0.1711,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_sessions_20",
+      "wing": "realmwatch",
+      "room": "sessions",
+      "novelty_score": 0.524,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_sessions_21",
+      "wing": "realmwatch",
+      "room": "sessions",
+      "novelty_score": 0.5312,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_sessions_22",
+      "wing": "realmwatch",
+      "room": "sessions",
+      "novelty_score": 0.5195,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_sessions_23",
+      "wing": "realmwatch",
+      "room": "sessions",
+      "novelty_score": 0.5276,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_sessions_24",
+      "wing": "realmwatch",
+      "room": "sessions",
+      "novelty_score": 0.5182,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_sessions_25",
+      "wing": "realmwatch",
+      "room": "sessions",
+      "novelty_score": 0.5344,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_sessions_26",
+      "wing": "realmwatch",
+      "room": "sessions",
+      "novelty_score": 0.5216,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_sessions_27",
+      "wing": "realmwatch",
+      "room": "sessions",
+      "novelty_score": 0.5294,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_sessions_28",
+      "wing": "realmwatch",
+      "room": "sessions",
+      "novelty_score": 0.4868,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_sessions_29",
+      "wing": "realmwatch",
+      "room": "sessions",
+      "novelty_score": 0.4943,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_sessions_30",
+      "wing": "realmwatch",
+      "room": "sessions",
+      "novelty_score": 0.5039,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_sessions_31",
+      "wing": "realmwatch",
+      "room": "sessions",
+      "novelty_score": 0.5117,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_decisions_20",
+      "wing": "realmwatch",
+      "room": "decisions",
+      "novelty_score": 0.5697,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_decisions_21",
+      "wing": "realmwatch",
+      "room": "decisions",
+      "novelty_score": 0.5898,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_decisions_22",
+      "wing": "realmwatch",
+      "room": "decisions",
+      "novelty_score": 0.5742,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_decisions_23",
+      "wing": "realmwatch",
+      "room": "decisions",
+      "novelty_score": 0.5193,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_decisions_24",
+      "wing": "realmwatch",
+      "room": "decisions",
+      "novelty_score": 0.5657,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_decisions_25",
+      "wing": "realmwatch",
+      "room": "decisions",
+      "novelty_score": 0.5508,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_decisions_26",
+      "wing": "realmwatch",
+      "room": "decisions",
+      "novelty_score": 0.5823,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_decisions_27",
+      "wing": "realmwatch",
+      "room": "decisions",
+      "novelty_score": 0.6074,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_decisions_28",
+      "wing": "realmwatch",
+      "room": "decisions",
+      "novelty_score": 0.59,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_decisions_29",
+      "wing": "realmwatch",
+      "room": "decisions",
+      "novelty_score": 0.5506,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_decisions_30",
+      "wing": "realmwatch",
+      "room": "decisions",
+      "novelty_score": 0.5508,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_decisions_31",
+      "wing": "realmwatch",
+      "room": "decisions",
+      "novelty_score": 0.5831,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_discoveries_20",
+      "wing": "realmwatch",
+      "room": "discoveries",
+      "novelty_score": 0.1571,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_discoveries_21",
+      "wing": "realmwatch",
+      "room": "discoveries",
+      "novelty_score": 0.1604,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_discoveries_22",
+      "wing": "realmwatch",
+      "room": "discoveries",
+      "novelty_score": 0.1526,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_discoveries_23",
+      "wing": "realmwatch",
+      "room": "discoveries",
+      "novelty_score": 0.1693,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_discoveries_24",
+      "wing": "realmwatch",
+      "room": "discoveries",
+      "novelty_score": 0.1579,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_discoveries_25",
+      "wing": "realmwatch",
+      "room": "discoveries",
+      "novelty_score": 0.164,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_discoveries_26",
+      "wing": "realmwatch",
+      "room": "discoveries",
+      "novelty_score": 0.1702,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_discoveries_27",
+      "wing": "realmwatch",
+      "room": "discoveries",
+      "novelty_score": 0.164,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_discoveries_28",
+      "wing": "realmwatch",
+      "room": "discoveries",
+      "novelty_score": 0.1623,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_discoveries_29",
+      "wing": "realmwatch",
+      "room": "discoveries",
+      "novelty_score": 0.1429,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_discoveries_30",
+      "wing": "realmwatch",
+      "room": "discoveries",
+      "novelty_score": 0.1693,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_discoveries_31",
+      "wing": "realmwatch",
+      "room": "discoveries",
+      "novelty_score": 0.1755,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_architecture_20",
+      "wing": "realmwatch",
+      "room": "architecture",
+      "novelty_score": 0.1571,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_architecture_21",
+      "wing": "realmwatch",
+      "room": "architecture",
+      "novelty_score": 0.1571,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_architecture_22",
+      "wing": "realmwatch",
+      "room": "architecture",
+      "novelty_score": 0.151,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_architecture_23",
+      "wing": "realmwatch",
+      "room": "architecture",
+      "novelty_score": 0.1562,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_architecture_24",
+      "wing": "realmwatch",
+      "room": "architecture",
+      "novelty_score": 0.1562,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_architecture_25",
+      "wing": "realmwatch",
+      "room": "architecture",
+      "novelty_score": 0.1571,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_architecture_26",
+      "wing": "realmwatch",
+      "room": "architecture",
+      "novelty_score": 0.1518,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_architecture_27",
+      "wing": "realmwatch",
+      "room": "architecture",
+      "novelty_score": 0.1458,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_architecture_28",
+      "wing": "realmwatch",
+      "room": "architecture",
+      "novelty_score": 0.1562,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_architecture_29",
+      "wing": "realmwatch",
+      "room": "architecture",
+      "novelty_score": 0.1615,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_architecture_30",
+      "wing": "realmwatch",
+      "room": "architecture",
+      "novelty_score": 0.1562,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_architecture_31",
+      "wing": "realmwatch",
+      "room": "architecture",
+      "novelty_score": 0.1518,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_problems_20",
+      "wing": "realmwatch",
+      "room": "problems",
+      "novelty_score": 0.5304,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_problems_21",
+      "wing": "realmwatch",
+      "room": "problems",
+      "novelty_score": 0.5565,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_problems_22",
+      "wing": "realmwatch",
+      "room": "problems",
+      "novelty_score": 0.529,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_problems_23",
+      "wing": "realmwatch",
+      "room": "problems",
+      "novelty_score": 0.5251,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_problems_24",
+      "wing": "realmwatch",
+      "room": "problems",
+      "novelty_score": 0.5149,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_problems_25",
+      "wing": "realmwatch",
+      "room": "problems",
+      "novelty_score": 0.4963,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_problems_26",
+      "wing": "realmwatch",
+      "room": "problems",
+      "novelty_score": 0.5192,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_problems_27",
+      "wing": "realmwatch",
+      "room": "problems",
+      "novelty_score": 0.5,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_problems_28",
+      "wing": "realmwatch",
+      "room": "problems",
+      "novelty_score": 0.5373,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_problems_29",
+      "wing": "realmwatch",
+      "room": "problems",
+      "novelty_score": 0.4942,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_problems_30",
+      "wing": "realmwatch",
+      "room": "problems",
+      "novelty_score": 0.5096,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_problems_31",
+      "wing": "realmwatch",
+      "room": "problems",
+      "novelty_score": 0.5517,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_planning_20",
+      "wing": "realmwatch",
+      "room": "planning",
+      "novelty_score": 0.5425,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_planning_21",
+      "wing": "realmwatch",
+      "room": "planning",
+      "novelty_score": 0.5556,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_planning_22",
+      "wing": "realmwatch",
+      "room": "planning",
+      "novelty_score": 0.5425,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_planning_23",
+      "wing": "realmwatch",
+      "room": "planning",
+      "novelty_score": 0.5779,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_planning_24",
+      "wing": "realmwatch",
+      "room": "planning",
+      "novelty_score": 0.5881,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_planning_25",
+      "wing": "realmwatch",
+      "room": "planning",
+      "novelty_score": 0.5869,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_planning_26",
+      "wing": "realmwatch",
+      "room": "planning",
+      "novelty_score": 0.5787,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_planning_27",
+      "wing": "realmwatch",
+      "room": "planning",
+      "novelty_score": 0.5588,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_planning_28",
+      "wing": "realmwatch",
+      "room": "planning",
+      "novelty_score": 0.5691,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_planning_29",
+      "wing": "realmwatch",
+      "room": "planning",
+      "novelty_score": 0.5822,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_planning_30",
+      "wing": "realmwatch",
+      "room": "planning",
+      "novelty_score": 0.5859,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_planning_31",
+      "wing": "realmwatch",
+      "room": "planning",
+      "novelty_score": 0.5748,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_references_20",
+      "wing": "realmwatch",
+      "room": "references",
+      "novelty_score": 0.1658,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_references_21",
+      "wing": "realmwatch",
+      "room": "references",
+      "novelty_score": 0.1604,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_references_22",
+      "wing": "realmwatch",
+      "room": "references",
+      "novelty_score": 0.1604,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_references_23",
+      "wing": "realmwatch",
+      "room": "references",
+      "novelty_score": 0.1711,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_references_24",
+      "wing": "realmwatch",
+      "room": "references",
+      "novelty_score": 0.1765,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_references_25",
+      "wing": "realmwatch",
+      "room": "references",
+      "novelty_score": 0.1693,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_references_26",
+      "wing": "realmwatch",
+      "room": "references",
+      "novelty_score": 0.1658,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_references_27",
+      "wing": "realmwatch",
+      "room": "references",
+      "novelty_score": 0.1658,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_references_28",
+      "wing": "realmwatch",
+      "room": "references",
+      "novelty_score": 0.164,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_references_29",
+      "wing": "realmwatch",
+      "room": "references",
+      "novelty_score": 0.1693,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_references_30",
+      "wing": "realmwatch",
+      "room": "references",
+      "novelty_score": 0.1693,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_realmwatch_references_31",
+      "wing": "realmwatch",
+      "room": "references",
+      "novelty_score": 0.164,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_sessions_20",
+      "wing": "familiar",
+      "room": "sessions",
+      "novelty_score": 0.1622,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_sessions_21",
+      "wing": "familiar",
+      "room": "sessions",
+      "novelty_score": 0.1676,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_sessions_22",
+      "wing": "familiar",
+      "room": "sessions",
+      "novelty_score": 0.1739,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_sessions_23",
+      "wing": "familiar",
+      "room": "sessions",
+      "novelty_score": 0.1676,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_sessions_24",
+      "wing": "familiar",
+      "room": "sessions",
+      "novelty_score": 0.1676,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_sessions_25",
+      "wing": "familiar",
+      "room": "sessions",
+      "novelty_score": 0.1676,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_sessions_26",
+      "wing": "familiar",
+      "room": "sessions",
+      "novelty_score": 0.1739,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_sessions_27",
+      "wing": "familiar",
+      "room": "sessions",
+      "novelty_score": 0.1739,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_sessions_28",
+      "wing": "familiar",
+      "room": "sessions",
+      "novelty_score": 0.1739,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_sessions_29",
+      "wing": "familiar",
+      "room": "sessions",
+      "novelty_score": 0.1739,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_sessions_30",
+      "wing": "familiar",
+      "room": "sessions",
+      "novelty_score": 0.1685,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_sessions_31",
+      "wing": "familiar",
+      "room": "sessions",
+      "novelty_score": 0.1622,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_decisions_20",
+      "wing": "familiar",
+      "room": "decisions",
+      "novelty_score": 0.5363,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_decisions_21",
+      "wing": "familiar",
+      "room": "decisions",
+      "novelty_score": 0.5364,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_decisions_22",
+      "wing": "familiar",
+      "room": "decisions",
+      "novelty_score": 0.5176,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_decisions_23",
+      "wing": "familiar",
+      "room": "decisions",
+      "novelty_score": 0.5155,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_decisions_24",
+      "wing": "familiar",
+      "room": "decisions",
+      "novelty_score": 0.5356,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_decisions_25",
+      "wing": "familiar",
+      "room": "decisions",
+      "novelty_score": 0.5255,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_decisions_26",
+      "wing": "familiar",
+      "room": "decisions",
+      "novelty_score": 0.5516,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_decisions_27",
+      "wing": "familiar",
+      "room": "decisions",
+      "novelty_score": 0.5139,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_decisions_28",
+      "wing": "familiar",
+      "room": "decisions",
+      "novelty_score": 0.5261,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_decisions_29",
+      "wing": "familiar",
+      "room": "decisions",
+      "novelty_score": 0.5181,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_decisions_30",
+      "wing": "familiar",
+      "room": "decisions",
+      "novelty_score": 0.5238,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_decisions_31",
+      "wing": "familiar",
+      "room": "decisions",
+      "novelty_score": 0.5655,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_discoveries_20",
+      "wing": "familiar",
+      "room": "discoveries",
+      "novelty_score": 0.5198,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_discoveries_21",
+      "wing": "familiar",
+      "room": "discoveries",
+      "novelty_score": 0.5614,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_discoveries_22",
+      "wing": "familiar",
+      "room": "discoveries",
+      "novelty_score": 0.5797,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_discoveries_23",
+      "wing": "familiar",
+      "room": "discoveries",
+      "novelty_score": 0.5672,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_discoveries_24",
+      "wing": "familiar",
+      "room": "discoveries",
+      "novelty_score": 0.5622,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_discoveries_25",
+      "wing": "familiar",
+      "room": "discoveries",
+      "novelty_score": 0.5955,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_discoveries_26",
+      "wing": "familiar",
+      "room": "discoveries",
+      "novelty_score": 0.5617,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_discoveries_27",
+      "wing": "familiar",
+      "room": "discoveries",
+      "novelty_score": 0.553,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_discoveries_28",
+      "wing": "familiar",
+      "room": "discoveries",
+      "novelty_score": 0.5686,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_discoveries_29",
+      "wing": "familiar",
+      "room": "discoveries",
+      "novelty_score": 0.5574,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_discoveries_30",
+      "wing": "familiar",
+      "room": "discoveries",
+      "novelty_score": 0.5651,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_discoveries_31",
+      "wing": "familiar",
+      "room": "discoveries",
+      "novelty_score": 0.5911,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_architecture_20",
+      "wing": "familiar",
+      "room": "architecture",
+      "novelty_score": 0.1755,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_architecture_21",
+      "wing": "familiar",
+      "room": "architecture",
+      "novelty_score": 0.1828,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_architecture_22",
+      "wing": "familiar",
+      "room": "architecture",
+      "novelty_score": 0.1765,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_architecture_23",
+      "wing": "familiar",
+      "room": "architecture",
+      "novelty_score": 0.1765,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_architecture_24",
+      "wing": "familiar",
+      "room": "architecture",
+      "novelty_score": 0.1596,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_architecture_25",
+      "wing": "familiar",
+      "room": "architecture",
+      "novelty_score": 0.1809,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_architecture_26",
+      "wing": "familiar",
+      "room": "architecture",
+      "novelty_score": 0.1702,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_architecture_27",
+      "wing": "familiar",
+      "room": "architecture",
+      "novelty_score": 0.1702,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_architecture_28",
+      "wing": "familiar",
+      "room": "architecture",
+      "novelty_score": 0.1774,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_architecture_29",
+      "wing": "familiar",
+      "room": "architecture",
+      "novelty_score": 0.1702,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_architecture_30",
+      "wing": "familiar",
+      "room": "architecture",
+      "novelty_score": 0.1702,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_architecture_31",
+      "wing": "familiar",
+      "room": "architecture",
+      "novelty_score": 0.1755,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_problems_20",
+      "wing": "familiar",
+      "room": "problems",
+      "novelty_score": 0.1667,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_problems_21",
+      "wing": "familiar",
+      "room": "problems",
+      "novelty_score": 0.1784,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_problems_22",
+      "wing": "familiar",
+      "room": "problems",
+      "novelty_score": 0.173,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_problems_23",
+      "wing": "familiar",
+      "room": "problems",
+      "novelty_score": 0.173,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_problems_24",
+      "wing": "familiar",
+      "room": "problems",
+      "novelty_score": 0.1667,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_problems_25",
+      "wing": "familiar",
+      "room": "problems",
+      "novelty_score": 0.1765,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_problems_26",
+      "wing": "familiar",
+      "room": "problems",
+      "novelty_score": 0.1774,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_problems_27",
+      "wing": "familiar",
+      "room": "problems",
+      "novelty_score": 0.1765,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_problems_28",
+      "wing": "familiar",
+      "room": "problems",
+      "novelty_score": 0.173,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_problems_29",
+      "wing": "familiar",
+      "room": "problems",
+      "novelty_score": 0.1784,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_problems_30",
+      "wing": "familiar",
+      "room": "problems",
+      "novelty_score": 0.172,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_problems_31",
+      "wing": "familiar",
+      "room": "problems",
+      "novelty_score": 0.173,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_planning_20",
+      "wing": "familiar",
+      "room": "planning",
+      "novelty_score": 0.5202,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_planning_21",
+      "wing": "familiar",
+      "room": "planning",
+      "novelty_score": 0.5219,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_planning_22",
+      "wing": "familiar",
+      "room": "planning",
+      "novelty_score": 0.5219,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_planning_23",
+      "wing": "familiar",
+      "room": "planning",
+      "novelty_score": 0.54,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_planning_24",
+      "wing": "familiar",
+      "room": "planning",
+      "novelty_score": 0.556,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_planning_25",
+      "wing": "familiar",
+      "room": "planning",
+      "novelty_score": 0.5244,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_planning_26",
+      "wing": "familiar",
+      "room": "planning",
+      "novelty_score": 0.5339,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_planning_27",
+      "wing": "familiar",
+      "room": "planning",
+      "novelty_score": 0.552,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_planning_28",
+      "wing": "familiar",
+      "room": "planning",
+      "novelty_score": 0.5367,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_planning_29",
+      "wing": "familiar",
+      "room": "planning",
+      "novelty_score": 0.4942,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_planning_30",
+      "wing": "familiar",
+      "room": "planning",
+      "novelty_score": 0.5282,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_planning_31",
+      "wing": "familiar",
+      "room": "planning",
+      "novelty_score": 0.5469,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_references_20",
+      "wing": "familiar",
+      "room": "references",
+      "novelty_score": 0.5868,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_references_21",
+      "wing": "familiar",
+      "room": "references",
+      "novelty_score": 0.5709,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_references_22",
+      "wing": "familiar",
+      "room": "references",
+      "novelty_score": 0.5637,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_references_23",
+      "wing": "familiar",
+      "room": "references",
+      "novelty_score": 0.5567,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_references_24",
+      "wing": "familiar",
+      "room": "references",
+      "novelty_score": 0.6032,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_references_25",
+      "wing": "familiar",
+      "room": "references",
+      "novelty_score": 0.5655,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_references_26",
+      "wing": "familiar",
+      "room": "references",
+      "novelty_score": 0.5709,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_references_27",
+      "wing": "familiar",
+      "room": "references",
+      "novelty_score": 0.5685,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_references_28",
+      "wing": "familiar",
+      "room": "references",
+      "novelty_score": 0.567,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_references_29",
+      "wing": "familiar",
+      "room": "references",
+      "novelty_score": 0.5632,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_references_30",
+      "wing": "familiar",
+      "room": "references",
+      "novelty_score": 0.5914,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_familiar_references_31",
+      "wing": "familiar",
+      "room": "references",
+      "novelty_score": 0.5836,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_sessions_20",
+      "wing": "lexicon",
+      "room": "sessions",
+      "novelty_score": 0.1784,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_sessions_21",
+      "wing": "lexicon",
+      "room": "sessions",
+      "novelty_score": 0.1676,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_sessions_22",
+      "wing": "lexicon",
+      "room": "sessions",
+      "novelty_score": 0.173,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_sessions_23",
+      "wing": "lexicon",
+      "room": "sessions",
+      "novelty_score": 0.173,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_sessions_24",
+      "wing": "lexicon",
+      "room": "sessions",
+      "novelty_score": 0.173,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_sessions_25",
+      "wing": "lexicon",
+      "room": "sessions",
+      "novelty_score": 0.163,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_sessions_26",
+      "wing": "lexicon",
+      "room": "sessions",
+      "novelty_score": 0.1622,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_sessions_27",
+      "wing": "lexicon",
+      "room": "sessions",
+      "novelty_score": 0.1739,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_sessions_28",
+      "wing": "lexicon",
+      "room": "sessions",
+      "novelty_score": 0.1676,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_sessions_29",
+      "wing": "lexicon",
+      "room": "sessions",
+      "novelty_score": 0.173,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_sessions_30",
+      "wing": "lexicon",
+      "room": "sessions",
+      "novelty_score": 0.1676,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_sessions_31",
+      "wing": "lexicon",
+      "room": "sessions",
+      "novelty_score": 0.1676,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_decisions_20",
+      "wing": "lexicon",
+      "room": "decisions",
+      "novelty_score": 0.1739,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_decisions_21",
+      "wing": "lexicon",
+      "room": "decisions",
+      "novelty_score": 0.1774,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_decisions_22",
+      "wing": "lexicon",
+      "room": "decisions",
+      "novelty_score": 0.173,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_decisions_23",
+      "wing": "lexicon",
+      "room": "decisions",
+      "novelty_score": 0.172,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_decisions_24",
+      "wing": "lexicon",
+      "room": "decisions",
+      "novelty_score": 0.1676,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_decisions_25",
+      "wing": "lexicon",
+      "room": "decisions",
+      "novelty_score": 0.172,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_decisions_26",
+      "wing": "lexicon",
+      "room": "decisions",
+      "novelty_score": 0.1739,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_decisions_27",
+      "wing": "lexicon",
+      "room": "decisions",
+      "novelty_score": 0.172,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_decisions_28",
+      "wing": "lexicon",
+      "room": "decisions",
+      "novelty_score": 0.1676,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_decisions_29",
+      "wing": "lexicon",
+      "room": "decisions",
+      "novelty_score": 0.172,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_decisions_30",
+      "wing": "lexicon",
+      "room": "decisions",
+      "novelty_score": 0.172,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_decisions_31",
+      "wing": "lexicon",
+      "room": "decisions",
+      "novelty_score": 0.172,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_discoveries_20",
+      "wing": "lexicon",
+      "room": "discoveries",
+      "novelty_score": 0.556,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_discoveries_21",
+      "wing": "lexicon",
+      "room": "discoveries",
+      "novelty_score": 0.535,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_discoveries_22",
+      "wing": "lexicon",
+      "room": "discoveries",
+      "novelty_score": 0.5292,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_discoveries_23",
+      "wing": "lexicon",
+      "room": "discoveries",
+      "novelty_score": 0.5314,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_discoveries_24",
+      "wing": "lexicon",
+      "room": "discoveries",
+      "novelty_score": 0.5466,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_discoveries_25",
+      "wing": "lexicon",
+      "room": "discoveries",
+      "novelty_score": 0.5253,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_discoveries_26",
+      "wing": "lexicon",
+      "room": "discoveries",
+      "novelty_score": 0.5253,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_discoveries_27",
+      "wing": "lexicon",
+      "room": "discoveries",
+      "novelty_score": 0.5265,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_discoveries_28",
+      "wing": "lexicon",
+      "room": "discoveries",
+      "novelty_score": 0.5265,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_discoveries_29",
+      "wing": "lexicon",
+      "room": "discoveries",
+      "novelty_score": 0.5615,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_discoveries_30",
+      "wing": "lexicon",
+      "room": "discoveries",
+      "novelty_score": 0.551,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_discoveries_31",
+      "wing": "lexicon",
+      "room": "discoveries",
+      "novelty_score": 0.556,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_architecture_20",
+      "wing": "lexicon",
+      "room": "architecture",
+      "novelty_score": 0.5609,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_architecture_21",
+      "wing": "lexicon",
+      "room": "architecture",
+      "novelty_score": 0.5581,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_architecture_22",
+      "wing": "lexicon",
+      "room": "architecture",
+      "novelty_score": 0.5859,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_architecture_23",
+      "wing": "lexicon",
+      "room": "architecture",
+      "novelty_score": 0.5844,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_architecture_24",
+      "wing": "lexicon",
+      "room": "architecture",
+      "novelty_score": 0.5586,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_architecture_25",
+      "wing": "lexicon",
+      "room": "architecture",
+      "novelty_score": 0.5769,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_architecture_26",
+      "wing": "lexicon",
+      "room": "architecture",
+      "novelty_score": 0.5534,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_architecture_27",
+      "wing": "lexicon",
+      "room": "architecture",
+      "novelty_score": 0.5771,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_architecture_28",
+      "wing": "lexicon",
+      "room": "architecture",
+      "novelty_score": 0.5683,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_architecture_29",
+      "wing": "lexicon",
+      "room": "architecture",
+      "novelty_score": 0.5841,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_architecture_30",
+      "wing": "lexicon",
+      "room": "architecture",
+      "novelty_score": 0.5609,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_architecture_31",
+      "wing": "lexicon",
+      "room": "architecture",
+      "novelty_score": 0.5518,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_problems_20",
+      "wing": "lexicon",
+      "room": "problems",
+      "novelty_score": 0.173,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_problems_21",
+      "wing": "lexicon",
+      "room": "problems",
+      "novelty_score": 0.1774,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_problems_22",
+      "wing": "lexicon",
+      "room": "problems",
+      "novelty_score": 0.1774,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_problems_23",
+      "wing": "lexicon",
+      "room": "problems",
+      "novelty_score": 0.1784,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_problems_24",
+      "wing": "lexicon",
+      "room": "problems",
+      "novelty_score": 0.173,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_problems_25",
+      "wing": "lexicon",
+      "room": "problems",
+      "novelty_score": 0.1774,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_problems_26",
+      "wing": "lexicon",
+      "room": "problems",
+      "novelty_score": 0.1828,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_problems_27",
+      "wing": "lexicon",
+      "room": "problems",
+      "novelty_score": 0.173,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_problems_28",
+      "wing": "lexicon",
+      "room": "problems",
+      "novelty_score": 0.172,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_problems_29",
+      "wing": "lexicon",
+      "room": "problems",
+      "novelty_score": 0.1676,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_problems_30",
+      "wing": "lexicon",
+      "room": "problems",
+      "novelty_score": 0.1622,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_problems_31",
+      "wing": "lexicon",
+      "room": "problems",
+      "novelty_score": 0.1739,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_planning_20",
+      "wing": "lexicon",
+      "room": "planning",
+      "novelty_score": 0.1585,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_planning_21",
+      "wing": "lexicon",
+      "room": "planning",
+      "novelty_score": 0.1858,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_planning_22",
+      "wing": "lexicon",
+      "room": "planning",
+      "novelty_score": 0.1739,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_planning_23",
+      "wing": "lexicon",
+      "room": "planning",
+      "novelty_score": 0.1739,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_planning_24",
+      "wing": "lexicon",
+      "room": "planning",
+      "novelty_score": 0.1793,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_planning_25",
+      "wing": "lexicon",
+      "room": "planning",
+      "novelty_score": 0.1793,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_planning_26",
+      "wing": "lexicon",
+      "room": "planning",
+      "novelty_score": 0.1803,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_planning_27",
+      "wing": "lexicon",
+      "room": "planning",
+      "novelty_score": 0.1749,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_planning_28",
+      "wing": "lexicon",
+      "room": "planning",
+      "novelty_score": 0.1793,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_planning_29",
+      "wing": "lexicon",
+      "room": "planning",
+      "novelty_score": 0.1793,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_planning_30",
+      "wing": "lexicon",
+      "room": "planning",
+      "novelty_score": 0.1793,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_planning_31",
+      "wing": "lexicon",
+      "room": "planning",
+      "novelty_score": 0.1685,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_references_20",
+      "wing": "lexicon",
+      "room": "references",
+      "novelty_score": 0.5375,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_references_21",
+      "wing": "lexicon",
+      "room": "references",
+      "novelty_score": 0.5059,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_references_22",
+      "wing": "lexicon",
+      "room": "references",
+      "novelty_score": 0.5294,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_references_23",
+      "wing": "lexicon",
+      "room": "references",
+      "novelty_score": 0.5138,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_references_24",
+      "wing": "lexicon",
+      "room": "references",
+      "novelty_score": 0.4783,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_references_25",
+      "wing": "lexicon",
+      "room": "references",
+      "novelty_score": 0.5138,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_references_26",
+      "wing": "lexicon",
+      "room": "references",
+      "novelty_score": 0.498,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_references_27",
+      "wing": "lexicon",
+      "room": "references",
+      "novelty_score": 0.5198,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_references_28",
+      "wing": "lexicon",
+      "room": "references",
+      "novelty_score": 0.4878,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_references_29",
+      "wing": "lexicon",
+      "room": "references",
+      "novelty_score": 0.5476,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_references_30",
+      "wing": "lexicon",
+      "room": "references",
+      "novelty_score": 0.5412,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_lexicon_references_31",
+      "wing": "lexicon",
+      "room": "references",
+      "novelty_score": 0.5176,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_sessions_20",
+      "wing": "ha",
+      "room": "sessions",
+      "novelty_score": 0.5828,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_sessions_21",
+      "wing": "ha",
+      "room": "sessions",
+      "novelty_score": 0.5656,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_sessions_22",
+      "wing": "ha",
+      "room": "sessions",
+      "novelty_score": 0.5654,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_sessions_23",
+      "wing": "ha",
+      "room": "sessions",
+      "novelty_score": 0.5762,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_sessions_24",
+      "wing": "ha",
+      "room": "sessions",
+      "novelty_score": 0.5874,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_sessions_25",
+      "wing": "ha",
+      "room": "sessions",
+      "novelty_score": 0.5606,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_sessions_26",
+      "wing": "ha",
+      "room": "sessions",
+      "novelty_score": 0.5878,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_sessions_27",
+      "wing": "ha",
+      "room": "sessions",
+      "novelty_score": 0.5505,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_sessions_28",
+      "wing": "ha",
+      "room": "sessions",
+      "novelty_score": 0.5645,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_sessions_29",
+      "wing": "ha",
+      "room": "sessions",
+      "novelty_score": 0.5762,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_sessions_30",
+      "wing": "ha",
+      "room": "sessions",
+      "novelty_score": 0.5758,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_sessions_31",
+      "wing": "ha",
+      "room": "sessions",
+      "novelty_score": 0.5697,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_decisions_20",
+      "wing": "ha",
+      "room": "decisions",
+      "novelty_score": 0.1703,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_decisions_21",
+      "wing": "ha",
+      "room": "decisions",
+      "novelty_score": 0.1713,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_decisions_22",
+      "wing": "ha",
+      "room": "decisions",
+      "novelty_score": 0.1703,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_decisions_23",
+      "wing": "ha",
+      "room": "decisions",
+      "novelty_score": 0.1749,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_decisions_24",
+      "wing": "ha",
+      "room": "decisions",
+      "novelty_score": 0.1694,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_decisions_25",
+      "wing": "ha",
+      "room": "decisions",
+      "novelty_score": 0.1803,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_decisions_26",
+      "wing": "ha",
+      "room": "decisions",
+      "novelty_score": 0.1823,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_decisions_27",
+      "wing": "ha",
+      "room": "decisions",
+      "novelty_score": 0.1639,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_decisions_28",
+      "wing": "ha",
+      "room": "decisions",
+      "novelty_score": 0.1703,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_decisions_29",
+      "wing": "ha",
+      "room": "decisions",
+      "novelty_score": 0.1749,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_decisions_30",
+      "wing": "ha",
+      "room": "decisions",
+      "novelty_score": 0.1803,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_decisions_31",
+      "wing": "ha",
+      "room": "decisions",
+      "novelty_score": 0.1694,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_discoveries_20",
+      "wing": "ha",
+      "room": "discoveries",
+      "novelty_score": 0.1803,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_discoveries_21",
+      "wing": "ha",
+      "room": "discoveries",
+      "novelty_score": 0.1803,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_discoveries_22",
+      "wing": "ha",
+      "room": "discoveries",
+      "novelty_score": 0.1813,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_discoveries_23",
+      "wing": "ha",
+      "room": "discoveries",
+      "novelty_score": 0.1694,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_discoveries_24",
+      "wing": "ha",
+      "room": "discoveries",
+      "novelty_score": 0.1685,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_discoveries_25",
+      "wing": "ha",
+      "room": "discoveries",
+      "novelty_score": 0.1694,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_discoveries_26",
+      "wing": "ha",
+      "room": "discoveries",
+      "novelty_score": 0.1585,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_discoveries_27",
+      "wing": "ha",
+      "room": "discoveries",
+      "novelty_score": 0.1593,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_discoveries_28",
+      "wing": "ha",
+      "room": "discoveries",
+      "novelty_score": 0.1639,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_discoveries_29",
+      "wing": "ha",
+      "room": "discoveries",
+      "novelty_score": 0.1803,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_discoveries_30",
+      "wing": "ha",
+      "room": "discoveries",
+      "novelty_score": 0.1749,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_discoveries_31",
+      "wing": "ha",
+      "room": "discoveries",
+      "novelty_score": 0.1803,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_architecture_20",
+      "wing": "ha",
+      "room": "architecture",
+      "novelty_score": 0.5197,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_architecture_21",
+      "wing": "ha",
+      "room": "architecture",
+      "novelty_score": 0.4921,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_architecture_22",
+      "wing": "ha",
+      "room": "architecture",
+      "novelty_score": 0.5202,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_architecture_23",
+      "wing": "ha",
+      "room": "architecture",
+      "novelty_score": 0.506,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_architecture_24",
+      "wing": "ha",
+      "room": "architecture",
+      "novelty_score": 0.502,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_architecture_25",
+      "wing": "ha",
+      "room": "architecture",
+      "novelty_score": 0.4941,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_architecture_26",
+      "wing": "ha",
+      "room": "architecture",
+      "novelty_score": 0.5315,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_architecture_27",
+      "wing": "ha",
+      "room": "architecture",
+      "novelty_score": 0.5433,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_architecture_28",
+      "wing": "ha",
+      "room": "architecture",
+      "novelty_score": 0.54,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_architecture_29",
+      "wing": "ha",
+      "room": "architecture",
+      "novelty_score": 0.528,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_architecture_30",
+      "wing": "ha",
+      "room": "architecture",
+      "novelty_score": 0.5353,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_architecture_31",
+      "wing": "ha",
+      "room": "architecture",
+      "novelty_score": 0.5296,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_problems_20",
+      "wing": "ha",
+      "room": "problems",
+      "novelty_score": 0.5916,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_problems_21",
+      "wing": "ha",
+      "room": "problems",
+      "novelty_score": 0.556,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_problems_22",
+      "wing": "ha",
+      "room": "problems",
+      "novelty_score": 0.6,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_problems_23",
+      "wing": "ha",
+      "room": "problems",
+      "novelty_score": 0.5862,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_problems_24",
+      "wing": "ha",
+      "room": "problems",
+      "novelty_score": 0.5951,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_problems_25",
+      "wing": "ha",
+      "room": "problems",
+      "novelty_score": 0.5714,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_problems_26",
+      "wing": "ha",
+      "room": "problems",
+      "novelty_score": 0.6017,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_problems_27",
+      "wing": "ha",
+      "room": "problems",
+      "novelty_score": 0.5768,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_problems_28",
+      "wing": "ha",
+      "room": "problems",
+      "novelty_score": 0.5509,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_problems_29",
+      "wing": "ha",
+      "room": "problems",
+      "novelty_score": 0.5882,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_problems_30",
+      "wing": "ha",
+      "room": "problems",
+      "novelty_score": 0.5851,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_problems_31",
+      "wing": "ha",
+      "room": "problems",
+      "novelty_score": 0.5887,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_planning_20",
+      "wing": "ha",
+      "room": "planning",
+      "novelty_score": 0.1823,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_planning_21",
+      "wing": "ha",
+      "room": "planning",
+      "novelty_score": 0.1713,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_planning_22",
+      "wing": "ha",
+      "room": "planning",
+      "novelty_score": 0.1778,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_planning_23",
+      "wing": "ha",
+      "room": "planning",
+      "novelty_score": 0.1813,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_planning_24",
+      "wing": "ha",
+      "room": "planning",
+      "novelty_score": 0.1713,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_planning_25",
+      "wing": "ha",
+      "room": "planning",
+      "novelty_score": 0.1823,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_planning_26",
+      "wing": "ha",
+      "room": "planning",
+      "novelty_score": 0.1768,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_planning_27",
+      "wing": "ha",
+      "room": "planning",
+      "novelty_score": 0.1722,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_planning_28",
+      "wing": "ha",
+      "room": "planning",
+      "novelty_score": 0.1657,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_planning_29",
+      "wing": "ha",
+      "room": "planning",
+      "novelty_score": 0.1813,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_planning_30",
+      "wing": "ha",
+      "room": "planning",
+      "novelty_score": 0.1768,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_planning_31",
+      "wing": "ha",
+      "room": "planning",
+      "novelty_score": 0.1833,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_references_20",
+      "wing": "ha",
+      "room": "references",
+      "novelty_score": 0.1758,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_references_21",
+      "wing": "ha",
+      "room": "references",
+      "novelty_score": 0.1703,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_references_22",
+      "wing": "ha",
+      "room": "references",
+      "novelty_score": 0.1749,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_references_23",
+      "wing": "ha",
+      "room": "references",
+      "novelty_score": 0.1749,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_references_24",
+      "wing": "ha",
+      "room": "references",
+      "novelty_score": 0.1813,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_references_25",
+      "wing": "ha",
+      "room": "references",
+      "novelty_score": 0.1694,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_references_26",
+      "wing": "ha",
+      "room": "references",
+      "novelty_score": 0.1694,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_references_27",
+      "wing": "ha",
+      "room": "references",
+      "novelty_score": 0.1749,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_references_28",
+      "wing": "ha",
+      "room": "references",
+      "novelty_score": 0.1694,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_references_29",
+      "wing": "ha",
+      "room": "references",
+      "novelty_score": 0.1703,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_references_30",
+      "wing": "ha",
+      "room": "references",
+      "novelty_score": 0.1803,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_ha_references_31",
+      "wing": "ha",
+      "room": "references",
+      "novelty_score": 0.1803,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_sessions_20",
+      "wing": "claude_code_switcher",
+      "room": "sessions",
+      "novelty_score": 0.5195,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_sessions_21",
+      "wing": "claude_code_switcher",
+      "room": "sessions",
+      "novelty_score": 0.527,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_sessions_22",
+      "wing": "claude_code_switcher",
+      "room": "sessions",
+      "novelty_score": 0.5344,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_sessions_23",
+      "wing": "claude_code_switcher",
+      "room": "sessions",
+      "novelty_score": 0.5081,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_sessions_24",
+      "wing": "claude_code_switcher",
+      "room": "sessions",
+      "novelty_score": 0.5339,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_sessions_25",
+      "wing": "claude_code_switcher",
+      "room": "sessions",
+      "novelty_score": 0.494,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_sessions_26",
+      "wing": "claude_code_switcher",
+      "room": "sessions",
+      "novelty_score": 0.5642,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_sessions_27",
+      "wing": "claude_code_switcher",
+      "room": "sessions",
+      "novelty_score": 0.5679,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_sessions_28",
+      "wing": "claude_code_switcher",
+      "room": "sessions",
+      "novelty_score": 0.5422,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_sessions_29",
+      "wing": "claude_code_switcher",
+      "room": "sessions",
+      "novelty_score": 0.5336,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_sessions_30",
+      "wing": "claude_code_switcher",
+      "room": "sessions",
+      "novelty_score": 0.5336,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_sessions_31",
+      "wing": "claude_code_switcher",
+      "room": "sessions",
+      "novelty_score": 0.5328,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_decisions_20",
+      "wing": "claude_code_switcher",
+      "room": "decisions",
+      "novelty_score": 0.5703,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_decisions_21",
+      "wing": "claude_code_switcher",
+      "room": "decisions",
+      "novelty_score": 0.5345,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_decisions_22",
+      "wing": "claude_code_switcher",
+      "room": "decisions",
+      "novelty_score": 0.5476,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_decisions_23",
+      "wing": "claude_code_switcher",
+      "room": "decisions",
+      "novelty_score": 0.5901,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_decisions_24",
+      "wing": "claude_code_switcher",
+      "room": "decisions",
+      "novelty_score": 0.5893,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_decisions_25",
+      "wing": "claude_code_switcher",
+      "room": "decisions",
+      "novelty_score": 0.5339,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_decisions_26",
+      "wing": "claude_code_switcher",
+      "room": "decisions",
+      "novelty_score": 0.5378,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_decisions_27",
+      "wing": "claude_code_switcher",
+      "room": "decisions",
+      "novelty_score": 0.5779,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_decisions_28",
+      "wing": "claude_code_switcher",
+      "room": "decisions",
+      "novelty_score": 0.5625,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_decisions_29",
+      "wing": "claude_code_switcher",
+      "room": "decisions",
+      "novelty_score": 0.5643,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_decisions_30",
+      "wing": "claude_code_switcher",
+      "room": "decisions",
+      "novelty_score": 0.5859,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_decisions_31",
+      "wing": "claude_code_switcher",
+      "room": "decisions",
+      "novelty_score": 0.5458,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_discoveries_20",
+      "wing": "claude_code_switcher",
+      "room": "discoveries",
+      "novelty_score": 0.1598,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_discoveries_21",
+      "wing": "claude_code_switcher",
+      "room": "discoveries",
+      "novelty_score": 0.1538,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_discoveries_22",
+      "wing": "claude_code_switcher",
+      "room": "discoveries",
+      "novelty_score": 0.1538,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_discoveries_23",
+      "wing": "claude_code_switcher",
+      "room": "discoveries",
+      "novelty_score": 0.1598,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_discoveries_24",
+      "wing": "claude_code_switcher",
+      "room": "discoveries",
+      "novelty_score": 0.1546,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_discoveries_25",
+      "wing": "claude_code_switcher",
+      "room": "discoveries",
+      "novelty_score": 0.159,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_discoveries_26",
+      "wing": "claude_code_switcher",
+      "room": "discoveries",
+      "novelty_score": 0.1692,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_discoveries_27",
+      "wing": "claude_code_switcher",
+      "room": "discoveries",
+      "novelty_score": 0.1649,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_discoveries_28",
+      "wing": "claude_code_switcher",
+      "room": "discoveries",
+      "novelty_score": 0.159,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_discoveries_29",
+      "wing": "claude_code_switcher",
+      "room": "discoveries",
+      "novelty_score": 0.1436,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_discoveries_30",
+      "wing": "claude_code_switcher",
+      "room": "discoveries",
+      "novelty_score": 0.1658,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_discoveries_31",
+      "wing": "claude_code_switcher",
+      "room": "discoveries",
+      "novelty_score": 0.159,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_architecture_20",
+      "wing": "claude_code_switcher",
+      "room": "architecture",
+      "novelty_score": 0.1429,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_architecture_21",
+      "wing": "claude_code_switcher",
+      "room": "architecture",
+      "novelty_score": 0.1598,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_architecture_22",
+      "wing": "claude_code_switcher",
+      "room": "architecture",
+      "novelty_score": 0.1641,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_architecture_23",
+      "wing": "claude_code_switcher",
+      "room": "architecture",
+      "novelty_score": 0.1582,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_architecture_24",
+      "wing": "claude_code_switcher",
+      "room": "architecture",
+      "novelty_score": 0.1582,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_architecture_25",
+      "wing": "claude_code_switcher",
+      "room": "architecture",
+      "novelty_score": 0.1582,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_architecture_26",
+      "wing": "claude_code_switcher",
+      "room": "architecture",
+      "novelty_score": 0.1582,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_architecture_27",
+      "wing": "claude_code_switcher",
+      "room": "architecture",
+      "novelty_score": 0.1606,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_architecture_28",
+      "wing": "claude_code_switcher",
+      "room": "architecture",
+      "novelty_score": 0.1487,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_architecture_29",
+      "wing": "claude_code_switcher",
+      "room": "architecture",
+      "novelty_score": 0.1421,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_architecture_30",
+      "wing": "claude_code_switcher",
+      "room": "architecture",
+      "novelty_score": 0.1523,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_architecture_31",
+      "wing": "claude_code_switcher",
+      "room": "architecture",
+      "novelty_score": 0.1649,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_problems_20",
+      "wing": "claude_code_switcher",
+      "room": "problems",
+      "novelty_score": 0.5217,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_problems_21",
+      "wing": "claude_code_switcher",
+      "room": "problems",
+      "novelty_score": 0.4743,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_problems_22",
+      "wing": "claude_code_switcher",
+      "room": "problems",
+      "novelty_score": 0.5138,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_problems_23",
+      "wing": "claude_code_switcher",
+      "room": "problems",
+      "novelty_score": 0.5212,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_problems_24",
+      "wing": "claude_code_switcher",
+      "room": "problems",
+      "novelty_score": 0.4963,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_problems_25",
+      "wing": "claude_code_switcher",
+      "room": "problems",
+      "novelty_score": 0.5138,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_problems_26",
+      "wing": "claude_code_switcher",
+      "room": "problems",
+      "novelty_score": 0.5296,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_problems_27",
+      "wing": "claude_code_switcher",
+      "room": "problems",
+      "novelty_score": 0.5138,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_problems_28",
+      "wing": "claude_code_switcher",
+      "room": "problems",
+      "novelty_score": 0.5217,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_problems_29",
+      "wing": "claude_code_switcher",
+      "room": "problems",
+      "novelty_score": 0.5308,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_problems_30",
+      "wing": "claude_code_switcher",
+      "room": "problems",
+      "novelty_score": 0.5077,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_problems_31",
+      "wing": "claude_code_switcher",
+      "room": "problems",
+      "novelty_score": 0.5409,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_planning_20",
+      "wing": "claude_code_switcher",
+      "room": "planning",
+      "novelty_score": 0.572,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_planning_21",
+      "wing": "claude_code_switcher",
+      "room": "planning",
+      "novelty_score": 0.56,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_planning_22",
+      "wing": "claude_code_switcher",
+      "room": "planning",
+      "novelty_score": 0.5923,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_planning_23",
+      "wing": "claude_code_switcher",
+      "room": "planning",
+      "novelty_score": 0.6074,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_planning_24",
+      "wing": "claude_code_switcher",
+      "room": "planning",
+      "novelty_score": 0.6055,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_planning_25",
+      "wing": "claude_code_switcher",
+      "room": "planning",
+      "novelty_score": 0.562,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_planning_26",
+      "wing": "claude_code_switcher",
+      "room": "planning",
+      "novelty_score": 0.5763,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_planning_27",
+      "wing": "claude_code_switcher",
+      "room": "planning",
+      "novelty_score": 0.5699,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_planning_28",
+      "wing": "claude_code_switcher",
+      "room": "planning",
+      "novelty_score": 0.5773,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_planning_29",
+      "wing": "claude_code_switcher",
+      "room": "planning",
+      "novelty_score": 0.5783,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_planning_30",
+      "wing": "claude_code_switcher",
+      "room": "planning",
+      "novelty_score": 0.5645,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_planning_31",
+      "wing": "claude_code_switcher",
+      "room": "planning",
+      "novelty_score": 0.6006,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_references_20",
+      "wing": "claude_code_switcher",
+      "room": "references",
+      "novelty_score": 0.1598,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_references_21",
+      "wing": "claude_code_switcher",
+      "room": "references",
+      "novelty_score": 0.1546,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_references_22",
+      "wing": "claude_code_switcher",
+      "room": "references",
+      "novelty_score": 0.1503,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_references_23",
+      "wing": "claude_code_switcher",
+      "room": "references",
+      "novelty_score": 0.1436,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_references_24",
+      "wing": "claude_code_switcher",
+      "room": "references",
+      "novelty_score": 0.1487,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_references_25",
+      "wing": "claude_code_switcher",
+      "room": "references",
+      "novelty_score": 0.1615,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_references_26",
+      "wing": "claude_code_switcher",
+      "room": "references",
+      "novelty_score": 0.1554,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_references_27",
+      "wing": "claude_code_switcher",
+      "room": "references",
+      "novelty_score": 0.1487,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_references_28",
+      "wing": "claude_code_switcher",
+      "room": "references",
+      "novelty_score": 0.1399,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_references_29",
+      "wing": "claude_code_switcher",
+      "room": "references",
+      "novelty_score": 0.1495,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_references_30",
+      "wing": "claude_code_switcher",
+      "room": "references",
+      "novelty_score": 0.1554,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "synthetic_claude_code_switcher_references_31",
+      "wing": "claude_code_switcher",
+      "room": "references",
+      "novelty_score": 0.1649,
+      "window_size": 20,
+      "status": "ok"
+    }
+  ]
+}
