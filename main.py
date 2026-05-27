@@ -3107,15 +3107,27 @@ async def mine(request: Request, x_api_key: str | None = Header(default=None)):
         # The reopen lives in finally so the daemon's client is always restored
         # before another request can acquire a slot — even if the mine fails.
         async with _exclusive_palace():
-            _drop_chroma_client(close=True)
-            if PALACE_CHROMA_FLUSH_SECONDS > 0:
-                await asyncio.sleep(PALACE_CHROMA_FLUSH_SECONDS)
+            loop = asyncio.get_running_loop()
+            # Teardown lives *inside* the try so the finally always reopens,
+            # even if _drop_chroma_client raises or the flush sleep is
+            # cancelled — otherwise the client could be left closed.
             try:
+                _drop_chroma_client(close=True)
+                if PALACE_CHROMA_FLUSH_SECONDS > 0:
+                    await asyncio.sleep(PALACE_CHROMA_FLUSH_SECONDS)
                 proc, stdout, stderr = await _run_mine_subprocess()
             finally:
-                loop = asyncio.get_running_loop()
+                # Reopen before the exclusive lock releases. shield + drain
+                # so a cancellation landing on this await can't drop the lock
+                # while the reopen thread is still running and let another
+                # request race a half-initialized client (#29).
+                reopen = loop.run_in_executor(None, _mp._get_collection, True)
                 try:
-                    await loop.run_in_executor(None, _mp._get_collection, True)
+                    await asyncio.shield(reopen)
+                except asyncio.CancelledError:
+                    with contextlib.suppress(Exception):
+                        await reopen
+                    raise
                 except Exception as e:
                     # Caches stay None → next request lazily reopens (self-heal).
                     _log.critical(

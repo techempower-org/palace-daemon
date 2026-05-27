@@ -140,6 +140,45 @@ class TestMineBackendAware(unittest.IsolatedAsyncioTestCase):
         reopen.assert_called_once_with(True)
         self.assertEqual(result["returncode"], 1)
 
+    async def test_chroma_reopens_when_teardown_raises(self):
+        """Teardown lives inside the try, so a _drop_chroma_client failure
+        must still hit the finally and reopen — the error then propagates."""
+        fake_excl = _FakeExclusive()
+        fake_cfg = MagicMock(backend="chroma", palace_path="/tmp/palace")
+        with patch.object(main._mp, "_config", fake_cfg), \
+             patch.object(main, "_exclusive_palace", lambda: fake_excl), \
+             patch.object(main, "_drop_chroma_client",
+                          side_effect=RuntimeError("close boom")), \
+             patch.object(main._mp, "_get_collection") as reopen, \
+             patch("asyncio.create_subprocess_exec",
+                   side_effect=_fake_subprocess_factory()):
+            with self.assertRaises(RuntimeError):
+                await main.mine(self._request(), x_api_key=None)
+
+        reopen.assert_called_once_with(True)
+        self.assertTrue(fake_excl.exited, "exclusive lock must release after reopen")
+
+    async def test_chroma_reopens_on_cancelled_body(self):
+        """A cancellation-shaped failure in the body must still run the
+        finally reopen before the CancelledError propagates (#29 race)."""
+        fake_excl = _FakeExclusive()
+        fake_cfg = MagicMock(backend="chroma", palace_path="/tmp/palace")
+
+        async def _cancel(*_a, **_k):
+            raise asyncio.CancelledError()
+
+        with patch.object(main._mp, "_config", fake_cfg), \
+             patch.object(main, "_exclusive_palace", lambda: fake_excl), \
+             patch.object(main, "_drop_chroma_client") as drop, \
+             patch.object(main._mp, "_get_collection") as reopen, \
+             patch("asyncio.create_subprocess_exec", side_effect=_cancel):
+            with self.assertRaises(asyncio.CancelledError):
+                await main.mine(self._request(), x_api_key=None)
+
+        drop.assert_called_once_with(close=True)
+        reopen.assert_called_once_with(True)
+        self.assertTrue(fake_excl.exited)
+
     async def test_chroma_self_heals_when_reopen_throws(self):
         """If the reopen itself throws, the handler must not crash — caches
         stay None and the next request lazily reopens. The mine result is
