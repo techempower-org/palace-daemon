@@ -167,7 +167,19 @@ async def compute_novelty_for_write(
         if isinstance(unwrapped, dict):
             drawers = unwrapped.get("drawers") or unwrapped.get("results") or []
             for d in drawers:
-                text = d.get("text") or d.get("content") or d.get("preview") or ""
+                # mempalace_list_drawers emits the body as "content_preview".
+                # Without it in the fallback chain the window is always empty,
+                # so every write scored novelty_score=1.0 — the feature was a
+                # silent no-op from #45 until this fix. Previews are truncated
+                # to ~200 chars upstream; scoring against full neighbour content
+                # is a tracked follow-up.
+                text = (
+                    d.get("text")
+                    or d.get("content")
+                    or d.get("content_preview")
+                    or d.get("preview")
+                    or ""
+                )
                 if text:
                     texts.append(text)
 
