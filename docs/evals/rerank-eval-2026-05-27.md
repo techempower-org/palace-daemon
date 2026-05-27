@@ -2,17 +2,18 @@
 
 **Date:** 2026-05-27
 **Target:** `rerank.py` — FlashRank cross-encoder, model `ms-marco-TinyBERT-L-2-v2` ("nano", ~4 MB ONNX, CPU)
-**Daemon under eval:** `palace-daemon` v1.8.3 on `familiar`, `MEMPALACE_BACKEND=postgres`, ~375k drawers
+**Daemon under eval:** `palace-daemon` (v1.8.3 run #1 → v1.8.4 run #2) on `familiar`, `MEMPALACE_BACKEND=postgres`, ~375k drawers
 **Harness:** `scripts/evals/rerank_eval.py` · **Query set:** `scripts/evals/rerank_eval_queries.json`
 
 > **Recommendation: KEEP nano now; schedule a follow-up A/B against MiniLM L-12.**
-> MRR improved **+15.3%** (0.761 → 0.877) at an acceptable **47 ms** mean
-> latency, and rerank rescued one buried answer from rank 5 → 1. But it also
-> demoted one relevant doc from rank 3 → 7 (the only R@5 regression), caused by
-> cross-encoder score compression (~0.999 ties). The lift is real and worth
-> keeping; the regression + flat scores are the case for testing a larger model.
-> (Note: this FlashRank build ships `ms-marco-MiniLM-L-12-v2` but **no L-6** —
-> the issue mentioned L-6, but only L-12 is actually available here.)
+> Confirmed across **two live runs**: MRR improved **+15–23%** (best run 0.748 →
+> 0.921) at acceptable latency, and rerank rescued a buried answer from rank 7 →
+> 1. Both runs show one persistent regression (rank 3 → 8) from cross-encoder
+> score compression (~0.999 ties); R@10 is untouched and R@5 is a wash. The lift
+> is real and worth keeping; the regression + flat scores are the case for
+> testing a larger model. (Note: this FlashRank build ships
+> `ms-marco-MiniLM-L-12-v2` but **no L-6** — the issue mentioned L-6, but only
+> L-12 is actually available here.)
 
 ---
 
@@ -88,32 +89,46 @@ the honest semantics for "did the right information surface."
 ## Results
 
 <!-- METRICS_TABLE_START -->
-Live run, 2026-05-27, `pool=20`, against the deployed daemon. **11/12 queries
-usable** (1 excluded — its relevant doc was not in the retrieved pool, so rerank
-could not affect it; 0 errors). Raw output: `docs/evals/rerank-eval-2026-05-27.json`.
+Measured live against the deployed daemon, `pool=20`, **11/12 queries usable**
+(1 excluded — its relevant doc was not in the retrieved pool, so rerank could
+not affect it; 0 errors). Two independent live runs were taken — the second
+re-confirms the first after the eval URL was fixed and the harness gained
+5xx-retry hardening (PR for #64 round 2). Both tell the same story.
 
-| metric | baseline | reranked | delta |
-|---|---|---|---|
-| R@5  | 1.000 | 0.909 | **−0.091** |
-| R@10 | 1.000 | 1.000 | 0.000 |
-| MRR  | 0.761 | 0.877 | **+0.116 (+15.3%)** |
+| run | metric | baseline | reranked | delta |
+|---|---|---|---|---|
+| **#2 (confirming, 12:15)** | R@5  | 0.909 | 0.909 | 0.000 |
+| | R@10 | 1.000 | 1.000 | 0.000 |
+| | **MRR** | 0.748 | 0.921 | **+0.173 (+23.1%)** |
+| #1 (first, 11:39) | R@5  | 1.000 | 0.909 | −0.091 |
+| | R@10 | 1.000 | 1.000 | 0.000 |
+| | MRR  | 0.761 | 0.877 | +0.116 (+15.3%) |
 
-Rerank latency (per request, n=12): **mean 47.0 ms, min 19.7, max 156.5** —
-comfortably within budget; the max coincided with the host load spike noted
-below. Wall time for the whole 12-query pass: 37 s.
+Raw output: `docs/evals/rerank-eval-live-2026-05-27.json` (run #2),
+`docs/evals/rerank-eval-2026-05-27.json` (run #1).
 
-**Cross-check:** replaying the frozen candidate pools in `--mode candidates`
-(rerank done in-process via the production `rerank.py`) reproduces the metrics
-**exactly** (MRR 0.761 → 0.877, R@5 1.0 → 0.909). The two independent paths
-agreeing is strong evidence the harness is measuring what it claims.
+**MRR lift is robust across runs (+15% to +23%)** — the reranker reliably
+surfaces the best answer higher. **R@5 is a wash** (0.0 in run #2, −0.09 in run
+#1): rerank's wins and its one regression land on different queries and roughly
+cancel at the top-5 cutoff, which is exactly why MRR is the load-bearing metric
+here. R@10 is untouched in both — nothing relevant ever falls out of the top 10.
 
-### Per-query movement (1-based rank of the first relevant hit)
+Rerank latency: run #1 mean 47 ms (max 157); run #2 mean 126 ms (max 557),
+higher because `familiar` was under heavier concurrent load during run #2 (see
+note below). Even the worst single request stayed well under a 1 s budget.
+
+**Cross-check:** replaying run #1's frozen candidate pools in `--mode candidates`
+(rerank in-process via the production `rerank.py`) reproduced run #1's metrics
+**exactly**. The independent HTTP and in-process paths agreeing is strong
+evidence the harness measures what it claims.
+
+### Per-query movement (run #2, 1-based rank of the first relevant hit)
 
 | query | baseline | reranked | Δ | note |
 |---|---|---|---|---|
-| rerank-spike | 5 | **1** | **+4** | biggest win — buried answer rescued |
+| rerank-spike | 7 | **1** | **+6** | biggest win — buried answer rescued |
+| rerank-fallback-contract | 4 | **1** | **+3** | |
 | wing-room-taxonomy | 2 | 1 | +1 | |
-| rerank-fallback-contract | 3 | 2 | +1 | |
 | kill-cascade | 1 | 1 | 0 | already optimal |
 | hnsw-pin | 1 | 1 | 0 | already optimal |
 | system-service-only | 1 | 1 | 0 | already optimal |
@@ -121,13 +136,15 @@ agreeing is strong evidence the harness is measuring what it claims.
 | oom-sigkill-startup | 1 | 1 | 0 | already optimal |
 | search-args-limit-param | 1 | 1 | 0 | already optimal |
 | fuser-port-8085 | 1 | 1 | 0 | already optimal |
-| **daemon-deploy-arch** | 3 | **7** | **−4** | only regression — see analysis |
+| **daemon-deploy-arch** | 3 | **8** | **−5** | only regression — see analysis |
 | felipe-976-cherrypick | — | — | — | excluded (no relevant doc in pool) |
 
-3 improvements, 7 no-change (retrieval already nailed it), 1 regression. The
-no-change majority is itself a positive signal: where vector retrieval already
-ranked the answer first, the reranker correctly left it alone rather than
-churning a good ordering.
+3 improvements, 7 no-change (retrieval already nailed it), 1 regression — the
+same shape as run #1. The no-change majority is itself a positive signal: where
+vector retrieval already ranked the answer first, the reranker correctly left it
+alone rather than churning a good ordering. The single regression
+(`daemon-deploy-arch`) is the same near-tie score-compression case both runs;
+see Analysis.
 <!-- METRICS_TABLE_END -->
 
 ## Analysis of the one regression (`daemon-deploy-arch`)
@@ -172,15 +189,17 @@ more discriminative head scores would be far less prone to shuffling near-ties.
 
 ### Verdict: KEEP nano now, with a scheduled follow-up A/B against MiniLM L-12
 
-- **Lift is measurable.** MRR +15.3% (0.761 → 0.877) is well past noise on an
-  11-query set, driven by a clean rank-5→1 rescue plus two smaller promotions.
-  This rules out REVERT — there *is* a gain.
-- **Latency is acceptable.** 47 ms mean per request, ~50 ms cold-load. No
-  budget concern on the CPU-only production host.
-- **But there's headroom, and a regression to watch.** The lone R@5 regression
-  (3→7) and the pervasive ~0.999 score compression are exactly the "lift is real
-  but more headroom is wanted" condition the issue names for ESCALATE. nano's
-  scores are too flat to reliably break near-ties.
+- **Lift is measurable and repeatable.** MRR +15.3% (run #1) and +23.1% (run #2)
+  on an 11-query set — well past noise in both, driven by a rank-7→1 rescue plus
+  two smaller promotions. This rules out REVERT — there *is* a gain.
+- **Latency is acceptable.** 47 ms mean (run #1), 126 ms under heavier host load
+  (run #2), ~50 ms cold-load. Worst single request 557 ms. No budget concern on
+  the CPU-only production host.
+- **But there's headroom, and a regression to watch.** The persistent
+  `daemon-deploy-arch` regression (rank 3→7/8 in both runs) and the pervasive
+  ~0.999 score compression are exactly the "lift is real but more headroom is
+  wanted" condition the issue names for ESCALATE. nano's scores are too flat to
+  reliably break near-ties.
 
 The pragmatic call: **keep nano live** (it's a net win today, costs little, and
 the fallback contract is sound) and **open a follow-up to A/B `ms-marco-MiniLM-L-12-v2`
@@ -188,7 +207,7 @@ against nano on this same harness** — flip `PALACE_RERANK_MODEL` and re-run
 `--mode candidates` against the frozen pools for a zero-retrieval-cost comparison.
 (`L-12` is the next size up that this FlashRank build actually ships; there is no
 `L-6` available.) Decide ESCALATE vs stay-on-nano from that head-to-head.
-Reverting would throw away a real +15% MRR for no benefit.
+Reverting would throw away a real, repeatable +15–23% MRR for no benefit.
 
 ### Suggested next step (cheap, no palace load)
 
