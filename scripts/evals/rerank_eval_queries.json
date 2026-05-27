@@ -1,0 +1,145 @@
+{
+  "_about": "Labeled eval set for the FlashRank rerank quality-lift probe (issue #46). Each query has a hand-verified relevance predicate that identifies the genuinely-relevant drawer(s) in a candidate pool pulled from the live palace. Relevance is matched structurally (source_file glob + a content substring that was read and confirmed against the live drawer) rather than by frozen drawer_id, so the set survives drawer-id churn and re-mining. See docs/evals/rerank-eval-2026-05-27.md for how this set was built and its limitations.",
+  "_label_method": "A candidate is 'relevant' iff (source_file matches source_glob if given) AND (any substring in content_any appears in its text). All predicates were verified by reading the matched drawers via mempalace_search on 2026-05-27 against the production palace (familiar:8085, postgres backend, ~375k drawers).",
+  "queries": [
+    {
+      "id": "kill-cascade",
+      "query": "kill-cascade incident user systemd units palace daemon",
+      "intent": "Find the explanation of why duplicate user+system systemd units caused an infinite restart kill-cascade for palace-daemon.",
+      "relevant": {
+        "content_any": [
+          "triggered an infinite kill cascade",
+          "kill-cascade incident 2026-05-16",
+          "kill each other in a kill cascade"
+        ]
+      }
+    },
+    {
+      "id": "rerank-spike",
+      "query": "FlashRank rerank gated env var default true model TinyBERT",
+      "intent": "Find the record describing the FlashRank rerank spike: ms-marco-TinyBERT model, PALACE_RERANK_ENABLED gate, four /search endpoints.",
+      "relevant": {
+        "content_any": [
+          "FlashRank cross-encoder reranking spike landed",
+          "rerank.py module with lazy-loaded ms-marco-TinyBERT"
+        ]
+      }
+    },
+    {
+      "id": "hnsw-pin",
+      "query": "HNSW thread pinning chroma backend num_threads fix",
+      "intent": "Find the fix that pins hnsw:num_threads=1 on every chroma collection open to avoid the parallel-insert race.",
+      "relevant": {
+        "content_any": [
+          "_pin_hnsw_threads",
+          "hnsw:num_threads=1",
+          "num_threads=1` pin"
+        ]
+      }
+    },
+    {
+      "id": "system-service-only",
+      "query": "manage palace daemon system service sudo systemctl not user unit",
+      "intent": "Find the guidance that palace-daemon must be a system unit managed via sudo systemctl, never a user unit.",
+      "relevant": {
+        "content_any": [
+          "User-level units must NOT be created",
+          "sudo systemctl restart/stop/start/status palace-daemon",
+          "system service only"
+        ]
+      }
+    },
+    {
+      "id": "rerank-implementation-plan",
+      "query": "implement FlashRank reranking after hybrid rank reorder by score preserve fields",
+      "intent": "Find the implementation plan step for wiring FlashRank into the search response (lazy Ranker, reorder, preserve fields, PALACE_RERANK_ENABLED).",
+      "relevant": {
+        "content_any": [
+          "Instantiate `FlashRank.Ranker()` (lazy, cached)",
+          "Reorder results by FlashRank score, preserving all original fields"
+        ]
+      }
+    },
+    {
+      "id": "daemon-deploy-arch",
+      "query": "palace daemon deployment architecture system unit etc systemd",
+      "intent": "Find the deployment-architecture reference: system unit at /etc/systemd/system/palace-daemon.service.",
+      "relevant": {
+        "source_glob": "project_daemon_deploy_architecture.md",
+        "content_any": [
+          "systemd system unit",
+          "/etc/systemd/system/palace-daemon.service"
+        ]
+      }
+    },
+    {
+      "id": "felipe-976-cherrypick",
+      "query": "cherry-pick num_threads pin from upstream PR 976 felipetruman fork main",
+      "intent": "Find the record of cherry-picking @felipetruman's #976 num_threads=1 pin into the fork's main, with the patched call sites.",
+      "relevant": {
+        "content_any": [
+          "from #976 to our fork main. Three call sites patched",
+          "credits @felipetruman"
+        ]
+      }
+    },
+    {
+      "id": "oom-sigkill-startup",
+      "query": "palace daemon SIGKILL signal 9 OOM killer seconds after startup",
+      "intent": "Find the diagnosis that palace-daemon was being SIGKILLed ~4s after startup, suspected OOM killer.",
+      "relevant": {
+        "content_any": [
+          "SIGKILL (signal 9)**, not SEGV",
+          "OOM killer or systemd is killing palace-daemon"
+        ]
+      }
+    },
+    {
+      "id": "rerank-fallback-contract",
+      "query": "rerank failure mode return original ordering status failed never hard error",
+      "intent": "Find the note that rerank failures (import/download/runtime) fall back to original ordering with status=failed, preserving the endpoint contract.",
+      "relevant": {
+        "content_any": [
+          "all return original ordering with status=failed",
+          "never hard-error"
+        ]
+      }
+    },
+    {
+      "id": "search-args-limit-param",
+      "query": "mempalace_search limit param max_results silently dropped capped at 5",
+      "intent": "Find the fix/explanation that the search args must use 'limit' not 'max_results', which was silently dropped and capped responses at 5.",
+      "relevant": {
+        "content_any": [
+          "max_results",
+          "capped every /search response at the default 5",
+          "silently dropped"
+        ]
+      }
+    },
+    {
+      "id": "wing-room-taxonomy",
+      "query": "palace canonical room taxonomy architecture decisions problems planning sessions references discoveries",
+      "intent": "Find the 7-room canonical taxonomy definition (wing = project slug, room in the fixed 7-room set).",
+      "relevant": {
+        "content_any": [
+          "architecture, decisions, problems, planning, sessions, references, discoveries",
+          "7-room",
+          "room ∈"
+        ]
+      }
+    },
+    {
+      "id": "fuser-port-8085",
+      "query": "two systemd units fighting for port 8085 fuser -k ExecStartPre ping-pong",
+      "intent": "Find the diagnosis that both units' ExecStartPre fuser -k 8085/tcp killed each other on port 8085 (ping-pong).",
+      "relevant": {
+        "content_any": [
+          "fighting for port 8085",
+          "fuser -k` in each unit's ExecStartPre kills the other",
+          "Ping-pong"
+        ]
+      }
+    }
+  ]
+}
