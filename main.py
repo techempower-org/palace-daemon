@@ -52,6 +52,11 @@ API_KEY = os.getenv("PALACE_API_KEY", "")  # read at startup for argparse defaul
 PALACE_MAX_CONCURRENCY = int(os.getenv("PALACE_MAX_CONCURRENCY", "4"))
 PALACE_MAX_READ_CONCURRENCY = int(os.getenv("PALACE_MAX_READ_CONCURRENCY", str(PALACE_MAX_CONCURRENCY)))
 PALACE_MAX_WRITE_CONCURRENCY = int(os.getenv("PALACE_MAX_WRITE_CONCURRENCY", str(max(1, PALACE_MAX_CONCURRENCY // 2))))
+# Optional settle margin after the deterministic chroma client close in the
+# /mine lock-and-reopen choreography. close_palace() releases chromadb's
+# Rust-side SQLite file lock synchronously, so 0.0 is correct for normal
+# palaces; this is only a safety knob for very large palaces. (#29)
+PALACE_CHROMA_FLUSH_SECONDS = float(os.getenv("PALACE_CHROMA_FLUSH_SECONDS", "0.0"))
 
 # Canonical topic for Stop-hook auto-save checkpoint diary entries. Matches
 # the value already used in clients/hook.py and clients/mempal-fast.py, plus
@@ -227,6 +232,31 @@ def _sem_for(request_dict: dict) -> asyncio.Semaphore:
         return _read_sem
     tool_name = request_dict.get("params", {}).get("name", "")
     return _read_sem if tool_name in _READ_TOOLS else _write_sem
+
+
+def _drop_chroma_client(close: bool = True) -> None:
+    """Drop the daemon's chroma client caches; optionally release the Rust lock.
+
+    Both the mcp-local caches (``_client_cache``/``_collection_cache``) and the
+    pooled ``ChromaBackend._clients`` handle reference the same PersistentClient,
+    so dropping the caches alone does not release chromadb's Rust-side SQLite
+    file lock — that lock is held until ``PersistentClient.close()`` runs.
+
+    close=True routes the release through ``close_palace()`` (→ ``_close_client()``
+    → ``client.close()``) for a *deterministic* lock release. This is required
+    before handing the palace to an external writer (the /mine subprocess): a
+    bare cache drop would leave the daemon's stale client locking the path when
+    the subprocess opens its own client, reproducing the dual-client log-store
+    corruption this guards against (#29).
+
+    close=False keeps the legacy cache-only drop for callers where the process
+    is exiting and the OS reclaims the lock regardless.
+    """
+    _mp._collection_cache = None
+    _mp._client_cache = None
+    if close:
+        from mempalace.palace import get_backend
+        get_backend("chroma").close_palace(_mp._config.palace_path)
 
 
 async def _auto_repair():
@@ -1118,13 +1148,46 @@ async def mine(request: Request, x_api_key: str | None = Header(default=None)):
     if limit:
         cmd += ["--limit", str(limit)]
 
-    async with _mine_sem:
+    async def _run_mine_subprocess():
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await proc.communicate()
+        return proc, stdout, stderr
+
+    backend = getattr(_mp._config, "backend", "chroma")
+    if backend == "chroma":
+        # Two PersistentClient instances on one chroma path corrupt the Rust
+        # log store, in- or cross-process (#29). The mine subprocess opens its
+        # own client, so we make it the *sole* client for the job's duration:
+        # hold every slot so no daemon-mediated work races the mine, then
+        # deterministically close our client to release the Rust file lock.
+        # The reopen lives in finally so the daemon's client is always restored
+        # before another request can acquire a slot — even if the mine fails.
+        async with _exclusive_palace():
+            _drop_chroma_client(close=True)
+            if PALACE_CHROMA_FLUSH_SECONDS > 0:
+                await asyncio.sleep(PALACE_CHROMA_FLUSH_SECONDS)
+            try:
+                proc, stdout, stderr = await _run_mine_subprocess()
+            finally:
+                loop = asyncio.get_running_loop()
+                try:
+                    await loop.run_in_executor(None, _mp._get_collection, True)
+                except Exception as e:
+                    # Caches stay None → next request lazily reopens (self-heal).
+                    _log.critical(
+                        "POST /mine: failed to reopen palace client after mine "
+                        "(dir=%s) — next request will lazily reopen: %s",
+                        directory, e,
+                    )
+    else:
+        # postgres handles concurrent connections natively — the dual-client
+        # corruption cannot occur, so keep the original lightweight path.
+        async with _mine_sem:
+            proc, stdout, stderr = await _run_mine_subprocess()
 
     return {
         "returncode": proc.returncode,
