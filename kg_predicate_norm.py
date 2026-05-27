@@ -295,7 +295,12 @@ def normalize_predicate(raw: str) -> Optional[str]:
 
     The negation prefix is applied *after* canonicalization so that
     ``doesn't_appear`` and ``does_not_appear`` both land on ``not_appear``,
-    and a negated synonym (``isn't_a``) collapses to ``not_is_a``.
+    and a negated synonym (``is not a part of`` → base ``a_part_of`` →
+    ``part_of``) collapses to ``not_part_of``.
+
+    Note the base is whatever remains *after* the negation prefix is peeled:
+    ``isn't_a`` strips ``isnt_`` leaving base ``a`` (not in ``SYNONYM_MAP``),
+    so it yields ``not_a``, not ``not_is_a``.
     """
     if not isinstance(raw, str):
         return None

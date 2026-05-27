@@ -23,43 +23,96 @@ enumerated in the issue — runs offline):
 venv/bin/python scripts/predicate_norm_report.py
 ```
 
-Dry-run report against the **live vocabulary** (READ-ONLY — `graph_stats` is a
-pure read; the script never writes the graph):
+Dry-run report against the **live vocabulary** (READ-ONLY — `/cypher` marks its
+transaction `READ ONLY`; the script never writes the graph):
 
 ```bash
 set -a; source ~/.config/palace-daemon/env; set +a
 venv/bin/python scripts/predicate_norm_report.py --live
 # or, decoupled from the daemon being up at report time:
 curl -sS -H "X-Api-Key: $PALACE_API_KEY" -H "Content-Type: application/json" \
-     "$PALACE_DAEMON_URL/mcp" \
-     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
-          "params":{"name":"mempalace_graph_stats","arguments":{}}}' \
-  | jq -r '.result.content[0].text' > vocab.json
+     "$PALACE_DAEMON_URL/cypher" \
+     -d '{"cypher":"MATCH ()-[r:RELATION]->() RETURN DISTINCT r.relation_type AS rt"}' \
+  | jq '[.rows[].rt | select(. != null) | tostring]' > vocab.json
 venv/bin/python scripts/predicate_norm_report.py --vocab-file vocab.json
 ```
 
-## Live cardinality — UNAVAILABLE at authoring time
+## Live production cardinality (2026-05-27)
 
-The issue's reproduction probe (`familiar.jphe.in:8085` `graph_stats`) could
-**not** be run while building this PR: the daemon's HTTP port (8085) was closed
-(connection refused; host pingable via Tailscale but no listener), and SSH to
-the host was blocked by a changed host key (strict checking refused — not
-auto-cleared, security). The before/after numbers below are therefore against
-the **bundled issue-#50 sample**, not the 274,609-entity production corpus.
+Captured against `familiar:8085` after the daemon came back up. **Note on the
+probe path:** the issue's reproduction (`graph_stats.relationship_types | length`)
+does *not* yield the predicate vocabulary on the current daemon —
+`graph_stats` returns the *palace* graph (wings/rooms/tunnels) and `kg_stats`
+returns only the two AGE edge **labels** (`["RELATION", "MENTIONS"]`), not the
+`r.relation_type` property values. The actual predicate strings live inside the
+`RELATION` edges, so the true vocabulary was enumerated with a **read-only**
+Cypher query through `POST /cypher` (transaction marked `READ ONLY` — no
+mutation):
 
-Re-run `--live` (or `--vocab-file`) once the daemon is reachable to capture the
-true production cardinality reduction.
+```bash
+set -a; source ~/.config/palace-daemon/env; set +a
+curl -sS -H "X-Api-Key: $PALACE_API_KEY" -H "Content-Type: application/json" \
+     "$PALACE_DAEMON_URL/cypher" \
+     -d '{"cypher":"MATCH ()-[r:RELATION]->() RETURN DISTINCT r.relation_type AS rt"}' \
+  | jq '[.rows[].rt | select(. != null) | tostring]' > live_vocab.json
+venv/bin/python scripts/predicate_norm_report.py --vocab-file live_vocab.json
+```
 
-## Results (bundled sample)
+Corpus at probe time: **1,060,950 entities; 1,722,353 RELATION triples.**
 
-| Metric | Value |
+`--live` runs the same `/cypher` query directly, but the `DISTINCT` walk over
+1.7M edges is heavy — on a busy daemon it can time out or return HTTP 500
+(both now exit cleanly with a hint rather than a traceback). For a graph this
+large the `curl … > live_vocab.json` + `--vocab-file` path above is the
+reliable capture; that is how the numbers below were produced.
+
+| Metric | Bundled sample | **Live production** |
+| --- | --- | --- |
+| Original distinct predicates | 28 | **63,948** |
+| Post-normalization distinct | 10 | **62,022** |
+| Dropped (code tokens / operators / numbers) | 7 | **194** |
+| Distinct collapse groups | — | **4,178** |
+| Raw forms folded into a collapse | — | **5,610** |
+| Negation rewrites (raw → `not_<base>`) | 4 | **3,781** |
+| Cardinality reduction | 64.3% | **3.0%** |
+
+### Honest read of the 3.0%
+
+The live vocabulary is far worse than the issue's "~1000+" estimate — **63,948**
+distinct predicates. The conservative module collapses the three *named*
+contamination classes very effectively (negation alone folds 3,781 raw forms,
+with families like `not_contains` absorbing 24 contraction variants), but those
+classes are a **small slice** of the total. The dominant cost is the **long
+tail of one-off verbose predicates** the LLM emitted (thousands of unique
+multi-word relation strings) that a fixed `SYNONYM_MAP` does not touch by
+design. So the headline reduction is only 3.0%.
+
+The takeaway is the same one the issue's "possible directions" list anticipates:
+post-hoc canonicalization cleans the *known* noise classes cheaply and safely,
+but driving the cardinality down to "dozens, not thousands" requires either a
+**closed-vocabulary extractor** (direction #3) or a **canonical-predicate
+dictionary** (direction #2) — a larger change than this surface-form pass.
+
+### Top collapse groups (live)
+
+| Canonical | Raw forms folded in |
 | --- | --- |
-| Original distinct predicates | 28 |
-| Post-normalization distinct predicates | 10 |
-| Dropped (code tokens) | 7 |
-| Cardinality reduction | 64.3% |
+| `not_contains` | 24 |
+| `not_run` | 15 |
+| `not_fire` | 14 |
+| `not_change` | 13 |
+| `not_uses` | 13 |
+| `is_a` | 12 (`is`, `are`, `was`, `was_a`, `is_an`, `is_an_instance_of`, `instance_of`, …) |
 
-### Top collapses (raw → canonical)
+### Dropped tokens (live, sample)
+
+Operators / merge markers / numeric noise the extractor bound as predicates —
+all dropped: `!=`, `===`, `<<<<<<<`, `>>>>>>>`, `&&`, `=>`, `100644`, `404`, `2>`.
+DOM/DB-API method names dropped: `appendchild`, `append_child`, `createelement`,
+`executemany`, `fetchall`, `getelementbyid`, `getattribute`, `innerhtml`,
+`classlist`. (194 dropped total.)
+
+### Bundled-sample collapses (small offline demo)
 
 | Canonical | Collapsed raw forms |
 | --- | --- |
@@ -68,22 +121,6 @@ true production cardinality reduction.
 | `not_appear` | `'doesn't_appear'`, `does_not_appear` |
 | `part_of` | `belongs_to`, `is_a_part_of` |
 | `references` | `is_a_reference`, `refers_to` |
-| `not_adapt` | `don't_adapt` |
-| `not_merged` | `aren't_merged` |
-
-### Dropped code tokens
-
-`appendchild`, `createelement`, `executemany`, `fetchall`, `getelementbyid`,
-`queryselector`, `setattribute`
-
-### Negation rewrites (raw → `not_<base>`)
-
-| Raw | Normalized |
-| --- | --- |
-| `'doesn't_appear'` | `not_appear` |
-| `aren't_merged` | `not_merged` |
-| `does_not_appear` | `not_appear` |
-| `don't_adapt` | `not_adapt` |
 
 ## Design notes
 

@@ -8,20 +8,25 @@ This is a READ-ONLY / report-only tool — it never writes to the graph.
 Vocabulary source, in order of preference:
 
   1. ``--vocab-file FILE`` — a JSON file containing either a bare list of
-     predicate strings, or the ``graph_stats`` response object (we look for
-     ``relationship_types``). Produce one live, e.g.::
+     predicate strings, or an object with a ``relationship_types`` /
+     ``predicates`` key. Produce one live with a READ-ONLY Cypher query for
+     the distinct ``r.relation_type`` property values, e.g.::
 
          set -a; source ~/.config/palace-daemon/env; set +a
          curl -sS -H "X-Api-Key: $PALACE_API_KEY" \\
-              -H "Content-Type: application/json" "$PALACE_DAEMON_URL/mcp" \\
-              -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
-                   "params":{"name":"mempalace_graph_stats","arguments":{}}}' \\
-           | jq -r '.result.content[0].text' > vocab.json
+              -H "Content-Type: application/json" "$PALACE_DAEMON_URL/cypher" \\
+              -d '{"cypher":"MATCH ()-[r:RELATION]->() RETURN DISTINCT r.relation_type AS rt"}' \\
+           | jq '[.rows[].rt | select(. != null) | tostring]' > vocab.json
          python scripts/predicate_norm_report.py --vocab-file vocab.json
 
-  2. ``--live`` — fetch ``graph_stats`` directly over the daemon HTTP API
-     using ``PALACE_API_KEY`` / ``PALACE_DAEMON_URL`` from the environment.
-     READ-ONLY (graph_stats is a pure read). Requires the daemon to be up.
+  2. ``--live`` — enumerate the distinct ``r.relation_type`` predicate values
+     over the daemon's READ-ONLY ``POST /cypher`` endpoint (the transaction is
+     marked ``READ ONLY``; no mutation). Uses ``PALACE_API_KEY`` /
+     ``PALACE_DAEMON_URL`` from the env. NB: the daemon's ``kg_stats`` /
+     ``graph_stats`` tools only return the AGE edge *labels*
+     (``RELATION`` / ``MENTIONS``), not the predicate-value vocabulary — the
+     ~64k distinct predicate strings live in ``r.relation_type``, which only
+     a Cypher walk exposes.
 
   3. (default) the bundled ``_SAMPLE_VOCAB`` below — the contamination
      examples enumerated in issue #50, so the report is demonstrable even
@@ -70,8 +75,14 @@ _SAMPLE_VOCAB: list[str] = [
 def _load_vocab(args: argparse.Namespace) -> tuple[list[str], str]:
     """Return (vocab_list, source_label)."""
     if args.vocab_file:
-        with open(args.vocab_file, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
+        try:
+            with open(args.vocab_file, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except OSError as e:
+            raise SystemExit(f"cannot read vocab file {args.vocab_file}: {e}")
+        except json.JSONDecodeError as e:
+            raise SystemExit(f"{args.vocab_file}: invalid JSON ({e})")
+
         if isinstance(data, dict):
             vocab = data.get("relationship_types") or data.get("predicates")
             if vocab is None:
@@ -79,18 +90,41 @@ def _load_vocab(args: argparse.Namespace) -> tuple[list[str], str]:
                     f"{args.vocab_file}: no 'relationship_types' or "
                     "'predicates' key in object"
                 )
-        else:
+        elif isinstance(data, list):
             vocab = data
+        else:
+            raise SystemExit(
+                f"{args.vocab_file}: expected a JSON list or object, got "
+                f"{type(data).__name__}"
+            )
+        if not isinstance(vocab, list):
+            raise SystemExit(
+                f"{args.vocab_file}: 'relationship_types'/'predicates' must be "
+                f"a list, got {type(vocab).__name__}"
+            )
         return [str(v) for v in vocab], f"file:{args.vocab_file}"
 
     if args.live:
-        return _fetch_live(), "live:graph_stats"
+        return _fetch_live(), "live:cypher(distinct r.relation_type)"
 
     return list(_SAMPLE_VOCAB), "bundled-sample (issue #50 examples)"
 
 
+_DISTINCT_RT_CYPHER = (
+    "MATCH ()-[r:RELATION]->() RETURN DISTINCT r.relation_type AS rt"
+)
+
+
 def _fetch_live() -> list[str]:
-    """READ-ONLY fetch of relationship_types via the daemon graph_stats MCP."""
+    """Enumerate distinct ``r.relation_type`` values via READ-ONLY ``/cypher``.
+
+    The daemon's ``POST /cypher`` marks its transaction ``READ ONLY``, so this
+    is a pure read — no graph mutation is possible. We deliberately do NOT use
+    ``kg_stats`` / ``graph_stats``: those return only the AGE edge labels
+    (``RELATION`` / ``MENTIONS``), whereas the predicate vocabulary this report
+    normalizes lives in the ``r.relation_type`` property.
+    """
+    import urllib.error
     import urllib.request
 
     key = os.environ.get("PALACE_API_KEY")
@@ -100,19 +134,45 @@ def _fetch_live() -> list[str]:
             "--live needs PALACE_API_KEY and PALACE_DAEMON_URL in the env "
             "(source ~/.config/palace-daemon/env first)"
         )
-    payload = json.dumps({
-        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {"name": "mempalace_graph_stats", "arguments": {}},
-    }).encode()
+    payload = json.dumps({"cypher": _DISTINCT_RT_CYPHER}).encode()
     req = urllib.request.Request(
-        f"{url}/mcp", data=payload,
+        f"{url}/cypher", data=payload,
         headers={"X-Api-Key": key, "Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        outer = json.loads(resp.read())
-    text = outer["result"]["content"][0]["text"]
-    stats = json.loads(text)
-    return [str(v) for v in stats.get("relationship_types", [])]
+    # generous timeout: a DISTINCT walk over millions of RELATION edges is slow.
+    # Overridable so CI / impatient callers aren't stuck on the default.
+    timeout = float(os.environ.get("PALACE_LIVE_TIMEOUT", "600"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise SystemExit(
+            f"--live: /cypher returned HTTP {e.code} ({e.reason}). "
+            "Note /cypher requires the daemon on the postgres backend."
+        )
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        # URLError wraps most socket errors, but a bare read-timeout surfaces
+        # as TimeoutError/socket.timeout (an OSError) and would otherwise
+        # traceback. The DISTINCT walk over ~1.7M edges can exceed the timeout;
+        # fall back to --vocab-file with a curl if so.
+        raise SystemExit(
+            f"--live fetch failed (daemon at {url}, timeout={timeout}s): {e}. "
+            "For a very large graph, capture the vocab with a longer curl and "
+            "use --vocab-file (see module docstring)."
+        )
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"--live: /cypher returned invalid JSON ({e})")
+    rows = data.get("rows")
+    if not isinstance(rows, list):
+        raise SystemExit(
+            f"--live: /cypher response missing 'rows' list (got {type(rows).__name__})"
+        )
+    out: list[str] = []
+    for row in rows:
+        rt = row.get("rt") if isinstance(row, dict) else None
+        if rt is not None:
+            out.append(str(rt))
+    return out
 
 
 def build_report(vocab: list[str]) -> dict:
