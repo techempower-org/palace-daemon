@@ -545,7 +545,11 @@ def _sem_for(request_dict: dict) -> asyncio.Semaphore:
     method = request_dict.get("method", "")
     if method == "ping":
         return _read_sem
-    tool_name = request_dict.get("params", {}).get("name", "")
+    # JSON-RPC params can be null or a positional list; only the dict form
+    # carries a tool name. Treat everything else as a write so we err on the
+    # side of holding the write semaphore for malformed requests.
+    params = request_dict.get("params")
+    tool_name = params.get("name", "") if isinstance(params, dict) else ""
     return _read_sem if tool_name in _READ_TOOLS else _write_sem
 
 
@@ -900,7 +904,11 @@ async def _do_silent_save_write(payload: dict) -> dict:
 async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
     async with _sem_for(request_dict):
         loop = asyncio.get_running_loop()
-        tool_name = request_dict.get("params", {}).get("name", "")
+        # JSON-RPC params can be a dict, an array, or null; only the dict
+        # form has a tool name. Be defensive so malformed requests turn
+        # into a normal error envelope instead of a 500.
+        params = request_dict.get("params")
+        tool_name = params.get("name", "") if isinstance(params, dict) else ""
         # Bound every MCP tool except the long-running mine. A handler that
         # never returns produces no ASGI response bytes at all (issue #49) —
         # surfacing as a JSON-RPC timeout error is strictly more debuggable
@@ -1191,7 +1199,8 @@ async def mcp_proxy(request: Request, x_api_key: str | None = Header(default=Non
     # so the helpers can live next to their /status/fast / /graph cousins
     # below — they aren't defined yet at this point in the source file.
     # Issue #49.
-    tool = body.get("params", {}).get("name") if isinstance(body, dict) else None
+    params = body.get("params") if isinstance(body, dict) else None
+    tool = params.get("name") if isinstance(params, dict) else None
     fast_fn = None
     if PALACE_MCP_FAST_INTERCEPT and tool in ("mempalace_status", "mempalace_kg_stats"):
         fast_fn = {
@@ -1896,19 +1905,27 @@ def _fast_status_payload() -> dict:
     if not dsn:
         raise RuntimeError("postgres backend not configured")
     import psycopg2
-    with psycopg2.connect(dsn, connect_timeout=3) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SET LOCAL statement_timeout = '3s'")
-            cur.execute("SELECT count(*) FROM mempalace_drawers")
-            total = cur.fetchone()[0]
-            cur.execute(
-                "SELECT wing, count(*) FROM mempalace_drawers GROUP BY wing ORDER BY count(*) DESC"
-            )
-            wings = {r[0]: r[1] for r in cur.fetchall()}
-            cur.execute(
-                "SELECT room, count(*) FROM mempalace_drawers WHERE room IS NOT NULL GROUP BY room ORDER BY count(*) DESC"
-            )
-            rooms = {r[0]: r[1] for r in cur.fetchall()}
+    # psycopg2's connection context manager commits/rolls-back the
+    # transaction but does NOT close the connection — leaving the close
+    # to garbage collection leaks file descriptors under load. Wrap in
+    # try/finally so the connection is always released on exit.
+    conn = psycopg2.connect(dsn, connect_timeout=3)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = '3s'")
+                cur.execute("SELECT count(*) FROM mempalace_drawers")
+                total = cur.fetchone()[0]
+                cur.execute(
+                    "SELECT wing, count(*) FROM mempalace_drawers GROUP BY wing ORDER BY count(*) DESC"
+                )
+                wings = {r[0]: r[1] for r in cur.fetchall()}
+                cur.execute(
+                    "SELECT room, count(*) FROM mempalace_drawers WHERE room IS NOT NULL GROUP BY room ORDER BY count(*) DESC"
+                )
+                rooms = {r[0]: r[1] for r in cur.fetchall()}
+    finally:
+        conn.close()
     return {"total_drawers": total, "wings": wings, "rooms": rooms}
 
 

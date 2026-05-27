@@ -38,11 +38,13 @@ class TestPerToolTimeout(unittest.IsolatedAsyncioTestCase):
 
     async def test_timeout_returns_jsonrpc_error_envelope(self):
         # Pretend the underlying tool will never return. We shave the
-        # ceiling down to 50ms so the test stays fast.
+        # ceiling down to 50ms so the test stays fast. The fake handler
+        # only needs to outlast the timeout; 0.5s leaves comfortable
+        # headroom without dragging the test suite.
         def _hang(_req):
             import time
 
-            time.sleep(5)
+            time.sleep(0.5)
             return {"jsonrpc": "2.0", "id": _req.get("id"), "result": {}}
 
         req = {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
@@ -113,17 +115,13 @@ class TestFastInterceptStatus(unittest.TestCase):
     def test_falls_back_when_constants_missing(self):
         # If mempalace.mcp_server somehow lacks PALACE_PROTOCOL / AAAK_SPEC
         # we still return the keys so the response shape stays stable.
-        import builtins
-        real_import = builtins.__import__
-
-        def _no_constants(name, *a, **kw):
-            if name == "mempalace.mcp_server":
-                raise ImportError("simulated")
-            return real_import(name, *a, **kw)
-
+        # Setting the module to None in sys.modules makes `import
+        # mempalace.mcp_server` raise ImportError without monkeypatching
+        # the global __import__ (which is brittle and can break the
+        # test runner's own imports).
         with patch.object(main, "_fast_status_payload",
                           return_value={"total_drawers": 1, "wings": {}, "rooms": {}}), \
-             patch.object(builtins, "__import__", side_effect=_no_constants):
+             patch.dict("sys.modules", {"mempalace.mcp_server": None}):
             payload = main._fast_mcp_status_payload()
 
         self.assertEqual(payload["protocol"], "")
