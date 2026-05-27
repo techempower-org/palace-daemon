@@ -264,25 +264,51 @@ const PALETTE = {
 //------------------------------------------------------------------ params + auth
 const params = new URLSearchParams(location.search);
 const REFRESH_SECONDS = parseInt(params.get("refresh") || "0", 10);
-// `?key=...` is supported as a bookmarkable shortcut for the API key. This
-// is convenient but the key will appear in the browser's history, in any
-// referer header sent to a third-party origin, and in the access logs of
-// any forward proxy or reverse proxy on the path. **Do not use ?key= when
-// the dashboard might be screen-shared, screencast, or proxied through a
-// shared intermediary.** Prefer the `X-Api-Key` header for those cases.
-const KEY = params.get("key") || "";
+// The API key is NEVER read from the URL — a `?key=` query string leaks into
+// browser history, referer headers, and proxy access logs. Auth flows through
+// an HttpOnly viz session cookie minted by `POST /viz/session`. The key typed
+// at the prompt lives in memory only long enough to perform that exchange and
+// is never persisted client-side.
+let MEM_KEY = "";
 
 function withAuth(opts) {
   opts = opts || {};
   const headers = Object.assign({}, opts.headers || {});
-  if (KEY) headers["x-api-key"] = KEY;
-  return Object.assign({}, opts, { headers });
+  if (MEM_KEY) headers["x-api-key"] = MEM_KEY;
+  // same-origin → the HttpOnly viz session cookie rides along automatically.
+  return Object.assign({}, opts, { headers, credentials: "same-origin" });
 }
 
 async function fetchJSON(path) {
   const r = await fetch(path, withAuth());
+  if (r.status === 401) {
+    const err = new Error(path + " → HTTP 401");
+    err.status = 401;
+    throw err;
+  }
   if (!r.ok) throw new Error(path + " → HTTP " + r.status);
   return r.json();
+}
+
+// Prompt once for the API key and exchange it for the session cookie. Returns
+// true if a session was established, false if cancelled or rejected.
+async function establishSession() {
+  const entered = window.prompt(
+    "This palace requires an API key.\n\n" +
+    "It is exchanged for a session cookie and never placed in the URL.");
+  if (!entered) return false;
+  MEM_KEY = entered.trim();
+  try {
+    const r = await fetch("/viz/session", {
+      method: "POST",
+      headers: { "x-api-key": MEM_KEY },
+      credentials: "same-origin",
+    });
+    return r.ok;
+  } finally {
+    // Cookie (if any) is now set; drop the raw key from memory regardless.
+    MEM_KEY = "";
+  }
 }
 
 //------------------------------------------------------------------ DOM helpers (no innerHTML for user data)
@@ -627,7 +653,7 @@ function renderKG(graph) {
 }
 
 //------------------------------------------------------------------ load + refresh
-async function loadAll() {
+async function loadAll(retried) {
   try {
     // /backfill-age/status is wrapped in catch(null) so older daemons that
     // don't expose it (pre-84fb3ae) still render the rest of the dashboard.
@@ -645,11 +671,17 @@ async function loadAll() {
     renderHierarchy(graph);
     renderKG(graph);
   } catch (e) {
+    // First 401 → prompt for the key, mint the session cookie, retry once.
+    if (e.status === 401 && !retried) {
+      const ok = await establishSession();
+      if (ok) return loadAll(true);
+    }
     console.error(e);
     const pill = document.getElementById("s-repair");
     pill.classList.remove("busy");
     pill.classList.add("error");
-    document.getElementById("s-repair-text").textContent = "error: " + e.message;
+    document.getElementById("s-repair-text").textContent =
+      e.status === 401 ? "auth required" : "error: " + e.message;
   }
 }
 

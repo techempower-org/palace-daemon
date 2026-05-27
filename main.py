@@ -15,6 +15,7 @@ Roadmap:
 """
 import argparse
 import asyncio
+import hashlib
 import hmac
 import json
 import logging
@@ -30,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi import Cookie, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 # Hard fail if hnswlib isn't importable. ChromaDB has no error path for
@@ -400,6 +401,60 @@ def _check_auth(x_api_key: str | None):
     provided = x_api_key or ""
     if not hmac.compare_digest(provided, key):
         raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+# ── /viz session cookie ───────────────────────────────────────────────────────
+# /viz is bookmarkable without putting the long-lived API key in the URL (where
+# it would leak into history, proxy logs, and referer headers). The page POSTs
+# the key once to /viz/session and receives a short-lived, HttpOnly, SameSite
+# cookie. The cookie token is HMAC-signed with PALACE_API_KEY itself, so no new
+# secret or server-side session store is needed; it carries only an expiry.
+_VIZ_COOKIE_NAME = "palace_viz_session"
+PALACE_VIZ_SESSION_TTL_SECONDS = int(os.getenv("PALACE_VIZ_SESSION_TTL_SECONDS", "28800"))  # 8h
+# Set when the daemon is reached over https (e.g. behind a TLS reverse proxy) so
+# the cookie carries the Secure attribute. Default off to not break local http.
+PALACE_VIZ_COOKIE_SECURE = os.getenv("PALACE_VIZ_COOKIE_SECURE", "").lower() in ("1", "true", "yes")
+
+
+def _mint_viz_token() -> str:
+    """Sign ``<expiry>.<hex_hmac>`` with PALACE_API_KEY. Caller guarantees the key is set."""
+    key = os.getenv("PALACE_API_KEY", "").encode()
+    exp = str(int(_time.time()) + PALACE_VIZ_SESSION_TTL_SECONDS)
+    sig = hmac.new(key, exp.encode(), hashlib.sha256).hexdigest()
+    return f"{exp}.{sig}"
+
+
+def _valid_viz_token(token: str | None) -> bool:
+    """True iff the token is well-formed, unexpired, and the HMAC verifies."""
+    key = os.getenv("PALACE_API_KEY", "")
+    if not key or not token or "." not in token:
+        return False
+    exp, _, sig = token.partition(".")
+    try:
+        if int(exp) < int(_time.time()):
+            return False
+    except ValueError:
+        return False
+    expected = hmac.new(key.encode(), exp.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(sig, expected)
+
+
+def _check_viz_auth(x_api_key: str | None, session: str | None) -> None:
+    """Auth for the read-only /viz surface: accept the X-Api-Key header OR a
+    valid signed viz session cookie. No-op when PALACE_API_KEY is unset.
+
+    Only used by GET endpoints the dashboard reads (/viz, /graph,
+    /backfill-age/status). Write endpoints stay header-only so the cookie can
+    never be replayed cross-site against a state-changing route (SameSite=Lax
+    plus header-only writes = no CSRF surface)."""
+    key = os.getenv("PALACE_API_KEY", "")
+    if not key:
+        return
+    if x_api_key and hmac.compare_digest(x_api_key, key):
+        return
+    if _valid_viz_token(session):
+        return
+    raise HTTPException(status_code=401, detail="Invalid API key")
 
 
 # Sentinel for "no value passed" — distinguishes _parse_path_map() (read env)
@@ -2456,6 +2511,7 @@ def _read_kg_direct(
 @app.get("/graph")
 async def graph(
     x_api_key: str | None = Header(default=None),
+    palace_viz_session: str | None = Cookie(default=None),
     limit: int = Query(
         500,
         ge=1,
@@ -2497,7 +2553,7 @@ async def graph(
     sqlite ``triples`` table (real semantic facts) and ``kg_mentions``
     is always ``[]`` (no MENTIONS concept in the chroma KG).
     """
-    _check_auth(x_api_key)
+    _check_viz_auth(x_api_key, palace_viz_session)
     entity_limit = int(limit)
     triple_limit = int(limit) * 2
     mention_limit = int(limit) * 2
@@ -2584,8 +2640,8 @@ _VIZ_HTML_CACHE: str | None = None
 
 @app.get("/viz", response_class=HTMLResponse)
 async def viz(
-    key: str | None = None,
     x_api_key: str | None = Header(default=None),
+    palace_viz_session: str | None = Cookie(default=None),
 ):
     """Self-contained status dashboard at /viz.
 
@@ -2594,12 +2650,11 @@ async def viz(
     KG force-graph (D3), wings bar chart, wing/room hierarchy (Mermaid),
     tunnels list, KG stats.
 
-    Auth: same as every other endpoint — ``X-Api-Key`` header. As an
-    ergonomic shortcut for browser bookmarking, ``?key=...`` is also
-    accepted; the page reads it from the URL and re-supplies it to the
-    data endpoints. The ``?key=...`` shape leaks the key into browser
-    history, proxy logs, and referer headers — prefer the header for
-    anything beyond a personal bookmark.
+    Auth: the ``X-Api-Key`` header, or a viz session cookie minted by
+    ``POST /viz/session``. The key is never accepted in the URL — a
+    ``?key=`` query string would leak into browser history, proxy logs,
+    and referer headers. ``_check_viz_auth`` is a no-op when
+    PALACE_API_KEY is unset, preserving zero-config local dev.
 
     The HTML template is read from disk lazily on the first request and
     cached in-process thereafter (one disk read per daemon process).
@@ -2608,11 +2663,7 @@ async def viz(
     #431 (CLI stats), #256 (sync_status MCP), #601 (brief overview) — none
     cherry-picked, just patterns synthesized over the daemon's /graph.
     """
-    # Accept the API key from either the X-Api-Key header (preferred) or
-    # the ?key= query parameter (bookmarkable). _check_auth is a no-op
-    # when PALACE_API_KEY is unset, so this preserves the
-    # zero-config-local-dev experience.
-    _check_auth(x_api_key or key)
+    _check_viz_auth(x_api_key, palace_viz_session)
     global _VIZ_HTML_CACHE
     if _VIZ_HTML_CACHE is None:
         try:
@@ -2621,6 +2672,31 @@ async def viz(
         except OSError as e:
             raise HTTPException(status_code=500, detail=f"viz template missing: {e}")
     return HTMLResponse(content=_VIZ_HTML_CACHE)
+
+
+@app.post("/viz/session")
+async def viz_session(x_api_key: str | None = Header(default=None)):
+    """Exchange a valid ``X-Api-Key`` header for a short-lived HttpOnly viz
+    session cookie, so /viz can be bookmarked without the key in the URL.
+
+    401s if PALACE_API_KEY is set and the header is wrong/missing. When
+    PALACE_API_KEY is unset, auth is a no-op and no cookie is set (the
+    dashboard already works unauthenticated)."""
+    _check_auth(x_api_key)
+    key = os.getenv("PALACE_API_KEY", "")
+    resp = JSONResponse({"authenticated": bool(key),
+                         "ttl": PALACE_VIZ_SESSION_TTL_SECONDS if key else 0})
+    if key:
+        resp.set_cookie(
+            _VIZ_COOKIE_NAME,
+            _mint_viz_token(),
+            max_age=PALACE_VIZ_SESSION_TTL_SECONDS,
+            httponly=True,
+            samesite="lax",
+            secure=PALACE_VIZ_COOKIE_SECURE,
+            path="/",
+        )
+    return resp
 
 
 @app.post("/flush")
@@ -2978,13 +3054,16 @@ async def backfill_age(request: Request, x_api_key: str | None = Header(default=
 
 
 @app.get("/backfill-age/status")
-async def backfill_age_status(x_api_key: str | None = Header(default=None)):
+async def backfill_age_status(
+    x_api_key: str | None = Header(default=None),
+    palace_viz_session: str | None = Cookie(default=None),
+):
     """Poll backfill-age progress.
 
     Detects both daemon-spawned and externally-launched (parallel) workers
     by checking the checkpoint table and OS process list.
     """
-    _check_auth(x_api_key)
+    _check_viz_auth(x_api_key, palace_viz_session)
     result = {
         "in_progress": _backfill_state["in_progress"],
     }
