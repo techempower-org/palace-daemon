@@ -19,6 +19,20 @@ the ``novelty_score`` — low values mean the new content is redundant.
 Gating: ``PALACE_NOVELTY_ENABLED`` env var (default ``"true"``).  Read live
 per-request.  Window size: ``PALACE_NOVELTY_WINDOW`` (default ``20``).
 
+``mempalace_list_drawers`` returns each drawer body as ``content_preview``,
+truncated to ~200 chars upstream.  Scoring against truncated neighbours
+understates similarity for longer drawers (#65), so by default we fetch the
+*full* content of each window member via ``mempalace_get_drawer`` and score
+against that.  Knobs:
+
+  - ``PALACE_NOVELTY_FULL_CONTENT`` (default ``"true"``) — fetch full neighbour
+    content.  When off (or when a fetch fails), fall back to the truncated
+    ``content_preview`` for that entry.
+  - ``PALACE_NOVELTY_FULL_CONTENT_WINDOW`` (default = ``PALACE_NOVELTY_WINDOW``)
+    — cap how many of the window's drawers get a full-content fetch, so the
+    extra read cost is bounded independently of the scoring window.  Entries
+    beyond the cap use their preview.
+
 This is a **tag, not a gate** — all drawers are stored regardless of score.
 The score is informational metadata for downstream retrieval boosting or
 curation UIs.
@@ -47,6 +61,26 @@ def _window_size() -> int:
         return max(1, int(os.getenv("PALACE_NOVELTY_WINDOW", str(_DEFAULT_WINDOW))))
     except (ValueError, TypeError):
         return _DEFAULT_WINDOW
+
+
+def _full_content_enabled() -> bool:
+    val = os.getenv("PALACE_NOVELTY_FULL_CONTENT", "true").strip().lower()
+    return val in ("1", "true", "yes", "on")
+
+
+def _full_content_window() -> int:
+    """How many window drawers to fetch full content for.
+
+    Bounds the extra ``get_drawer`` read cost separately from the scoring
+    window. Defaults to the full scoring window; clamps to >= 0.
+    """
+    raw = os.getenv("PALACE_NOVELTY_FULL_CONTENT_WINDOW")
+    if raw is None:
+        return _window_size()
+    try:
+        return max(0, int(raw))
+    except (ValueError, TypeError):
+        return _window_size()
 
 
 def ncd(a: str, b: str) -> float:
@@ -123,6 +157,69 @@ def score_novelty(
     return info
 
 
+def _unwrap_tool_result(result: Any) -> Any:
+    """Unwrap an MCP tools/call envelope to the inner JSON payload."""
+    try:
+        text = result["result"]["content"][0]["text"]
+        return json.loads(text)
+    except (KeyError, TypeError, IndexError, json.JSONDecodeError):
+        return result
+
+
+def _parse_window(unwrapped: Any) -> list[dict[str, str]]:
+    """Extract the rolling window as ``[{"drawer_id", "preview"}, ...]``.
+
+    ``preview`` is the truncated body from ``mempalace_list_drawers`` (under
+    ``content_preview``), with ``text``/``content``/``preview`` as fallbacks.
+    Malformed (non-dict) rows are skipped so they can't raise.
+    """
+    out: list[dict[str, str]] = []
+    if not isinstance(unwrapped, dict):
+        return out
+    drawers = unwrapped.get("drawers") or unwrapped.get("results") or []
+    for d in drawers:
+        if not isinstance(d, dict):
+            continue
+        preview = (
+            d.get("text")
+            or d.get("content")
+            or d.get("content_preview")
+            or d.get("preview")
+            or ""
+        )
+        if not isinstance(preview, str):
+            preview = ""
+        out.append({"drawer_id": d.get("drawer_id") or "", "preview": preview})
+    return out
+
+
+async def _fetch_full_content(call_fn, drawer_id: str) -> str | None:
+    """Fetch a drawer's full content via ``mempalace_get_drawer``.
+
+    Returns the content string, or ``None`` if the fetch fails or yields no
+    usable content — the caller falls back to the truncated preview.
+    """
+    if not drawer_id:
+        return None
+    try:
+        result = await call_fn({
+            "jsonrpc": "2.0", "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "mempalace_get_drawer",
+                "arguments": {"drawer_id": drawer_id},
+            },
+        })
+        unwrapped = _unwrap_tool_result(result)
+        if isinstance(unwrapped, dict):
+            full = unwrapped.get("content") or unwrapped.get("text")
+            if isinstance(full, str) and full:
+                return full
+    except Exception as e:  # noqa: BLE001 — one bad fetch must not abort scoring
+        _log.debug("get_drawer(%s) failed: %s — using preview", drawer_id, e)
+    return None
+
+
 async def compute_novelty_for_write(
     content: str,
     wing: str,
@@ -132,8 +229,9 @@ async def compute_novelty_for_write(
     """End-to-end novelty scoring for a ``POST /memory`` write.
 
     Fetches recent drawers in the same wing/room via ``call_fn`` (the
-    daemon's ``_call`` wrapper), computes NCD against each, and returns
-    the scoring info dict.
+    daemon's ``_call`` wrapper), resolves each window member's text (full
+    content by default, truncated preview as fallback — see #65), computes
+    NCD against each, and returns the scoring info dict.
 
     ``call_fn`` must be the daemon's async ``_call(request_dict)`` function
     so we go through the same semaphore/retry path as everything else.
@@ -157,38 +255,32 @@ async def compute_novelty_for_write(
             },
         })
 
-        try:
-            text = result["result"]["content"][0]["text"]
-            unwrapped = json.loads(text)
-        except (KeyError, TypeError, json.JSONDecodeError):
-            unwrapped = result
+        members = _parse_window(_unwrap_tool_result(result))
 
+        # Resolve each window member's text. content_preview is truncated to
+        # ~200 chars (#65), which understates NCD similarity for longer
+        # drawers, so by default fetch full content per member. Cap the number
+        # of full fetches (PALACE_NOVELTY_FULL_CONTENT_WINDOW) to bound the
+        # extra read cost; entries beyond the cap, fetch failures, and the
+        # knob being off all fall back to the truncated preview.
+        full_enabled = _full_content_enabled()
+        full_cap = _full_content_window() if full_enabled else 0
+        full_used = 0
         texts: list[str] = []
-        if isinstance(unwrapped, dict):
-            drawers = unwrapped.get("drawers") or unwrapped.get("results") or []
-            for d in drawers:
-                # A malformed drawer entry (not a dict) must not raise — that
-                # would hit the outer except and silently fall back to
-                # novelty_score=1.0, re-creating the no-op this fix removed.
-                if not isinstance(d, dict):
-                    continue
-                # mempalace_list_drawers emits the body as "content_preview".
-                # Without it in the fallback chain the window is always empty,
-                # so every write scored novelty_score=1.0 — the feature was a
-                # silent no-op from #45 until this fix. Previews are truncated
-                # to ~200 chars upstream; scoring against full neighbour content
-                # is a tracked follow-up.
-                text = (
-                    d.get("text")
-                    or d.get("content")
-                    or d.get("content_preview")
-                    or d.get("preview")
-                    or ""
-                )
-                if isinstance(text, str) and text:
-                    texts.append(text)
+        for i, m in enumerate(members):
+            text = m["preview"]
+            if i < full_cap:
+                full = await _fetch_full_content(call_fn, m["drawer_id"])
+                if full is not None:
+                    text = full
+                    full_used += 1
+            if text:
+                texts.append(text)
 
-        return score_novelty(content, texts)
+        info = score_novelty(content, texts)
+        info["full_content"] = full_enabled
+        info["full_content_used"] = full_used
+        return info
 
     except Exception as e:
         _log.warning("Novelty scoring failed: %s — returning default score", e)

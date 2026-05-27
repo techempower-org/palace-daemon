@@ -14,6 +14,7 @@ Run with::
     venv/bin/python -m unittest tests.test_novelty -v
 """
 import asyncio
+import json
 import os
 import sys
 import unittest
@@ -284,6 +285,170 @@ class TestComputeNoveltyForWrite(unittest.TestCase):
                 novelty.compute_novelty_for_write("content", "wing_test", "sessions", mock_call)
             )
         self.assertEqual(info["status"], "no_window")
+
+
+def _envelope(payload: dict) -> dict:
+    """Wrap a dict as an MCP tools/call result envelope."""
+    return {
+        "jsonrpc": "2.0", "id": 1,
+        "result": {"content": [{"type": "text", "text": json.dumps(payload)}]},
+    }
+
+
+def _dispatching_call(list_payload: dict, full_by_id: dict[str, str]):
+    """Build an async call_fn that routes by tool name.
+
+    list_drawers -> ``list_payload``; get_drawer -> the full content registered
+    in ``full_by_id`` for that drawer_id (or a no-content envelope if missing).
+    Records call counts on the returned function for assertions.
+    """
+    counts = {"list_drawers": 0, "get_drawer": 0}
+
+    async def call_fn(req):
+        name = req["params"]["name"]
+        if name == "mempalace_list_drawers":
+            counts["list_drawers"] += 1
+            return _envelope(list_payload)
+        if name == "mempalace_get_drawer":
+            counts["get_drawer"] += 1
+            did = req["params"]["arguments"]["drawer_id"]
+            content = full_by_id.get(did)
+            if content is None:
+                return _envelope({"drawer_id": did})  # no usable content
+            return _envelope({"drawer_id": did, "content": content})
+        raise AssertionError(f"unexpected tool {name}")
+
+    call_fn.counts = counts
+    return call_fn
+
+
+class TestFullContentScoring(unittest.TestCase):
+    """#65: score against full neighbour content, not truncated preview."""
+
+    def _run(self, coro):
+        return asyncio.new_event_loop().run_until_complete(coro)
+
+    def _clean_env(self, **overrides):
+        # Start from a known state: enabled, defaults for the new knobs.
+        env = {"PALACE_NOVELTY_ENABLED": "true"}
+        env.update(overrides)
+        return patch.dict(os.environ, env, clear=False)
+
+    def test_full_content_path_fetches_per_member(self):
+        # Preview is truncated; full content is the real body. With the default
+        # knob on, scoring uses full content and a get_drawer fires per member.
+        list_payload = {"drawers": [
+            {"drawer_id": "d1", "content_preview": "alpha beta"},
+            {"drawer_id": "d2", "content_preview": "gamma delta"},
+        ]}
+        full = {
+            "d1": "alpha beta " * 30,  # long full bodies, distinct from preview
+            "d2": "gamma delta " * 30,
+        }
+        call_fn = _dispatching_call(list_payload, full)
+        for k in ("PALACE_NOVELTY_FULL_CONTENT", "PALACE_NOVELTY_FULL_CONTENT_WINDOW"):
+            os.environ.pop(k, None)
+        with self._clean_env():
+            info = self._run(novelty.compute_novelty_for_write(
+                "alpha beta " * 30, "wing_test", "discoveries", call_fn))
+        self.assertEqual(info["status"], "ok")
+        self.assertTrue(info["full_content"])
+        self.assertEqual(info["full_content_used"], 2)
+        self.assertEqual(call_fn.counts["list_drawers"], 1)
+        self.assertEqual(call_fn.counts["get_drawer"], 2)
+        # Identical full body present → near-zero novelty.
+        self.assertLess(info["novelty_score"], 0.1)
+
+    def test_knob_off_uses_preview_only(self):
+        list_payload = {"drawers": [
+            {"drawer_id": "d1", "content_preview": "alpha beta gamma delta"},
+        ]}
+        call_fn = _dispatching_call(list_payload, {"d1": "should not be fetched"})
+        with self._clean_env(PALACE_NOVELTY_FULL_CONTENT="false"):
+            info = self._run(novelty.compute_novelty_for_write(
+                "alpha beta gamma delta", "wing_test", "discoveries", call_fn))
+        self.assertEqual(info["status"], "ok")
+        self.assertFalse(info["full_content"])
+        self.assertEqual(info["full_content_used"], 0)
+        self.assertEqual(call_fn.counts["get_drawer"], 0)  # no fetches at all
+
+    def test_fetch_failure_falls_back_to_preview(self):
+        # get_drawer returns no content for d1 → fall back to its preview, but
+        # scoring still succeeds (no failure status).
+        list_payload = {"drawers": [
+            {"drawer_id": "d1", "content_preview": "real neighbour about gzip ncd"},
+        ]}
+        call_fn = _dispatching_call(list_payload, {})  # no full content registered
+        for k in ("PALACE_NOVELTY_FULL_CONTENT", "PALACE_NOVELTY_FULL_CONTENT_WINDOW"):
+            os.environ.pop(k, None)
+        with self._clean_env():
+            info = self._run(novelty.compute_novelty_for_write(
+                "real neighbour about gzip ncd", "wing_test", "discoveries", call_fn))
+        self.assertEqual(info["status"], "ok")
+        self.assertEqual(info["window_size"], 1)
+        self.assertEqual(info["full_content_used"], 0)  # fetch yielded nothing
+        self.assertEqual(call_fn.counts["get_drawer"], 1)  # but it was attempted
+        self.assertLess(info["novelty_score"], 0.5)
+
+    def test_full_content_window_caps_fetches(self):
+        # 3 members but the cap is 1 → only one get_drawer; the rest use preview.
+        list_payload = {"drawers": [
+            {"drawer_id": "d1", "content_preview": "p1"},
+            {"drawer_id": "d2", "content_preview": "p2"},
+            {"drawer_id": "d3", "content_preview": "p3"},
+        ]}
+        call_fn = _dispatching_call(list_payload, {
+            "d1": "f1 " * 20, "d2": "f2 " * 20, "d3": "f3 " * 20})
+        with self._clean_env(PALACE_NOVELTY_FULL_CONTENT_WINDOW="1"):
+            info = self._run(novelty.compute_novelty_for_write(
+                "brand new content", "wing_test", "discoveries", call_fn))
+        self.assertEqual(info["status"], "ok")
+        self.assertEqual(info["window_size"], 3)
+        self.assertEqual(info["full_content_used"], 1)
+        self.assertEqual(call_fn.counts["get_drawer"], 1)
+
+    def test_full_content_window_zero_disables_fetches(self):
+        list_payload = {"drawers": [
+            {"drawer_id": "d1", "content_preview": "p1"},
+        ]}
+        call_fn = _dispatching_call(list_payload, {"d1": "f1 " * 20})
+        with self._clean_env(PALACE_NOVELTY_FULL_CONTENT_WINDOW="0"):
+            info = self._run(novelty.compute_novelty_for_write(
+                "brand new content", "wing_test", "discoveries", call_fn))
+        self.assertEqual(info["status"], "ok")
+        self.assertEqual(info["full_content_used"], 0)
+        self.assertEqual(call_fn.counts["get_drawer"], 0)
+
+
+class TestConfigKnobs(unittest.TestCase):
+
+    def test_full_content_default_true(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PALACE_NOVELTY_FULL_CONTENT", None)
+            self.assertTrue(novelty._full_content_enabled())
+
+    def test_full_content_false_values(self):
+        for v in ("false", "0", "no", "off"):
+            with patch.dict(os.environ, {"PALACE_NOVELTY_FULL_CONTENT": v}):
+                self.assertFalse(novelty._full_content_enabled(), v)
+
+    def test_full_content_window_defaults_to_window(self):
+        with patch.dict(os.environ, {"PALACE_NOVELTY_WINDOW": "15"}):
+            os.environ.pop("PALACE_NOVELTY_FULL_CONTENT_WINDOW", None)
+            self.assertEqual(novelty._full_content_window(), 15)
+
+    def test_full_content_window_explicit(self):
+        with patch.dict(os.environ, {"PALACE_NOVELTY_FULL_CONTENT_WINDOW": "5"}):
+            self.assertEqual(novelty._full_content_window(), 5)
+
+    def test_full_content_window_invalid_falls_back(self):
+        with patch.dict(os.environ, {"PALACE_NOVELTY_FULL_CONTENT_WINDOW": "nope",
+                                     "PALACE_NOVELTY_WINDOW": "20"}):
+            self.assertEqual(novelty._full_content_window(), 20)
+
+    def test_full_content_window_negative_clamps_zero(self):
+        with patch.dict(os.environ, {"PALACE_NOVELTY_FULL_CONTENT_WINDOW": "-3"}):
+            self.assertEqual(novelty._full_content_window(), 0)
 
 
 if __name__ == "__main__":
