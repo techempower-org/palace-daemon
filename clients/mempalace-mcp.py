@@ -32,6 +32,36 @@ import urllib.request
 DEFAULT_DAEMON = os.getenv("PALACE_DAEMON_URL", "http://localhost:8085")
 API_KEY = os.getenv("PALACE_API_KEY", "")
 
+CONFIG_PATH = os.path.expanduser(
+    os.getenv("MEMPALACE_CONFIG", "~/.mempalace/config.json")
+)
+# Valid mcp_mode values. Anything else (unset, typo, garbled) falls open to "all".
+VALID_MCP_MODES = ("all", "cli-only")
+
+CLI_ONLY_REJECT_MESSAGE = (
+    "MCP tools are disabled (mcp_mode=cli-only). Use the mempalace CLI, "
+    "or set mcp_mode=all and reconnect."
+)
+
+
+def resolve_mcp_mode() -> str:
+    """Resolve the effective mcp_mode.
+
+    Precedence: PALACE_MCP_MODE env override > config file > default "all".
+    Fail-open: any unknown value, missing/unreadable/garbled config, or
+    missing key resolves to "all" so a typo never silently kills the tool
+    surface. Only an explicit "cli-only" suppresses tools.
+    """
+    env = os.getenv("PALACE_MCP_MODE")
+    if env is not None:
+        return env if env in VALID_MCP_MODES else "all"
+    try:
+        with open(CONFIG_PATH) as fh:
+            mode = json.load(fh).get("mcp_mode", "all")
+    except Exception:
+        return "all"
+    return mode if mode in VALID_MCP_MODES else "all"
+
 
 def find_daemon(url: str) -> bool:
     try:
@@ -84,8 +114,23 @@ def _stdio_loop(handle_line):
             print(json.dumps(response), flush=True)
 
 
-def run_daemon_mode(daemon_url: str):
+def run_daemon_mode(daemon_url: str, mcp_mode: str = "all"):
     def handle(request):
+        if mcp_mode == "cli-only":
+            method = request.get("method")
+            # tools/list → advertise zero tools without forwarding, so the
+            # MCP client caches an empty surface (reclaiming ~9k tokens).
+            if method == "tools/list":
+                return {"jsonrpc": "2.0", "id": request.get("id"),
+                        "result": {"tools": []}}
+            # tools/call → reject; nothing was advertised, so nothing runs.
+            if method == "tools/call":
+                return {"jsonrpc": "2.0", "id": request.get("id"),
+                        "error": {"code": -32601,
+                                  "message": CLI_ONLY_REJECT_MESSAGE}}
+            # initialize, ping, notifications/*, resources/list, prompts/list
+            # fall through to normal forwarding so the server still shows
+            # Connected (with 0 tools).
         try:
             return forward(daemon_url, request)
         except urllib.error.HTTPError as e:
@@ -119,8 +164,9 @@ def main():
 
     if find_daemon(args.daemon):
         # Log connection success to stderr so it doesn't break JSON-RPC stdout
-        print(f"palace-daemon: connected at {args.daemon}", file=sys.stderr)
-        run_daemon_mode(args.daemon)
+        mcp_mode = resolve_mcp_mode()
+        print(f"palace-daemon: connected at {args.daemon} (mcp_mode={mcp_mode})", file=sys.stderr)
+        run_daemon_mode(args.daemon, mcp_mode)
     else:
         print(f"ERROR: palace-daemon unreachable at {args.daemon}. Direct fallback disabled for safety.", file=sys.stderr)
         sys.exit(1)

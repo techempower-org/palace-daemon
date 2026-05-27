@@ -301,9 +301,50 @@ python monitor.py --url http://familiar:8085 --interval 5
 | `scripts/deploy.sh` | One-command `git push → wait for sync → systemctl restart → /health poll → verify-routes` deploy. |
 | `scripts/verify-routes.sh` | curl-based smoke test for every public route. |
 | `clients/palace-mode` | Local↔remote palace switching (`status`, `local`, `remote [URL]`, `install`, `verify`). |
+| `clients/mempalace-mcp.py` | stdio MCP proxy: bridges the MCP client to the daemon over HTTP. Honors `mcp_mode` (see below). |
 | `clients/palace-mcp-dispatch.sh` | Picks daemon vs. in-process MCP based on `PALACE_DAEMON_URL`. |
 | `clients/mempal-fast.py` | Stdlib-only Stop/PreCompact hook handler — POSTs to `/silent-save` without importing mempalace. |
 | `monitor.py` | Standalone live integrity monitor. Polls `/health`, `/stats`, `/repair/status` and prints an ANSI dashboard with alerts for unreachable, degraded, drawer-count drops, and active repairs. Usage: `python monitor.py --url http://familiar:8085 --interval 5` |
+
+### `mcp_mode` — CLI-only mode (suppress the MCP tool surface)
+
+The MCP tool surface costs ~9k tokens of schemas on every session start. The two
+things you usually want to keep — **auto-save hooks** and **skills** — are
+independent of the MCP server (hooks POST to the daemon directly; skills are
+markdown loaded by the harness). So the tool surface can be made opt-in per
+machine without losing either.
+
+The stdio proxy (`clients/mempalace-mcp.py`) reads `mcp_mode` from
+`~/.mempalace/config.json` once at startup, with the env var `PALACE_MCP_MODE`
+as an ephemeral override (env beats file):
+
+| `mcp_mode` | `tools/list` | `tools/call` | `initialize` / `ping` / `notifications/*` / `resources/list` / `prompts/list` |
+|---|---|---|---|
+| `all` (default, or unset/unknown) | forwarded — all tools present | forwarded | forwarded (unchanged) |
+| `cli-only` | returns `{"tools": []}` without forwarding | rejected with JSON-RPC `-32601` | forwarded — server still shows ✓ Connected (with 0 tools) |
+
+```jsonc
+// ~/.mempalace/config.json
+{ "mcp_mode": "cli-only" }
+```
+
+```bash
+# Ephemeral override for one session
+PALACE_MCP_MODE=cli-only claude
+```
+
+**Fail-open:** a missing file, missing key, unreadable/garbled config, or an
+unknown value all resolve to `all` — a typo never silently kills the tool
+surface. Only an explicit `cli-only` suppresses tools.
+
+**Reload requirement:** MCP clients read `tools/list` once per session, so the
+visible tool set (and the context savings) changes on the next `/mcp` reconnect
+or harness restart, not mid-session. Re-enable by flipping `mcp_mode` back to
+`all` (or removing the key) and reconnecting — no `claude mcp add` dance, no
+manifest editing.
+
+In `cli-only` mode drive the palace from the CLI: `mempalace
+search/list/graph/cypher/wake-up/status/…`.
 
 ## Sources
 
