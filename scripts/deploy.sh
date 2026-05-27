@@ -101,7 +101,7 @@ ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$1" >&2; }
 fail() { printf '  \033[31m✗\033[0m %s\n' "$1" >&2; exit 1; }
 
-[ -n "$SSH_TARGET" ] || fail "no deploy host — set PALACE_HOST (or a deploy.conf)"
+[ -n "$HOST" ] || fail "no deploy host — set PALACE_HOST (or a deploy.conf)"
 [ -n "$URL" ] || fail "no daemon URL — set PALACE_DAEMON_URL or PALACE_HOST"
 [ -n "$CONF_LOADED" ] && warn "loaded config: $CONF_LOADED"
 
@@ -116,11 +116,33 @@ local_sha=$(git rev-parse HEAD)
 git push "$GIT_REMOTE" "$GIT_BRANCH" >/dev/null 2>&1 || fail "git push failed"
 ok "pushed $local_sha → $GIT_REMOTE/$GIT_BRANCH"
 
+# Read the remote HEAD over ssh, distinguishing three outcomes:
+#   - ssh connection failure (host down / auth)  → return 2, no output
+#   - connected, but $REMOTE_DIR is not a git checkout → return 0, empty SHA
+#   - connected git checkout → return 0, the SHA
+# We append a sentinel line that only prints if ssh actually connected, so an
+# empty SHA from a dead connection can't be mistaken for a mirror-only host.
+remote_head() {
+    local out sha
+    out=$(ssh "$SSH_TARGET" "cd '$REMOTE_DIR' 2>/dev/null && git rev-parse HEAD 2>/dev/null; echo __SSH_OK__") || return 2
+    case "$out" in
+        *__SSH_OK__*) : ;;          # connected
+        *)            return 2 ;;   # no sentinel → connection failed
+    esac
+    # The SHA (if any) is the first line; the sentinel is the rest. With no
+    # SHA the output is just the sentinel, so sha resolves to empty.
+    sha=$(printf '%s\n' "$out" | head -1)
+    [ "$sha" = "__SSH_OK__" ] && sha=""
+    printf '%s' "$sha"
+}
+
 nstep "confirm $HOST has the push"
 # If the host is a git checkout we can compare SHAs; otherwise (Syncthing /
-# rsync mirror) we just give it SYNC_GRACE seconds and trust the mirror.
+# rsync mirror) we give it SYNC_GRACE seconds and trust the mirror.
 [ "$SYNC_GRACE" -gt 0 ] && sleep "$SYNC_GRACE"
-remote_sha=$(ssh "$SSH_TARGET" "cd '$REMOTE_DIR' && git rev-parse HEAD" 2>/dev/null || echo "")
+if ! remote_sha=$(remote_head); then
+    fail "cannot reach $SSH_TARGET over ssh — host down, auth failed, or wrong target; aborting (deploy NOT applied)"
+fi
 if [ "$remote_sha" = "$local_sha" ]; then
     ok "remote at $local_sha"
 elif [ -z "$remote_sha" ]; then
@@ -130,7 +152,9 @@ else
     if [ "$SYNC_GRACE" -gt 0 ]; then
         warn "mirror may need more time; sleeping ${SYNC_GRACE}s and retrying"
         sleep "$SYNC_GRACE"
-        remote_sha=$(ssh "$SSH_TARGET" "cd '$REMOTE_DIR' && git rev-parse HEAD" 2>/dev/null || echo "")
+        if ! remote_sha=$(remote_head); then
+            fail "cannot reach $SSH_TARGET over ssh on retry; aborting"
+        fi
         if [ "$remote_sha" = "$local_sha" ]; then ok "remote caught up to $local_sha"; else fail "sync lag persists; aborting"; fi
     else
         fail "remote SHA mismatch and PALACE_SYNC_GRACE=0; aborting"
@@ -139,9 +163,10 @@ fi
 
 if [ -n "$PRE_RESTART_HOOK" ]; then
     nstep "pre-restart hook on $HOST"
-    # The hook path is interpreted on the remote host. Single-quote so it
-    # expands there, not locally.
-    if ssh "$SSH_TARGET" "bash -lc '$PRE_RESTART_HOOK'"; then
+    # Feed the hook to a remote login shell on stdin rather than embedding it
+    # in the ssh command string, so hooks containing single quotes don't break
+    # the remote quoting.
+    if ssh "$SSH_TARGET" "bash -l" <<< "$PRE_RESTART_HOOK"; then
         ok "hook ran"
     else
         warn "pre-restart hook reported non-zero (non-fatal)"
