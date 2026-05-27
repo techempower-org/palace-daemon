@@ -211,6 +211,33 @@ class TestComputeNoveltyForWrite(unittest.TestCase):
         self.assertIsInstance(info["novelty_score"], float)
         mock_call.assert_called_once()
 
+    def test_scoring_reads_content_preview_field(self):
+        """Regression: mempalace_list_drawers returns drawer bodies under
+        ``content_preview``, not ``text``/``content``. If the fallback chain
+        in compute_novelty_for_write omits it, the window is empty and every
+        write scores 1.0 ("no_window") — the feature is a silent no-op (the
+        state it shipped in at #45). This mock uses the REAL field name so the
+        seam stays covered."""
+        mock_call = AsyncMock(return_value={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [{"type": "text", "text": '{"drawers": [{"content_preview": "existing drawer about NCD compression scoring"}, {"content_preview": "another drawer about gzip distance metrics"}]}'}]
+            },
+        })
+        with patch.dict(os.environ, {"PALACE_NOVELTY_ENABLED": "true"}):
+            info = self._run(
+                novelty.compute_novelty_for_write(
+                    "existing drawer about NCD compression scoring",
+                    "wing_test", "discoveries", mock_call,
+                )
+            )
+        # Window populated from content_preview → real scoring, not no_window.
+        self.assertEqual(info["status"], "ok")
+        self.assertEqual(info["window_size"], 2)
+        # Content matches a window entry, so it must score as low-novelty.
+        self.assertLess(info["novelty_score"], 0.5)
+
     def test_call_failure_returns_default(self):
         mock_call = AsyncMock(side_effect=Exception("connection refused"))
         with patch.dict(os.environ, {"PALACE_NOVELTY_ENABLED": "true"}):
