@@ -109,6 +109,11 @@ def _stdio_loop(handle_line):
             request = json.loads(line)
         except json.JSONDecodeError:
             continue
+        # Only single JSON-RPC objects are supported. A batch (list) or a
+        # bare scalar/null would make request.get(...) raise AttributeError
+        # and crash the loop — skip them like a parse error.
+        if not isinstance(request, dict):
+            continue
         response = handle_line(request)
         if response is not None and request.get("id") is not None:
             print(json.dumps(response), flush=True)
@@ -116,6 +121,11 @@ def _stdio_loop(handle_line):
 
 def run_daemon_mode(daemon_url: str, mcp_mode: str = "all"):
     def handle(request):
+        # Defensive: a non-dict request (batch list, scalar, null) has no
+        # .get — skip it rather than crash. _stdio_loop already filters
+        # these, but guard here too so handle() is safe in isolation.
+        if not isinstance(request, dict):
+            return None
         if mcp_mode == "cli-only":
             method = request.get("method")
             # tools/list → advertise zero tools without forwarding, so the
