@@ -62,7 +62,7 @@ import rerank as _rerank
 
 # ── Config (env vars override CLI defaults) ───────────────────────────────────
 
-VERSION = "1.8.3"
+VERSION = "1.8.4"
 DEFAULT_HOST = os.getenv("PALACE_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.getenv("PALACE_PORT", "8085"))
 DEFAULT_PALACE = os.getenv("PALACE_PATH", "")
@@ -328,6 +328,17 @@ async def _watchdog_loop(interval_secs: int) -> None:
             await asyncio.sleep(tick)
         except asyncio.CancelledError:
             return
+        # During mode=rebuild, send the keepalive unconditionally and skip the
+        # probe. A rebuild holds _exclusive_palace() with the client/collection
+        # caches nulled (see the /repair handler), so _get_collection() can
+        # return None or block for the whole 6-9h operation. The health-gate
+        # below would then withhold WATCHDOG=1 and systemd would SIGABRT the
+        # daemon mid-rebuild — exactly when a kill is most destructive. Keep
+        # feeding the watchdog; the rebuild is a known long-running operation
+        # we want to run to completion.
+        if _repair_state.get("in_progress") and _repair_state.get("mode") == "rebuild":
+            _sd_notify("WATCHDOG=1\n")
+            continue
         try:
             loop = asyncio.get_running_loop()
             col = await loop.run_in_executor(None, _mp._get_collection)
