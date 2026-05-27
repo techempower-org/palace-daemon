@@ -7,7 +7,7 @@
 # depends on a live palace).
 #
 # Usage:
-#   PALACE_DAEMON_URL=http://familiar.jphe.in:8085 \
+#   PALACE_DAEMON_URL=http://familiar:8085 \
 #   PALACE_API_KEY=... \
 #       scripts/verify-routes.sh
 

@@ -6,10 +6,10 @@
 # sourced as bash, so quote values and don't add side effects.
 
 # ssh target running the daemon (required unless PALACE_DAEMON_URL is set).
-# PALACE_HOST="familiar.jphe.in"
+# PALACE_HOST="familiar"
 
 # Base URL to poll for /health. Defaults to http://${PALACE_HOST}:8085.
-# PALACE_DAEMON_URL="http://familiar.jphe.in:8085"
+# PALACE_DAEMON_URL="http://familiar:8085"
 
 # x-api-key for the post-deploy route smoke test. Leave unset for an
 # auth-less daemon. Prefer sourcing from a secret store over hardcoding.

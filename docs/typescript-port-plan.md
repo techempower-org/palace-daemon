@@ -170,7 +170,7 @@ binary and binds a port.
 `/search`, `/context` via subprocess bridge to Python mempalace. Direct
 sqlite reads for the wing/room/KG aggregation parts — those don't go
 through subprocess, just bun:sqlite. Smoke-test against
-`http://familiar.jphe.in:8085`'s palace via parity diffs (TS daemon points
+`http://familiar:8085`'s palace via parity diffs (TS daemon points
 at the same palace path; outputs should match the Python daemon byte-
 for-byte modulo timing fields).
 
