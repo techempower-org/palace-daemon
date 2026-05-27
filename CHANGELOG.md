@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.8.4 — 2026-05-27
+
+### Fixed — *watchdog no longer starves the systemd keepalive during a rebuild*
+
+`_watchdog_loop` is health-gated: it withholds `WATCHDOG=1` whenever the
+palace `_get_collection()` probe returns `None` or throws, so a genuinely
+wedged daemon gets killed and restarted by systemd. But a `mode=rebuild`
+repair holds `_exclusive_palace()` with the client/collection caches
+nulled for the entire operation (6-9h on a large palace — see the
+`/repair` handler). During that window the probe returns `None`, so the
+health-gate would withhold the keepalive and systemd would **SIGABRT the
+daemon mid-rebuild** — the most destructive possible moment for a kill.
+
+The loop now detects `in_progress + mode == "rebuild"` and sends
+`WATCHDOG=1` **unconditionally**, skipping the probe entirely. Outside a
+rebuild (and for non-rebuild repairs like `light`/`scan`/`prune`, which
+don't null the caches) the original health-gated behavior is preserved.
+
+This is currently **latent** on our deployment — the `palace-daemon.service`
+unit ships without `WatchdogSec=`, so the loop doesn't run — but it is a
+footgun: adding a watchdog timer (a natural hardening step for a
+`Restart=always` service) would otherwise turn every long rebuild into a
+kill. Mirrors the philosophy of upstream `0315d97`, adapted to this fork's
+differently-structured (health-gated) loop.
+
+Triage notes for the rest of the upstream watchdog/stats batch:
+`c61f2ba` (serialize `/stats` tool calls) targets chroma's HNSW SIGBUS
+under concurrent reads and is **N/A** on the postgres backend (serializing
+would only add latency); the crash-loop detection from `aa9320d` (#21) is
+**already present** here, with auto-recovery that upstream lacks.
+
 ## 1.8.3 — 2026-05-27
 
 ### Fixed — *`/mine` no longer corrupts the chroma log store (#29)*
