@@ -408,6 +408,14 @@ _MCP_TIMEOUT_EXEMPT = {
 }
 
 
+# Valid /mine request values, shared by the live endpoint and the rebuild
+# drain replay. Kept module-level so the two paths can't drift — a previous
+# local redefinition let "session" mode diverge, silently dropping queued
+# session mines on drain (Copilot finding on jphein/palace-daemon#5).
+_MINE_VALID_MODES = {"convos", "projects", "session"}
+_MINE_VALID_EXTRACTS = {"exchange", "general"}
+
+
 def _check_auth(x_api_key: str | None):
     key = os.getenv("PALACE_API_KEY", "")
     if not key:
@@ -717,12 +725,10 @@ async def _drain_pending_mines() -> int:
                 failed_lines.append(line)
         # Replay in original order
         unique_entries.reverse()
-        # Same valid-mode/extract sets as the live /mine endpoint —
-        # apply them on replay too so a queue entry can't smuggle through
-        # a value the live endpoint would reject (Copilot finding on
-        # jphein/palace-daemon#4).
-        VALID_MODES = {"convos", "projects"}
-        VALID_EXTRACTS = {"exchange", "general"}
+        # Module-level _MINE_VALID_* sets, shared with the live /mine
+        # endpoint — apply them on replay too so a queue entry can't smuggle
+        # through a value the live endpoint would reject, and the two paths
+        # can't drift (Copilot findings on jphein/palace-daemon#4 and #5).
         for line, entry in unique_entries:
             try:
                 payload = entry["payload"]
@@ -743,11 +749,11 @@ async def _drain_pending_mines() -> int:
                     continue
                 wing = payload.get("wing", "general")
                 mode = payload.get("mode", "convos")
-                if mode not in VALID_MODES:
+                if mode not in _MINE_VALID_MODES:
                     _log.warning("drain-mine: skipping %s — invalid mode %r", directory, mode)
                     continue
                 extract = payload.get("extract")
-                if extract is not None and extract not in VALID_EXTRACTS:
+                if extract is not None and extract not in _MINE_VALID_EXTRACTS:
                     _log.warning(
                         "drain-mine: skipping %s — invalid extract %r", directory, extract
                     )
@@ -783,7 +789,7 @@ async def _drain_pending_mines() -> int:
                         "drain-mine: replay returned %s for %s\n  stderr: %s",
                         proc.returncode,
                         directory,
-                        (stderr or b"").decode(errors="replace")[:300],
+                        (stderr or b"")[:1200].decode(errors="replace")[:300],
                     )
                     failed_lines.append(line)
             except Exception:
@@ -1106,8 +1112,8 @@ async def lifespan(app: FastAPI):
                     "watcher mine returned %s for %s\n  stderr: %s\n  stdout: %s",
                     proc.returncode,
                     path,
-                    (stderr or b"").decode(errors="replace")[:500],
-                    (stdout or b"").decode(errors="replace")[-500:],
+                    (stderr or b"")[:2000].decode(errors="replace")[:500],
+                    (stdout or b"")[-2000:].decode(errors="replace")[-500:],
                 )
 
         watcher = WatcherService(make_async_mine_fn(loop, _internal_mine))
@@ -3039,12 +3045,10 @@ async def mine(request: Request, x_api_key: str | None = Header(default=None)):
     extract = body.get("extract")
     limit = body.get("limit")
 
-    _VALID_MODES = {"convos", "projects", "session"}
-    _VALID_EXTRACTS = {"exchange", "general"}
-    if mode not in _VALID_MODES:
-        raise HTTPException(status_code=400, detail=f"'mode' must be one of: {', '.join(_VALID_MODES)}")
-    if extract is not None and extract not in _VALID_EXTRACTS:
-        raise HTTPException(status_code=400, detail=f"'extract' must be one of: {', '.join(_VALID_EXTRACTS)}")
+    if mode not in _MINE_VALID_MODES:
+        raise HTTPException(status_code=400, detail=f"'mode' must be one of: {', '.join(sorted(_MINE_VALID_MODES))}")
+    if extract is not None and extract not in _MINE_VALID_EXTRACTS:
+        raise HTTPException(status_code=400, detail=f"'extract' must be one of: {', '.join(sorted(_MINE_VALID_EXTRACTS))}")
     if limit is not None:
         try:
             limit = int(limit)

@@ -159,6 +159,30 @@ class TestEnqueueAndDrain(unittest.IsolatedAsyncioTestCase):
         self.assertIn("--limit", argv)
         self.assertEqual(argv[argv.index("--limit") + 1], "100")
 
+    async def test_drain_replays_session_mode(self):
+        """Regression for Copilot finding on jphein/palace-daemon#5 — the
+        drain's local VALID_MODES had drifted to {convos, projects},
+        silently dropping queued ``session`` mines that the live /mine
+        endpoint accepts. Both paths now share _MINE_VALID_MODES."""
+        self.assertIn("session", main._MINE_VALID_MODES)
+        await main._enqueue_pending_mine({"dir": "/a", "wing": "wa", "mode": "session"})
+
+        captured_argv = []
+
+        async def _fake_subprocess(*args, **kwargs):
+            captured_argv.append(list(args))
+            proc = MagicMock()
+            proc.communicate = AsyncMock(return_value=(b"", b""))
+            proc.returncode = 0
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=_fake_subprocess):
+            count = await main._drain_pending_mines()
+
+        self.assertEqual(count, 1, "session-mode mine must survive the drain")
+        argv = captured_argv[0]
+        self.assertEqual(argv[argv.index("--mode") + 1], "session")
+
     async def test_drain_skips_invalid_payload_fields(self):
         """Closes Copilot finding on jphein/palace-daemon#4 — drain
         previously skipped only is_dir() check; now also enforces
