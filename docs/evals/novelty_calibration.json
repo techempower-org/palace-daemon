@@ -1,0 +1,2571 @@
+{
+  "config": {
+    "mode": "full-content",
+    "window": 20,
+    "per_group": 8,
+    "seed": 47,
+    "use_preview": false,
+    "groups_sampled": 35,
+    "groups_empty": 0,
+    "scored": 280,
+    "full_content_fetches": 980
+  },
+  "overall": {
+    "n": 280,
+    "min": 0.0284,
+    "p05": 0.1257,
+    "p10": 0.1652,
+    "p25": 0.4015,
+    "median": 0.6219,
+    "mean": 0.558,
+    "p75": 0.7254,
+    "p90": 0.7846,
+    "p95": 0.8208,
+    "max": 0.9524,
+    "stdev": 0.2223
+  },
+  "per_room": {
+    "architecture": {
+      "n": 40,
+      "min": 0.1438,
+      "p05": 0.3339,
+      "p10": 0.3631,
+      "p25": 0.5611,
+      "median": 0.6486,
+      "mean": 0.6097,
+      "p75": 0.7182,
+      "p90": 0.7756,
+      "p95": 0.7985,
+      "max": 0.8224,
+      "stdev": 0.1623
+    },
+    "references": {
+      "n": 144,
+      "min": 0.037,
+      "p05": 0.1033,
+      "p10": 0.1729,
+      "p25": 0.4688,
+      "median": 0.6355,
+      "mean": 0.5695,
+      "p75": 0.7312,
+      "p90": 0.7812,
+      "p95": 0.8094,
+      "max": 0.9524,
+      "stdev": 0.2227
+    },
+    "planning": {
+      "n": 32,
+      "min": 0.3509,
+      "p05": 0.366,
+      "p10": 0.4958,
+      "p25": 0.5886,
+      "median": 0.6765,
+      "mean": 0.6634,
+      "p75": 0.7547,
+      "p90": 0.821,
+      "p95": 0.8684,
+      "max": 0.8724,
+      "stdev": 0.1381
+    },
+    "problems": {
+      "n": 24,
+      "min": 0.1571,
+      "p05": 0.1646,
+      "p10": 0.2145,
+      "p25": 0.3815,
+      "median": 0.6373,
+      "mean": 0.5476,
+      "p75": 0.7177,
+      "p90": 0.7909,
+      "p95": 0.8099,
+      "max": 0.8267,
+      "stdev": 0.2208
+    },
+    "discoveries": {
+      "n": 40,
+      "min": 0.0284,
+      "p05": 0.0668,
+      "p10": 0.1257,
+      "p25": 0.1465,
+      "median": 0.3044,
+      "mean": 0.3867,
+      "p75": 0.5867,
+      "p90": 0.7052,
+      "p95": 0.7479,
+      "max": 0.8245,
+      "stdev": 0.2346
+    }
+  },
+  "per_wing": {
+    "storyvox": {
+      "n": 32,
+      "min": 0.3414,
+      "p05": 0.4852,
+      "p10": 0.5266,
+      "p25": 0.6589,
+      "median": 0.7303,
+      "mean": 0.7017,
+      "p75": 0.7887,
+      "p90": 0.8201,
+      "p95": 0.8241,
+      "max": 0.8724,
+      "stdev": 0.1203
+    },
+    "palace_daemon": {
+      "n": 16,
+      "min": 0.0429,
+      "p05": 0.0429,
+      "p10": 0.0483,
+      "p25": 0.1555,
+      "median": 0.2995,
+      "mean": 0.3468,
+      "p75": 0.5377,
+      "p90": 0.7242,
+      "p95": 0.7663,
+      "max": 0.8245,
+      "stdev": 0.2582
+    },
+    "familiar_realm_watch": {
+      "n": 24,
+      "min": 0.1571,
+      "p05": 0.2045,
+      "p10": 0.2616,
+      "p25": 0.4274,
+      "median": 0.5718,
+      "mean": 0.5254,
+      "p75": 0.6454,
+      "p90": 0.7615,
+      "p95": 0.7684,
+      "max": 0.807,
+      "stdev": 0.1823
+    },
+    "multipass_structural_memory_eval": {
+      "n": 16,
+      "min": 0.5763,
+      "p05": 0.5902,
+      "p10": 0.6021,
+      "p25": 0.6485,
+      "median": 0.762,
+      "mean": 0.7365,
+      "p75": 0.8041,
+      "p90": 0.8687,
+      "p95": 0.8916,
+      "max": 0.9524,
+      "stdev": 0.108
+    },
+    "kiyo_xhci_fix": {
+      "n": 16,
+      "min": 0.503,
+      "p05": 0.5112,
+      "p10": 0.5371,
+      "p25": 0.5688,
+      "median": 0.6028,
+      "mean": 0.615,
+      "p75": 0.6765,
+      "p90": 0.701,
+      "p95": 0.7129,
+      "max": 0.7391,
+      "stdev": 0.067
+    },
+    "opencode": {
+      "n": 16,
+      "min": 0.2156,
+      "p05": 0.2397,
+      "p10": 0.261,
+      "p25": 0.2876,
+      "median": 0.4166,
+      "mean": 0.4578,
+      "p75": 0.6273,
+      "p90": 0.6852,
+      "p95": 0.7326,
+      "max": 0.7366,
+      "stdev": 0.186
+    },
+    "projects": {
+      "n": 24,
+      "min": 0.1257,
+      "p05": 0.1257,
+      "p10": 0.1275,
+      "p25": 0.1444,
+      "median": 0.3659,
+      "mean": 0.4055,
+      "p75": 0.6097,
+      "p90": 0.7287,
+      "p95": 0.7456,
+      "max": 0.7698,
+      "stdev": 0.2306
+    },
+    "memorypalace": {
+      "n": 16,
+      "min": 0.3833,
+      "p05": 0.4184,
+      "p10": 0.439,
+      "p25": 0.6226,
+      "median": 0.7005,
+      "mean": 0.6595,
+      "p75": 0.7507,
+      "p90": 0.7989,
+      "p95": 0.8283,
+      "max": 0.8458,
+      "stdev": 0.1372
+    },
+    "techempower": {
+      "n": 24,
+      "min": 0.1438,
+      "p05": 0.1852,
+      "p10": 0.4043,
+      "p25": 0.5611,
+      "median": 0.6363,
+      "mean": 0.6133,
+      "p75": 0.7109,
+      "p90": 0.8217,
+      "p95": 0.8444,
+      "max": 0.8771,
+      "stdev": 0.1822
+    }
+  },
+  "histogram_bins": [
+    {
+      "lo": 0.0,
+      "hi": 0.05,
+      "count": 6
+    },
+    {
+      "lo": 0.05,
+      "hi": 0.1,
+      "count": 4
+    },
+    {
+      "lo": 0.1,
+      "hi": 0.15,
+      "count": 13
+    },
+    {
+      "lo": 0.15,
+      "hi": 0.2,
+      "count": 10
+    },
+    {
+      "lo": 0.2,
+      "hi": 0.25,
+      "count": 4
+    },
+    {
+      "lo": 0.25,
+      "hi": 0.3,
+      "count": 13
+    },
+    {
+      "lo": 0.3,
+      "hi": 0.35,
+      "count": 11
+    },
+    {
+      "lo": 0.35,
+      "hi": 0.4,
+      "count": 9
+    },
+    {
+      "lo": 0.4,
+      "hi": 0.45,
+      "count": 5
+    },
+    {
+      "lo": 0.45,
+      "hi": 0.5,
+      "count": 8
+    },
+    {
+      "lo": 0.5,
+      "hi": 0.55,
+      "count": 10
+    },
+    {
+      "lo": 0.55,
+      "hi": 0.6,
+      "count": 34
+    },
+    {
+      "lo": 0.6,
+      "hi": 0.65,
+      "count": 29
+    },
+    {
+      "lo": 0.65,
+      "hi": 0.7,
+      "count": 37
+    },
+    {
+      "lo": 0.7,
+      "hi": 0.75,
+      "count": 37
+    },
+    {
+      "lo": 0.75,
+      "hi": 0.8,
+      "count": 28
+    },
+    {
+      "lo": 0.8,
+      "hi": 0.85,
+      "count": 17
+    },
+    {
+      "lo": 0.85,
+      "hi": 0.9,
+      "count": 4
+    },
+    {
+      "lo": 0.9,
+      "hi": 0.95,
+      "count": 0
+    },
+    {
+      "lo": 0.95,
+      "hi": 1.0,
+      "count": 1
+    }
+  ],
+  "records": [
+    {
+      "drawer_id": "drawer_storyvox_architecture_9c2a66de445998d6a3b7c1e5",
+      "wing": "storyvox",
+      "room": "architecture",
+      "novelty_score": 0.8209,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_architecture_2f8038b4e0c327fb75621d01",
+      "wing": "storyvox",
+      "room": "architecture",
+      "novelty_score": 0.7159,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_architecture_23af2fe135362c8292d8c5a5",
+      "wing": "storyvox",
+      "room": "architecture",
+      "novelty_score": 0.761,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_architecture_19e94ba692dfa4176359b36a",
+      "wing": "storyvox",
+      "room": "architecture",
+      "novelty_score": 0.7788,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_architecture_1805a13e0e869d219fc487f6",
+      "wing": "storyvox",
+      "room": "architecture",
+      "novelty_score": 0.6987,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_architecture_806014020f504fadf872b3f3",
+      "wing": "storyvox",
+      "room": "architecture",
+      "novelty_score": 0.7351,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_architecture_381b585c8bf18735054ce499",
+      "wing": "storyvox",
+      "room": "architecture",
+      "novelty_score": 0.6866,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_architecture_f10656b8f71e4f0344010e90",
+      "wing": "storyvox",
+      "room": "architecture",
+      "novelty_score": 0.7973,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_palace_daemon_references_54c4131c45c05159c14f6f73",
+      "wing": "palace_daemon",
+      "room": "references",
+      "novelty_score": 0.0429,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_palace_daemon_references_edcd66c796fbbaace97391dd",
+      "wing": "palace_daemon",
+      "room": "references",
+      "novelty_score": 0.2314,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_palace_daemon_references_2fb75eaa29a49133354c6228",
+      "wing": "palace_daemon",
+      "room": "references",
+      "novelty_score": 0.0536,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_palace_daemon_references_fda8adb1e925249263396426",
+      "wing": "palace_daemon",
+      "room": "references",
+      "novelty_score": 0.0429,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_palace_daemon_references_1d5f82c8214190ee1f997e09",
+      "wing": "palace_daemon",
+      "room": "references",
+      "novelty_score": 0.2992,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_palace_daemon_references_cf5a37b7f54514de46714a0d",
+      "wing": "palace_daemon",
+      "room": "references",
+      "novelty_score": 0.0536,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_palace_daemon_references_eabd381999c1703e8a1803e3",
+      "wing": "palace_daemon",
+      "room": "references",
+      "novelty_score": 0.3191,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_palace_daemon_references_54c1649adb42eabad5b6c6fa",
+      "wing": "palace_daemon",
+      "room": "references",
+      "novelty_score": 0.2588,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_realmwatch_technical_99d0a2b3e5ecd91dd990558d",
+      "wing": "realmwatch",
+      "room": "references",
+      "novelty_score": 0.5495,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_realmwatch_technical_9e6c4351c1566e88af37f892",
+      "wing": "realmwatch",
+      "room": "references",
+      "novelty_score": 0.5785,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_realmwatch_technical_014db82fe630b9cf0b8c5c76",
+      "wing": "realmwatch",
+      "room": "references",
+      "novelty_score": 0.5049,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_realmwatch_technical_2eb0ebc3d5854a3d54d78ac4",
+      "wing": "realmwatch",
+      "room": "references",
+      "novelty_score": 0.5926,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_realmwatch_technical_58c7d0a315d2ad9c9516046c",
+      "wing": "realmwatch",
+      "room": "references",
+      "novelty_score": 0.7314,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_realmwatch_technical_61d6f59b22901f3b7cb7ab43",
+      "wing": "realmwatch",
+      "room": "references",
+      "novelty_score": 0.7449,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_realmwatch_technical_a9cab067186f0af71378edc3",
+      "wing": "realmwatch",
+      "room": "references",
+      "novelty_score": 0.67,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_realmwatch_technical_74cf3ab41cb137745fdb90e0",
+      "wing": "realmwatch",
+      "room": "references",
+      "novelty_score": 0.7802,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_technical_218242324aabaa0a15036538",
+      "wing": "familiar_realm_watch",
+      "room": "references",
+      "novelty_score": 0.6885,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_technical_f0e34ebbab102959d457ec78",
+      "wing": "familiar_realm_watch",
+      "room": "references",
+      "novelty_score": 0.564,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_technical_2359022459c3342a9073a9e6",
+      "wing": "familiar_realm_watch",
+      "room": "references",
+      "novelty_score": 0.7628,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_technical_554dfbf0beacd0f7353cfcac",
+      "wing": "familiar_realm_watch",
+      "room": "references",
+      "novelty_score": 0.807,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_technical_afa583d7edc5c95ff98de465",
+      "wing": "familiar_realm_watch",
+      "room": "references",
+      "novelty_score": 0.7694,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_technical_ad0359f40813af576a1e1bbf",
+      "wing": "familiar_realm_watch",
+      "room": "references",
+      "novelty_score": 0.7586,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_technical_b2d715d8a9e5cc8fe17fd94b",
+      "wing": "familiar_realm_watch",
+      "room": "references",
+      "novelty_score": 0.6341,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_technical_be1e1b1f86897bdb3f0e6b27",
+      "wing": "familiar_realm_watch",
+      "room": "references",
+      "novelty_score": 0.6792,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_multipass_structural_memory_eval_planning_a3838b56a2ceec088c960273",
+      "wing": "multipass_structural_memory_eval",
+      "room": "planning",
+      "novelty_score": 0.7496,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_multipass_structural_memory_eval_planning_cb8d08d84cec3d4075543bba",
+      "wing": "multipass_structural_memory_eval",
+      "room": "planning",
+      "novelty_score": 0.8714,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_multipass_structural_memory_eval_planning_7faef331d00ef6e900ff31b4",
+      "wing": "multipass_structural_memory_eval",
+      "room": "planning",
+      "novelty_score": 0.6597,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_multipass_structural_memory_eval_planning_9529b1ef1e33cd52a303d4fb",
+      "wing": "multipass_structural_memory_eval",
+      "room": "planning",
+      "novelty_score": 0.866,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_multipass_structural_memory_eval_planning_52233380f22b5108b33a0e93",
+      "wing": "multipass_structural_memory_eval",
+      "room": "planning",
+      "novelty_score": 0.6148,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_multipass_structural_memory_eval_planning_0f4c144038661c61224a9691",
+      "wing": "multipass_structural_memory_eval",
+      "room": "planning",
+      "novelty_score": 0.8114,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_multipass_structural_memory_eval_planning_d9f58d5ee2e51961fc5ce7c9",
+      "wing": "multipass_structural_memory_eval",
+      "room": "planning",
+      "novelty_score": 0.6712,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_multipass_structural_memory_eval_planning_f7ce23d38330b69417d65fbb",
+      "wing": "multipass_structural_memory_eval",
+      "room": "planning",
+      "novelty_score": 0.7744,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_artcardsv5_technical_d6c2e2fdd6033e8786d85f72",
+      "wing": "artcardsv5",
+      "room": "references",
+      "novelty_score": 0.7425,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_artcardsv5_technical_e78b57d85c0a40030d1e75b3",
+      "wing": "artcardsv5",
+      "room": "references",
+      "novelty_score": 0.8098,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_artcardsv5_technical_f6e0775667a48c929427f118",
+      "wing": "artcardsv5",
+      "room": "references",
+      "novelty_score": 0.8279,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_artcardsv5_technical_c71bfbeb282c1d733b0b1bdd",
+      "wing": "artcardsv5",
+      "room": "references",
+      "novelty_score": 0.7652,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_artcardsv5_technical_f2e2e69a61b64900175805c6",
+      "wing": "artcardsv5",
+      "room": "references",
+      "novelty_score": 0.7444,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_artcardsv5_technical_3b732804c0349c8012f61604",
+      "wing": "artcardsv5",
+      "room": "references",
+      "novelty_score": 0.7785,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_artcardsv5_technical_883422121cc06cf48d7522e8",
+      "wing": "artcardsv5",
+      "room": "references",
+      "novelty_score": 0.6892,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_artcardsv5_technical_b17bab0798ba37df888cc49c",
+      "wing": "artcardsv5",
+      "room": "references",
+      "novelty_score": 0.5625,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_sessions_architecture_30013297301fa72a02e9ee33",
+      "wing": "kiyo_xhci_fix",
+      "room": "architecture",
+      "novelty_score": 0.6093,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_sessions_architecture_f20a0b8597b5125e1b8cbbf4",
+      "wing": "kiyo_xhci_fix",
+      "room": "architecture",
+      "novelty_score": 0.5695,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_sessions_architecture_eb7875f1d025a7ab0fb89f01",
+      "wing": "kiyo_xhci_fix",
+      "room": "architecture",
+      "novelty_score": 0.5603,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_sessions_architecture_6cb42dae0c3f4881e76c1a75",
+      "wing": "kiyo_xhci_fix",
+      "room": "architecture",
+      "novelty_score": 0.6055,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_sessions_architecture_05246bfdb663950eddc58e14",
+      "wing": "kiyo_xhci_fix",
+      "room": "architecture",
+      "novelty_score": 0.5139,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_sessions_architecture_17ff0faf5ea9990b71399b12",
+      "wing": "kiyo_xhci_fix",
+      "room": "architecture",
+      "novelty_score": 0.625,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_sessions_architecture_ed06e8233d81540ab08e99e8",
+      "wing": "kiyo_xhci_fix",
+      "room": "architecture",
+      "novelty_score": 0.5667,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_sessions_architecture_64934f2c6d9bf04afbb515bf",
+      "wing": "kiyo_xhci_fix",
+      "room": "architecture",
+      "novelty_score": 0.6972,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_opus_816a83309d629d34e6310cd7",
+      "wing": "opus",
+      "room": "references",
+      "novelty_score": 0.6029,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_opus_42789d62511fdae48f156896",
+      "wing": "opus",
+      "room": "references",
+      "novelty_score": 0.6369,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_opus_8c783376ac7ee01ba1e5b1d8",
+      "wing": "opus",
+      "room": "references",
+      "novelty_score": 0.5843,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_opus_f192e7ff7e64475f2ebf4f06",
+      "wing": "opus",
+      "room": "references",
+      "novelty_score": 0.6057,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_opus_046e5b1f22cca24d0cedf1ab",
+      "wing": "opus",
+      "room": "references",
+      "novelty_score": 0.6057,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_opus_cde59a9d4e4a457a4ae98823",
+      "wing": "opus",
+      "room": "references",
+      "novelty_score": 0.5836,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_opus_ad8519e9ad2380347079438a",
+      "wing": "opus",
+      "room": "references",
+      "novelty_score": 0.6113,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_opus_120ca67163158687fb340773",
+      "wing": "opus",
+      "room": "references",
+      "novelty_score": 0.5944,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_claude_code_python_4b6a53ef790597c3bb7397ad",
+      "wing": "claude_code_python",
+      "room": "references",
+      "novelty_score": 0.2941,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_claude_code_python_37217d719c05405109c73936",
+      "wing": "claude_code_python",
+      "room": "references",
+      "novelty_score": 0.27,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_claude_code_python_35db066d8ddad4449274cda8",
+      "wing": "claude_code_python",
+      "room": "references",
+      "novelty_score": 0.3092,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_claude_code_python_cbe260a95f79295ba27e2a70",
+      "wing": "claude_code_python",
+      "room": "references",
+      "novelty_score": 0.2899,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_claude_code_python_0f8d31021ca0b6cb63951800",
+      "wing": "claude_code_python",
+      "room": "references",
+      "novelty_score": 0.2646,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_claude_code_python_92fc19dd0f24bf545f90c863",
+      "wing": "claude_code_python",
+      "room": "references",
+      "novelty_score": 0.3333,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_claude_code_python_a8bdc4731e30dcb1d7a000cf",
+      "wing": "claude_code_python",
+      "room": "references",
+      "novelty_score": 0.3871,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_claude_code_python_04a39420b2c1d2175933fc4a",
+      "wing": "claude_code_python",
+      "room": "references",
+      "novelty_score": 0.3088,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_multipass_structural_memory_eval_references_4ff74f86f20da244c46e2449",
+      "wing": "multipass_structural_memory_eval",
+      "room": "references",
+      "novelty_score": 0.6094,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_multipass_structural_memory_eval_references_e8b918c9c804f6bc6a60c3e5",
+      "wing": "multipass_structural_memory_eval",
+      "room": "references",
+      "novelty_score": 0.7764,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_multipass_structural_memory_eval_references_87127f1f805f816807a88c2f",
+      "wing": "multipass_structural_memory_eval",
+      "room": "references",
+      "novelty_score": 0.9524,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_multipass_structural_memory_eval_references_f6fab344b4653cf6372e0408",
+      "wing": "multipass_structural_memory_eval",
+      "room": "references",
+      "novelty_score": 0.5763,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_multipass_structural_memory_eval_references_a5c73c0f71544b9519bb42ca",
+      "wing": "multipass_structural_memory_eval",
+      "room": "references",
+      "novelty_score": 0.5949,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_multipass_structural_memory_eval_references_508ff8fe07499f0f4c94ba95",
+      "wing": "multipass_structural_memory_eval",
+      "room": "references",
+      "novelty_score": 0.6776,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_multipass_structural_memory_eval_references_c9cc38a79dff4c6deb794b6f",
+      "wing": "multipass_structural_memory_eval",
+      "room": "references",
+      "novelty_score": 0.8017,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_multipass_structural_memory_eval_references_90f475fe888e0e8604735d59",
+      "wing": "multipass_structural_memory_eval",
+      "room": "references",
+      "novelty_score": 0.7766,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_jewelrycycle_recovery_cae4bd17bf340e357f1d646b",
+      "wing": "jewelrycycle",
+      "room": "problems",
+      "novelty_score": 0.1593,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_jewelrycycle_recovery_76c9831dbc18d68a530a6b87",
+      "wing": "jewelrycycle",
+      "room": "problems",
+      "novelty_score": 0.6798,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_jewelrycycle_recovery_6d5c56060266059dc3e8b52f",
+      "wing": "jewelrycycle",
+      "room": "problems",
+      "novelty_score": 0.6995,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_jewelrycycle_recovery_319e3e05b470dede75125e08",
+      "wing": "jewelrycycle",
+      "room": "problems",
+      "novelty_score": 0.6518,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_jewelrycycle_recovery_e9427148bb2a408e3d7b062e",
+      "wing": "jewelrycycle",
+      "room": "problems",
+      "novelty_score": 0.6231,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_jewelrycycle_recovery_cbc7b5138d16357224dc2c08",
+      "wing": "jewelrycycle",
+      "room": "problems",
+      "novelty_score": 0.5471,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_jewelrycycle_recovery_fde53f0f2a94a3a9799aaa3a",
+      "wing": "jewelrycycle",
+      "room": "problems",
+      "novelty_score": 0.6515,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_jewelrycycle_recovery_7a9d91ce09c4966c07985d0d",
+      "wing": "jewelrycycle",
+      "room": "problems",
+      "novelty_score": 0.4971,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_opencode_references_f6a0d606787257cc8fbb15a8",
+      "wing": "opencode",
+      "room": "references",
+      "novelty_score": 0.6311,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_opencode_references_0ce096c388e55db57706bcd7",
+      "wing": "opencode",
+      "room": "references",
+      "novelty_score": 0.6393,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_opencode_references_d8d3f26880305f0cfab31d69",
+      "wing": "opencode",
+      "room": "references",
+      "novelty_score": 0.6087,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_opencode_references_cdcdf141c337a44823164ae1",
+      "wing": "opencode",
+      "room": "references",
+      "novelty_score": 0.5987,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_opencode_references_0501585c78ac8ae54a84f0a9",
+      "wing": "opencode",
+      "room": "references",
+      "novelty_score": 0.7366,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_opencode_references_82992d9ec3fa4056a0b3cf4b",
+      "wing": "opencode",
+      "room": "references",
+      "novelty_score": 0.7312,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_opencode_references_f418be99535f62cee5a5a0cb",
+      "wing": "opencode",
+      "room": "references",
+      "novelty_score": 0.5211,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_opencode_references_f5242bf56605e0211c9f64b0",
+      "wing": "opencode",
+      "room": "references",
+      "novelty_score": 0.626,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_sessions_technical_111a1dcf7ef9db4f3f41405a",
+      "wing": "kiyo_xhci_fix",
+      "room": "references",
+      "novelty_score": 0.6979,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_sessions_technical_4cf73075c4b8e743144542b6",
+      "wing": "kiyo_xhci_fix",
+      "room": "references",
+      "novelty_score": 0.5904,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_sessions_technical_c5fe14e82a6fc1254492ae2d",
+      "wing": "kiyo_xhci_fix",
+      "room": "references",
+      "novelty_score": 0.7042,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_sessions_technical_bdce7e116f675c325e5a620e",
+      "wing": "kiyo_xhci_fix",
+      "room": "references",
+      "novelty_score": 0.503,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_sessions_technical_df53a8d52e70d5c1a5fb4747",
+      "wing": "kiyo_xhci_fix",
+      "room": "references",
+      "novelty_score": 0.6,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_sessions_technical_2edbfa2fc3b82e051a844742",
+      "wing": "kiyo_xhci_fix",
+      "room": "references",
+      "novelty_score": 0.5882,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_sessions_technical_54de466dfd36a6e9d3805415",
+      "wing": "kiyo_xhci_fix",
+      "room": "references",
+      "novelty_score": 0.7391,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_sessions_technical_de9e7fa0864bbadb65ecf510",
+      "wing": "kiyo_xhci_fix",
+      "room": "references",
+      "novelty_score": 0.6696,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_problems_86b5eedc652188b2d8a4e87c",
+      "wing": "familiar_realm_watch",
+      "room": "problems",
+      "novelty_score": 0.4326,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_problems_1936efff9a1238c3ff284685",
+      "wing": "familiar_realm_watch",
+      "room": "problems",
+      "novelty_score": 0.2905,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_problems_673edec844cd4859c9985f2d",
+      "wing": "familiar_realm_watch",
+      "room": "problems",
+      "novelty_score": 0.4765,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_problems_f7bbfce73c2e4de73dcc01d1",
+      "wing": "familiar_realm_watch",
+      "room": "problems",
+      "novelty_score": 0.2633,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_problems_2193cb622fd053bf9d16a5f1",
+      "wing": "familiar_realm_watch",
+      "room": "problems",
+      "novelty_score": 0.1571,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_problems_24f85fdf0c8ff2242ccabeb4",
+      "wing": "familiar_realm_watch",
+      "room": "problems",
+      "novelty_score": 0.4118,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_problems_eef4656183cfe615910eb0a5",
+      "wing": "familiar_realm_watch",
+      "room": "problems",
+      "novelty_score": 0.1946,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_problems_cafaf99fcd483cb4bab91ee8",
+      "wing": "familiar_realm_watch",
+      "room": "problems",
+      "novelty_score": 0.2609,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_clawwatch_7fcceadb4c684ca450299c1f",
+      "wing": "clawwatch",
+      "room": "references",
+      "novelty_score": 0.6748,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_clawwatch_9685022e1f20ab1aef79f12c",
+      "wing": "clawwatch",
+      "room": "references",
+      "novelty_score": 0.702,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_clawwatch_a7e8b94f2a7dda855a84125a",
+      "wing": "clawwatch",
+      "room": "references",
+      "novelty_score": 0.7286,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_clawwatch_8adbec5b4f9d40725a7320dc",
+      "wing": "clawwatch",
+      "room": "references",
+      "novelty_score": 0.7,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_clawwatch_e65ac56ac7cc33033a0ee441",
+      "wing": "clawwatch",
+      "room": "references",
+      "novelty_score": 0.7133,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_clawwatch_056eedc46ea52555c3d5b9ce",
+      "wing": "clawwatch",
+      "room": "references",
+      "novelty_score": 0.6982,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_clawwatch_0dc2824ac1eb955a175ed1a5",
+      "wing": "clawwatch",
+      "room": "references",
+      "novelty_score": 0.7667,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_clawwatch_4faf6aa3295b143ea2ffd3e4",
+      "wing": "clawwatch",
+      "room": "references",
+      "novelty_score": 0.7192,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_usb_issues_c342bfc0150ff3eece184307",
+      "wing": "usb_issues",
+      "room": "references",
+      "novelty_score": 0.1875,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_usb_issues_612cb994095461d9727c05fd",
+      "wing": "usb_issues",
+      "room": "references",
+      "novelty_score": 0.1659,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_usb_issues_d57527084c69b2759bb3c2e5",
+      "wing": "usb_issues",
+      "room": "references",
+      "novelty_score": 0.1073,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_usb_issues_7f4914b1b0cbe82c45252ac0",
+      "wing": "usb_issues",
+      "room": "references",
+      "novelty_score": 0.1512,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_usb_issues_e43ebdf5c856f02dfe3b614e",
+      "wing": "usb_issues",
+      "room": "references",
+      "novelty_score": 0.1527,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_usb_issues_2e1221cb4bdfbe73d9a2c66c",
+      "wing": "usb_issues",
+      "room": "references",
+      "novelty_score": 0.1667,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_usb_issues_ab96ffb6931d6a79adee3447",
+      "wing": "usb_issues",
+      "room": "references",
+      "novelty_score": 0.119,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_usb_issues_521f53af7a55192a7b12c277",
+      "wing": "usb_issues",
+      "room": "references",
+      "novelty_score": 0.149,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_dreamspace_554532d8692aaf41a76f420f",
+      "wing": "dreamspace",
+      "room": "references",
+      "novelty_score": 0.7669,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_dreamspace_7c83d65c8d078ec8ac54acd6",
+      "wing": "dreamspace",
+      "room": "references",
+      "novelty_score": 0.3978,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_dreamspace_af4a8dde78b4c70bb161f408",
+      "wing": "dreamspace",
+      "room": "references",
+      "novelty_score": 0.2308,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_dreamspace_a3dfdb9fae0b2a0f067247f4",
+      "wing": "dreamspace",
+      "room": "references",
+      "novelty_score": 0.6418,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_dreamspace_30fc3944dc98362da7c2910a",
+      "wing": "dreamspace",
+      "room": "references",
+      "novelty_score": 0.6253,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_dreamspace_e2cdee3fbeb77dcf3daa8adf",
+      "wing": "dreamspace",
+      "room": "references",
+      "novelty_score": 0.5949,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_dreamspace_aa9e432b7c6521ac5340df9b",
+      "wing": "dreamspace",
+      "room": "references",
+      "novelty_score": 0.6448,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_dreamspace_e79ece7517a91773c8aef5c1",
+      "wing": "dreamspace",
+      "room": "references",
+      "novelty_score": 0.616,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_optimize_2890a0c3630d4afa3808f280",
+      "wing": "optimize",
+      "room": "references",
+      "novelty_score": 0.6942,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_optimize_3df227c567b89fde5b8960c4",
+      "wing": "optimize",
+      "room": "references",
+      "novelty_score": 0.6699,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_optimize_2b13665c821adaf9e2942b8c",
+      "wing": "optimize",
+      "room": "references",
+      "novelty_score": 0.7188,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_optimize_bc275d74108e4bea4c91a4fd",
+      "wing": "optimize",
+      "room": "references",
+      "novelty_score": 0.6734,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_optimize_ce161b7f2ffcb0b5d6a1d700",
+      "wing": "optimize",
+      "room": "references",
+      "novelty_score": 0.6498,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_optimize_13391c702f99363daa9c9cb1",
+      "wing": "optimize",
+      "room": "references",
+      "novelty_score": 0.4028,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_optimize_3a70c3200575cad03932c817",
+      "wing": "optimize",
+      "room": "references",
+      "novelty_score": 0.316,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_optimize_dc362fdc1b597dfbed881dd4",
+      "wing": "optimize",
+      "room": "references",
+      "novelty_score": 0.7282,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_general_8f2354f6c1b387734a120549",
+      "wing": "projects",
+      "room": "discoveries",
+      "novelty_score": 0.1398,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_general_c5fb85a5f5bd38329769f289",
+      "wing": "projects",
+      "room": "discoveries",
+      "novelty_score": 0.1317,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_general_f6d2d9228b40ddc7351fc4f2",
+      "wing": "projects",
+      "room": "discoveries",
+      "novelty_score": 0.1459,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_general_86ee089d0a8639934284f523",
+      "wing": "projects",
+      "room": "discoveries",
+      "novelty_score": 0.1257,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_general_1a63bafd8d243a4dda8cad73",
+      "wing": "projects",
+      "room": "discoveries",
+      "novelty_score": 0.1467,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_general_1421c6b9233931010cf52e34",
+      "wing": "projects",
+      "room": "discoveries",
+      "novelty_score": 0.1257,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_general_d356a55c4cb2783f9d91636c",
+      "wing": "projects",
+      "room": "discoveries",
+      "novelty_score": 0.1344,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_general_6b0c462f1f991acda29d1b4b",
+      "wing": "projects",
+      "room": "discoveries",
+      "novelty_score": 0.1257,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_planning_62a0c23bb57704aa4b5075fd",
+      "wing": "projects",
+      "room": "planning",
+      "novelty_score": 0.3669,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_planning_595e9d4ec84779ca50583376",
+      "wing": "projects",
+      "room": "planning",
+      "novelty_score": 0.7471,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_planning_e2b0b13306ee8741cab31707",
+      "wing": "projects",
+      "room": "planning",
+      "novelty_score": 0.7698,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_planning_d0326af37c86e407acb4b8b5",
+      "wing": "projects",
+      "room": "planning",
+      "novelty_score": 0.7374,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_planning_b3aa0330e35257c56abb423c",
+      "wing": "projects",
+      "room": "planning",
+      "novelty_score": 0.7083,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_planning_ac3bceb1da8b1ec975fa800f",
+      "wing": "projects",
+      "room": "planning",
+      "novelty_score": 0.3649,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_planning_2a163d64043813baa0303f6c",
+      "wing": "projects",
+      "room": "planning",
+      "novelty_score": 0.6818,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_planning_88ab9818234068b6f0cc5b53",
+      "wing": "projects",
+      "room": "planning",
+      "novelty_score": 0.6467,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_memorypalace_architecture_791c9038b84d056f098f33ac",
+      "wing": "memorypalace",
+      "room": "architecture",
+      "novelty_score": 0.6737,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_memorypalace_architecture_5cf03fdc8299a8c35f9c8e5e",
+      "wing": "memorypalace",
+      "room": "architecture",
+      "novelty_score": 0.7048,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_memorypalace_architecture_731fc87b7de40f2d0e003b67",
+      "wing": "memorypalace",
+      "room": "architecture",
+      "novelty_score": 0.7028,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_memorypalace_architecture_b701176f45444182aa56edbe",
+      "wing": "memorypalace",
+      "room": "architecture",
+      "novelty_score": 0.6982,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_memorypalace_architecture_3b40c0f4265511414f443738",
+      "wing": "memorypalace",
+      "room": "architecture",
+      "novelty_score": 0.725,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_memorypalace_architecture_0df3b0d159c2e90f97c21a94",
+      "wing": "memorypalace",
+      "room": "architecture",
+      "novelty_score": 0.7445,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_memorypalace_architecture_ce975fa9d60dee39707f6124",
+      "wing": "memorypalace",
+      "room": "architecture",
+      "novelty_score": 0.7753,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_memorypalace_architecture_551da788f988bc121b4bf4fc",
+      "wing": "memorypalace",
+      "room": "architecture",
+      "novelty_score": 0.8224,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_technical_b494ffd945b66afe449552ff",
+      "wing": "storyvox",
+      "room": "references",
+      "novelty_score": 0.3414,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_technical_33d4d7c34f0198b656b640f8",
+      "wing": "storyvox",
+      "room": "references",
+      "novelty_score": 0.4758,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_technical_e595719ade7398cc8cd6829c",
+      "wing": "storyvox",
+      "room": "references",
+      "novelty_score": 0.6,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_technical_17969043c5a58519dd8afca3",
+      "wing": "storyvox",
+      "room": "references",
+      "novelty_score": 0.7712,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_technical_719a4b3ccf71245195179e15",
+      "wing": "storyvox",
+      "room": "references",
+      "novelty_score": 0.7699,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_technical_e5529dd6e1da64ac76bd26b6",
+      "wing": "storyvox",
+      "room": "references",
+      "novelty_score": 0.6786,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_technical_8669510e6ad22c6321b3b072",
+      "wing": "storyvox",
+      "room": "references",
+      "novelty_score": 0.8219,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_technical_bd517d32dc3de63d4af27329",
+      "wing": "storyvox",
+      "room": "references",
+      "novelty_score": 0.5847,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_problems_6fa3c414c4211a9112713b40",
+      "wing": "storyvox",
+      "room": "problems",
+      "novelty_score": 0.7123,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_problems_b70f3a13e70ec568567ecc47",
+      "wing": "storyvox",
+      "room": "problems",
+      "novelty_score": 0.786,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_problems_69df9dd57ccd71ff02750970",
+      "wing": "storyvox",
+      "room": "problems",
+      "novelty_score": 0.7924,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_problems_c3675d50c6786c2901407d00",
+      "wing": "storyvox",
+      "room": "problems",
+      "novelty_score": 0.7875,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_problems_0b52d4c85a144438d8aa43f5",
+      "wing": "storyvox",
+      "room": "problems",
+      "novelty_score": 0.813,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_problems_c6ad56448bf271ac871a48a4",
+      "wing": "storyvox",
+      "room": "problems",
+      "novelty_score": 0.6943,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_problems_3e737b1417a0983268464087",
+      "wing": "storyvox",
+      "room": "problems",
+      "novelty_score": 0.734,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_problems_d71f3b6b95aefbe944c2d7d1",
+      "wing": "storyvox",
+      "room": "problems",
+      "novelty_score": 0.8267,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_opencode_discoveries_d0cbeeb9dbc81745f976bf14",
+      "wing": "opencode",
+      "room": "discoveries",
+      "novelty_score": 0.2857,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_opencode_discoveries_4928af4648c13d54dc106bc7",
+      "wing": "opencode",
+      "room": "discoveries",
+      "novelty_score": 0.2156,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_opencode_discoveries_1acc9f5fdded5db1527c40d0",
+      "wing": "opencode",
+      "room": "discoveries",
+      "novelty_score": 0.3122,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_opencode_discoveries_dad03ae44f78ec4308516b4e",
+      "wing": "opencode",
+      "room": "discoveries",
+      "novelty_score": 0.3024,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_opencode_discoveries_9149e63a226cf8c47fdad38c",
+      "wing": "opencode",
+      "room": "discoveries",
+      "novelty_score": 0.2743,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_opencode_discoveries_794ac12dfbb67d1a28d35a0b",
+      "wing": "opencode",
+      "room": "discoveries",
+      "novelty_score": 0.2477,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_opencode_discoveries_9251bec1698110c9a94a2e73",
+      "wing": "opencode",
+      "room": "discoveries",
+      "novelty_score": 0.3063,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_opencode_discoveries_6871d22eb2ef81079d27252a",
+      "wing": "opencode",
+      "room": "discoveries",
+      "novelty_score": 0.2882,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_memorypalace_references_be0c58805cd9a0f4d8155978",
+      "wing": "memorypalace",
+      "room": "references",
+      "novelty_score": 0.7692,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_memorypalace_references_73644ed36cfcec9e7dbf0377",
+      "wing": "memorypalace",
+      "room": "references",
+      "novelty_score": 0.6615,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_memorypalace_references_054dd949c93511a236064044",
+      "wing": "memorypalace",
+      "room": "references",
+      "novelty_score": 0.4301,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_memorypalace_references_99866bc91f9e05d2eca73c4b",
+      "wing": "memorypalace",
+      "room": "references",
+      "novelty_score": 0.3833,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_memorypalace_references_9d2ecab7b4cba16b7c04cbb4",
+      "wing": "memorypalace",
+      "room": "references",
+      "novelty_score": 0.448,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_memorypalace_references_979b67d80db3860611bc4033",
+      "wing": "memorypalace",
+      "room": "references",
+      "novelty_score": 0.662,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_memorypalace_references_13abb699a48d5d299950d580",
+      "wing": "memorypalace",
+      "room": "references",
+      "novelty_score": 0.5058,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_memorypalace_references_bb4fbacff68f18415c5741ec",
+      "wing": "memorypalace",
+      "room": "references",
+      "novelty_score": 0.8458,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_techempower_references_11af8dfcce8b8e3995b25dba",
+      "wing": "techempower",
+      "room": "references",
+      "novelty_score": 0.5625,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_techempower_technical_d84205185f1c68cedb676d9d",
+      "wing": "techempower",
+      "room": "references",
+      "novelty_score": 0.8771,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_techempower_technical_9f4446f9dddabfddbfbbcf43",
+      "wing": "techempower",
+      "room": "references",
+      "novelty_score": 0.8208,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_techempower_technical_81de2b8f2fcfa7df73c5eba6",
+      "wing": "techempower",
+      "room": "references",
+      "novelty_score": 0.7844,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_techempower_technical_07ee84cd064ad22690da708a",
+      "wing": "techempower",
+      "room": "references",
+      "novelty_score": 0.6653,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_techempower_technical_72b38c806dc9e24f824ef0c3",
+      "wing": "techempower",
+      "room": "references",
+      "novelty_score": 0.5289,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_techempower_technical_2ccca95c08ff5ce72155dfb8",
+      "wing": "techempower",
+      "room": "references",
+      "novelty_score": 0.8483,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_techempower_technical_3fdf3846e75998a6c3f2c69a",
+      "wing": "techempower",
+      "room": "references",
+      "novelty_score": 0.5514,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_-home-jp-Projects-palace-daemon_general_1b123078d1681dfc47127e69",
+      "wing": "palace_daemon",
+      "room": "discoveries",
+      "novelty_score": 0.7014,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_-home-jp-Projects-palace-daemon_general_863b02477b16b8bef3fcee46",
+      "wing": "palace_daemon",
+      "room": "discoveries",
+      "novelty_score": 0.4839,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_-home-jp-Projects-palace-daemon_general_70b876868baff31107b0a043",
+      "wing": "palace_daemon",
+      "room": "discoveries",
+      "novelty_score": 0.1894,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_-home-jp-Projects-palace-daemon_general_abf4d018db4ceb82bc81ba28",
+      "wing": "palace_daemon",
+      "room": "discoveries",
+      "novelty_score": 0.3024,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_-home-jp-Projects-palace-daemon_general_b132c490f69c6482dfb43780",
+      "wing": "palace_daemon",
+      "room": "discoveries",
+      "novelty_score": 0.2998,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_-home-jp-Projects-palace-daemon_general_c32ec7539bda951f0040b69d",
+      "wing": "palace_daemon",
+      "room": "discoveries",
+      "novelty_score": 0.8245,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_-home-jp-Projects-palace-daemon_general_0fc2e1c535c2498b653bb4c4",
+      "wing": "palace_daemon",
+      "room": "discoveries",
+      "novelty_score": 0.6992,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_-home-jp-Projects-palace-daemon_general_83b375d5a7964b63054c2ca6",
+      "wing": "palace_daemon",
+      "room": "discoveries",
+      "novelty_score": 0.7469,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_techempower_architecture_56b7d16008c2a173f7098575",
+      "wing": "techempower",
+      "room": "architecture",
+      "novelty_score": 0.5614,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_techempower_architecture_4bc460dc3260d678443e5db4",
+      "wing": "techempower",
+      "room": "architecture",
+      "novelty_score": 0.1438,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_techempower_architecture_cd60cbca32281df79e315145",
+      "wing": "techempower",
+      "room": "architecture",
+      "novelty_score": 0.156,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_techempower_architecture_606689a45824f3d1c9cc12d5",
+      "wing": "techempower",
+      "room": "architecture",
+      "novelty_score": 0.6919,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_techempower_architecture_98db9898824c9711ed2cdc88",
+      "wing": "techempower",
+      "room": "architecture",
+      "novelty_score": 0.5795,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_techempower_architecture_aafa5d05dceff692f1947f29",
+      "wing": "techempower",
+      "room": "architecture",
+      "novelty_score": 0.7333,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_techempower_architecture_01c8228d9d087eec614df7db",
+      "wing": "techempower",
+      "room": "architecture",
+      "novelty_score": 0.6404,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_techempower_architecture_1024dd4cabae5f59f167168d",
+      "wing": "techempower",
+      "room": "architecture",
+      "novelty_score": 0.6569,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_architecture_5584d7065fbe71b7b12e62ae",
+      "wing": "projects",
+      "room": "architecture",
+      "novelty_score": 0.5584,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_architecture_af645562f270cb79a1ff6d91",
+      "wing": "projects",
+      "room": "architecture",
+      "novelty_score": 0.5974,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_architecture_df2d3fd6cac3bbd2eac7bf81",
+      "wing": "projects",
+      "room": "architecture",
+      "novelty_score": 0.5657,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_architecture_3b98b1a6e9c72cafd5a29392",
+      "wing": "projects",
+      "room": "architecture",
+      "novelty_score": 0.4747,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_architecture_c0e3603b9411e83ec79357b6",
+      "wing": "projects",
+      "room": "architecture",
+      "novelty_score": 0.3731,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_architecture_93e1ff82a77cf46c7370afcc",
+      "wing": "projects",
+      "room": "architecture",
+      "novelty_score": 0.3636,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_architecture_0e59e70110c337236ed990a4",
+      "wing": "projects",
+      "room": "architecture",
+      "novelty_score": 0.3582,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_architecture_18d6d35416cdd15464d91cc2",
+      "wing": "projects",
+      "room": "architecture",
+      "novelty_score": 0.3433,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_os.realm.watch_e2a6a4e8880321a7cfaf06aa",
+      "wing": "os_realm_watch",
+      "room": "references",
+      "novelty_score": 0.6667,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_os.realm.watch_e30d9b2d12c5af08f493804c",
+      "wing": "os_realm_watch",
+      "room": "references",
+      "novelty_score": 0.738,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_os.realm.watch_90a48b01195f4d0e865f352c",
+      "wing": "os_realm_watch",
+      "room": "references",
+      "novelty_score": 0.7205,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_os.realm.watch_7c318d36f7759f0c58fa99a4",
+      "wing": "os_realm_watch",
+      "room": "references",
+      "novelty_score": 0.6923,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_os.realm.watch_3f3cc35a83d2e336cbf98d1d",
+      "wing": "os_realm_watch",
+      "room": "references",
+      "novelty_score": 0.6903,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_os.realm.watch_837a4af3f1c9f111faad2918",
+      "wing": "os_realm_watch",
+      "room": "references",
+      "novelty_score": 0.7809,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_os.realm.watch_952e6083f6159ee8a69ebc95",
+      "wing": "os_realm_watch",
+      "room": "references",
+      "novelty_score": 0.7814,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_os.realm.watch_20b754ba3b336606210f747d",
+      "wing": "os_realm_watch",
+      "room": "references",
+      "novelty_score": 0.7163,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_discoveries_921abd7899d9eaf5d4984c0d",
+      "wing": "familiar_realm_watch",
+      "room": "discoveries",
+      "novelty_score": 0.5859,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_discoveries_cc978e12b71cf104682aa62c",
+      "wing": "familiar_realm_watch",
+      "room": "discoveries",
+      "novelty_score": 0.4859,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_discoveries_e43e4c8fee201e70090ef215",
+      "wing": "familiar_realm_watch",
+      "room": "discoveries",
+      "novelty_score": 0.5525,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_discoveries_28ca2822471d555faba34dce",
+      "wing": "familiar_realm_watch",
+      "room": "discoveries",
+      "novelty_score": 0.5796,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_discoveries_a3dd9c2ff109cf189e389eb7",
+      "wing": "familiar_realm_watch",
+      "room": "discoveries",
+      "novelty_score": 0.5833,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_discoveries_499fbafecfbdefa061f2fc94",
+      "wing": "familiar_realm_watch",
+      "room": "discoveries",
+      "novelty_score": 0.4915,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_discoveries_88cdf319b3793aad98210389",
+      "wing": "familiar_realm_watch",
+      "room": "discoveries",
+      "novelty_score": 0.5903,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_familiar_realm_watch_discoveries_bc9c0b989e0d540733a84e7b",
+      "wing": "familiar_realm_watch",
+      "room": "discoveries",
+      "novelty_score": 0.5893,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_techempower_planning_00c0d48fa6e37687cf549590",
+      "wing": "techempower",
+      "room": "planning",
+      "novelty_score": 0.3509,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_techempower_planning_ac4fd12fda1a4f5d2b67b4e0",
+      "wing": "techempower",
+      "room": "planning",
+      "novelty_score": 0.6494,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_techempower_planning_2476e40be5992550c4723b2b",
+      "wing": "techempower",
+      "room": "planning",
+      "novelty_score": 0.7034,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_techempower_planning_23febdf87ff504cc09972efd",
+      "wing": "techempower",
+      "room": "planning",
+      "novelty_score": 0.56,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_techempower_planning_73e2203baa986f3fa75a99bf",
+      "wing": "techempower",
+      "room": "planning",
+      "novelty_score": 0.6216,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_techempower_planning_019bdbe686465f9a130c71d8",
+      "wing": "techempower",
+      "room": "planning",
+      "novelty_score": 0.8221,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_techempower_planning_ad851cf9f33c395dd17baa76",
+      "wing": "techempower",
+      "room": "planning",
+      "novelty_score": 0.578,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_wing_techempower_planning_9fb49db2b700014009b1c2d4",
+      "wing": "techempower",
+      "room": "planning",
+      "novelty_score": 0.6323,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_general_general_27c0b331df4b867e2cb2fd71",
+      "wing": "general",
+      "room": "discoveries",
+      "novelty_score": 0.0678,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_general_general_2ba4aa3260551a5c86222d1f",
+      "wing": "general",
+      "room": "discoveries",
+      "novelty_score": 0.0469,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_general_general_9fac89ddfe749ee209d05827",
+      "wing": "general",
+      "room": "discoveries",
+      "novelty_score": 0.0284,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_general_general_2ea8225771d05d6e2f84e613",
+      "wing": "general",
+      "room": "discoveries",
+      "novelty_score": 0.767,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_general_general_58661920e49f9357997ef405",
+      "wing": "general",
+      "room": "discoveries",
+      "novelty_score": 0.5204,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_general_general_14100ef7486a8026d70c4020",
+      "wing": "general",
+      "room": "discoveries",
+      "novelty_score": 0.7398,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_general_general_6181222cc98be7f24d9722d7",
+      "wing": "general",
+      "room": "discoveries",
+      "novelty_score": 0.6221,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_general_general_11ac5847a9ee7d527e50a392",
+      "wing": "general",
+      "room": "discoveries",
+      "novelty_score": 0.6628,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_veadotube_avatars_6072f5d883c7b9606f6819b2",
+      "wing": "veadotube_avatars",
+      "room": "references",
+      "novelty_score": 0.037,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_veadotube_avatars_802b3a55f44678196d2dd5d1",
+      "wing": "veadotube_avatars",
+      "room": "references",
+      "novelty_score": 0.7993,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_veadotube_avatars_2f84ebf2fb2183e21116c631",
+      "wing": "veadotube_avatars",
+      "room": "references",
+      "novelty_score": 0.7865,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_veadotube_avatars_335570aa654f702b4daa7ecf",
+      "wing": "veadotube_avatars",
+      "room": "references",
+      "novelty_score": 0.1026,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_veadotube_avatars_b3a1750be9c1526892793bae",
+      "wing": "veadotube_avatars",
+      "room": "references",
+      "novelty_score": 0.6564,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_veadotube_avatars_b466e25754b76113ab23c004",
+      "wing": "veadotube_avatars",
+      "room": "references",
+      "novelty_score": 0.037,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_veadotube_avatars_a27d7354963cc02df1ac1484",
+      "wing": "veadotube_avatars",
+      "room": "references",
+      "novelty_score": 0.0614,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_projects_veadotube_avatars_d6a1cfba784bc780f75e286a",
+      "wing": "veadotube_avatars",
+      "room": "references",
+      "novelty_score": 0.8051,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_planning_2be769ef4d6fb67e085099db",
+      "wing": "storyvox",
+      "room": "planning",
+      "novelty_score": 0.4928,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_planning_a9ee03bee6ea57a5be769389",
+      "wing": "storyvox",
+      "room": "planning",
+      "novelty_score": 0.5229,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_planning_7f7d51790ac6799dad57519c",
+      "wing": "storyvox",
+      "room": "planning",
+      "novelty_score": 0.5596,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_planning_cb714ca35b89e6fdbcdcd110",
+      "wing": "storyvox",
+      "room": "planning",
+      "novelty_score": 0.5921,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_planning_cf585eb98ee0c4dc5e6bce0c",
+      "wing": "storyvox",
+      "room": "planning",
+      "novelty_score": 0.8724,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_planning_dd2b1574e3f79fe8de6665ff",
+      "wing": "storyvox",
+      "room": "planning",
+      "novelty_score": 0.7027,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_planning_7a744c5cb83acf5eff58be80",
+      "wing": "storyvox",
+      "room": "planning",
+      "novelty_score": 0.8005,
+      "window_size": 20,
+      "status": "ok"
+    },
+    {
+      "drawer_id": "drawer_storyvox_planning_1f48dbef6dfaab92109d0f3a",
+      "wing": "storyvox",
+      "room": "planning",
+      "novelty_score": 0.7265,
+      "window_size": 20,
+      "status": "ok"
+    }
+  ]
+}

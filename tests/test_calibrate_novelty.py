@@ -59,6 +59,19 @@ class TestHistogram(unittest.TestCase):
     def test_ascii_no_scores(self):
         self.assertIn("no scores", cal.ascii_histogram([]))
 
+    def test_out_of_range_scores_clamped_hist_data(self):
+        # NCD can slightly exceed 1.0; a negative score must not wrap into a
+        # high bin via Python's negative indexing. Both extremes are clamped.
+        bins = cal._hist_data([-0.3, 1.4], 20)
+        self.assertEqual(sum(b["count"] for b in bins), 2)
+        self.assertEqual(bins[0]["count"], 1)   # -0.3 clamps to first bin
+        self.assertEqual(bins[-1]["count"], 1)  # 1.4 clamps to last bin
+
+    def test_out_of_range_scores_clamped_ascii(self):
+        # Must not raise IndexError on out-of-range scores.
+        out = cal.ascii_histogram([-0.5, 1.2, 0.5], bins=20)
+        self.assertIn("[0.00-0.05)", out)
+
 
 class TestSyntheticCorpus(unittest.TestCase):
 
@@ -117,6 +130,47 @@ class TestOfflineRun(unittest.TestCase):
             self.assertIn("overall", data)
             self.assertIn("histogram_bins", data)
             self.assertEqual(data["config"]["mode"], "offline-synthetic")
+
+
+class TestMcpCallRobustness(unittest.TestCase):
+    """_mcp_call must not crash on non-JSON daemon responses (502/504 HTML,
+    empty body) — it should degrade to an empty result so the calibration run
+    survives a transient bad response."""
+
+    class _FakeResp:
+        def __init__(self, body):
+            self._body = body.encode("utf-8")
+
+        def read(self):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _call_with_body(self, body):
+        from unittest.mock import patch
+        with patch.object(cal.urllib.request, "urlopen",
+                          return_value=self._FakeResp(body)):
+            return cal._mcp_call("http://x", "k", "tool", {})
+
+    def test_html_error_page_returns_empty(self):
+        self.assertEqual(self._call_with_body("<html>502 Bad Gateway</html>"), {})
+
+    def test_empty_body_returns_empty(self):
+        self.assertEqual(self._call_with_body(""), {})
+
+    def test_valid_outer_without_content_returns_outer(self):
+        # Parsable JSON but not the tools/call envelope — return it as-is.
+        out = self._call_with_body('{"some": "thing"}')
+        self.assertEqual(out, {"some": "thing"})
+
+    def test_full_envelope_unwrapped(self):
+        body = ('{"result": {"content": [{"type": "text", '
+                '"text": "{\\"drawers\\": []}"}]}}')
+        self.assertEqual(self._call_with_body(body), {"drawers": []})
 
 
 if __name__ == "__main__":

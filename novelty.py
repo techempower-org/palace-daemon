@@ -167,6 +167,11 @@ async def compute_novelty_for_write(
         if isinstance(unwrapped, dict):
             drawers = unwrapped.get("drawers") or unwrapped.get("results") or []
             for d in drawers:
+                # A malformed drawer entry (not a dict) must not raise — that
+                # would hit the outer except and silently fall back to
+                # novelty_score=1.0, re-creating the no-op this fix removed.
+                if not isinstance(d, dict):
+                    continue
                 # mempalace_list_drawers emits the body as "content_preview".
                 # Without it in the fallback chain the window is always empty,
                 # so every write scored novelty_score=1.0 — the feature was a
@@ -180,7 +185,7 @@ async def compute_novelty_for_write(
                     or d.get("preview")
                     or ""
                 )
-                if text:
+                if isinstance(text, str) and text:
                     texts.append(text)
 
         return score_novelty(content, texts)
