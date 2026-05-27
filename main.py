@@ -61,7 +61,7 @@ import rerank as _rerank
 
 # ── Config (env vars override CLI defaults) ───────────────────────────────────
 
-VERSION = "1.8.2"
+VERSION = "1.8.3"
 DEFAULT_HOST = os.getenv("PALACE_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.getenv("PALACE_PORT", "8085"))
 DEFAULT_PALACE = os.getenv("PALACE_PATH", "")
@@ -105,6 +105,12 @@ _RESTART_HISTORY_PATH = _CRASH_LOOP_DIR / "restart_history.json"
 _CRASH_LOOP_WINDOW = int(os.getenv("PALACE_CRASH_LOOP_THRESHOLD_SECONDS", "600"))
 _CRASH_LOOP_THRESHOLD = int(os.getenv("PALACE_CRASH_LOOP_THRESHOLD_COUNT", "3"))
 _CRASH_LOOP_RECOVERY = int(os.getenv("PALACE_CRASH_LOOP_RECOVERY_SECONDS", "1800"))
+
+# Optional settle margin after the deterministic chroma client close in the
+# /mine lock-and-reopen choreography. close_palace() releases chromadb's
+# Rust-side SQLite file lock synchronously, so 0.0 is correct for normal
+# palaces; this is only a safety knob for very large palaces. (#29)
+PALACE_CHROMA_FLUSH_SECONDS = float(os.getenv("PALACE_CHROMA_FLUSH_SECONDS", "0.0"))
 
 # Monotonic timestamp of when this process started — used by
 # _crash_loop_state() to auto-exit the degraded state after the daemon
@@ -469,6 +475,32 @@ def _sem_for(request_dict: dict) -> asyncio.Semaphore:
     return _read_sem if tool_name in _READ_TOOLS else _write_sem
 
 
+def _drop_chroma_client(close: bool = True) -> None:
+    """Drop the daemon's chroma client caches; optionally release the Rust lock.
+
+    Both the mcp-local caches (``_client_cache``/``_collection_cache``) and the
+    pooled ``ChromaBackend._clients`` handle reference the same PersistentClient,
+    so dropping the caches alone does not release chromadb's Rust-side SQLite
+    file lock — that lock is held until ``PersistentClient.close()`` runs.
+
+    close=True routes the release through ``close_palace()`` (→ ``_close_client()``
+    → ``client.close()``) for a *deterministic* lock release. This is required
+    before handing the palace to an external writer (the /mine subprocess): a
+    bare cache drop would leave the daemon's stale client locking the path when
+    the subprocess opens its own client, reproducing the dual-client log-store
+    corruption this guards against (#29). Must not be the leaky
+    ``_force_chroma_cache_reset()`` (mempalace#262), which only pops the dict.
+
+    close=False keeps the legacy cache-only drop for shutdown, where the process
+    is exiting and the OS reclaims the lock regardless.
+    """
+    _mp._collection_cache = None
+    _mp._client_cache = None
+    if close:
+        from mempalace.palace import get_backend
+        get_backend("chroma").close_palace(_mp._config.palace_path)
+
+
 async def _auto_repair():
     """Trigger index recovery and reload the mempalace client."""
     loop = asyncio.get_running_loop()
@@ -476,8 +508,10 @@ async def _auto_repair():
     moved = await loop.run_in_executor(None, quarantine_stale_hnsw, palace_path)
     if moved:
         _log.warning("AUTO-REPAIR: Quarantined %d stale HNSW segments. Reloading client.", len(moved))
-        _mp._client_cache = None
-        _mp._collection_cache = None
+        # Cache-only drop: we lazily reopen on the next request, and quarantine
+        # already moved the bad segments aside — no external writer involved,
+        # so no need to force the Rust lock release here.
+        _drop_chroma_client(close=False)
         await _warn_if_hnsw_threads_unset()
         return len(moved)
     _log.info("AUTO-REPAIR: No stale segments found during scan.")
@@ -1008,9 +1042,12 @@ async def lifespan(app: FastAPI):
         logger.error("Error during shutdown flush: %s", e)
 
     # --- Shutdown: explicit ChromaDB client teardown ---
-    # ChromaDB 1.5.x PersistentClient has no clean close() (chroma#5868).
-    # The flush above triggers a checkpoint; this block ensures the client
-    # is actually torn down — drop refs, force a GC pass, then sleep
+    # We keep the cache-only drop (close=False) here rather than the
+    # deterministic close() that the /mine path uses: the process is exiting,
+    # so the OS reclaims the file lock regardless, and this gc+sleep dance is
+    # the battle-tested path for letting chromadb's background flush threads
+    # finish before exit. The flush above triggers a checkpoint; this block
+    # ensures the client is torn down — drop refs, force a GC pass, then sleep
     # briefly so chromadb's background flush threads finish writing
     # before the process exits. Without this, SIGTERM at the wrong
     # millisecond leaves the HNSW segment in partial-flush corruption:
@@ -1019,8 +1056,7 @@ async def lifespan(app: FastAPI):
     # next open and we burn cycles rebuilding the index every restart.
     # See #8.
     try:
-        _mp._collection_cache = None
-        _mp._client_cache = None
+        _drop_chroma_client(close=False)
         import gc
         gc.collect()
         # Two seconds is empirically enough on this palace; chromadb's
@@ -2801,13 +2837,46 @@ async def mine(request: Request, x_api_key: str | None = Header(default=None)):
     if limit:
         cmd += ["--limit", str(limit)]
 
-    async with _mine_sem:
+    async def _run_mine_subprocess():
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await proc.communicate()
+        return proc, stdout, stderr
+
+    backend = getattr(_mp._config, "backend", "chroma")
+    if backend == "chroma":
+        # Two PersistentClient instances on one chroma path corrupt the Rust
+        # log store, in- or cross-process (#29). The mine subprocess opens its
+        # own client, so we make it the *sole* client for the job's duration:
+        # hold every slot so no daemon-mediated work races the mine, then
+        # deterministically close our client to release the Rust file lock.
+        # The reopen lives in finally so the daemon's client is always restored
+        # before another request can acquire a slot — even if the mine fails.
+        async with _exclusive_palace():
+            _drop_chroma_client(close=True)
+            if PALACE_CHROMA_FLUSH_SECONDS > 0:
+                await asyncio.sleep(PALACE_CHROMA_FLUSH_SECONDS)
+            try:
+                proc, stdout, stderr = await _run_mine_subprocess()
+            finally:
+                loop = asyncio.get_running_loop()
+                try:
+                    await loop.run_in_executor(None, _mp._get_collection, True)
+                except Exception as e:
+                    # Caches stay None → next request lazily reopens (self-heal).
+                    _log.critical(
+                        "POST /mine: failed to reopen palace client after mine "
+                        "(dir=%s) — next request will lazily reopen: %s",
+                        directory, e,
+                    )
+    else:
+        # postgres handles concurrent connections natively — the dual-client
+        # corruption cannot occur, so keep the original lightweight path.
+        async with _mine_sem:
+            proc, stdout, stderr = await _run_mine_subprocess()
 
     out = stdout.decode()
     err = stderr.decode()

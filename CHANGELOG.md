@@ -1,5 +1,57 @@
 # Changelog
 
+## 1.8.3 — 2026-05-27
+
+### Fixed — *`/mine` no longer corrupts the chroma log store (#29)*
+
+`POST /mine` spawns `mempalace mine` as a subprocess, which opens its
+**own** ChromaDB `PersistentClient` on the palace path while the daemon
+already holds one. ChromaDB 1.x's Rust backend cannot tolerate two
+`PersistentClient` instances on the same path — in- *or* cross-process —
+and the log store corrupts (`Failed to pull logs from the log store`).
+The mine then *appears* to succeed (200 OK, CPU spike) but persists zero
+drawers; recovery needs `mempalace repair`.
+
+`/mine` is now **backend-aware**:
+
+- **postgres** (our deployment) — **unchanged**. Postgres handles
+  concurrent connections natively, so the dual-client corruption cannot
+  occur. The subprocess still runs under `_mine_sem`, exactly as before.
+- **chroma** — guarded *lock-and-reopen* choreography so only one
+  `PersistentClient` touches the files at any instant:
+  1. Enter `_exclusive_palace()` — hold every read/write/mine slot so no
+     daemon-mediated work races the mine.
+  2. **Deterministically release** the daemon's client via
+     `close_palace()` — drops the mcp caches *and* calls the real
+     `PersistentClient.close()`, releasing chromadb's Rust-side SQLite
+     file lock synchronously. (A bare cache drop would leak the lock
+     until GC — see mempalace#262 — leaving a stale client locking the
+     path when the subprocess opens it, reproducing the corruption.)
+  3. Spawn the subprocess — now the sole client.
+  4. Reopen the daemon's client in a `finally`, so it is always restored
+     even if the mine fails. If the reopen itself throws, caches stay
+     `None` and the next request lazily reopens (self-heal); logged
+     `CRITICAL`.
+
+This is a proper upstream fix for chroma users (issue filed by the
+upstream maintainer); it does not affect the postgres deployment, which
+was never susceptible. The deeper fix — mining in-process through the
+daemon's single client — is deferred to mempalace#261 (injectable
+backend for `miner.mine()`); this guard is the correct interim fix and
+remains valid as a fallback.
+
+- **New env knob `PALACE_CHROMA_FLUSH_SECONDS`** (default `0.0`):
+  optional settle margin after the deterministic close, for very large
+  palaces. `0` relies on the synchronous `close_palace()`.
+- **Refactor**: the client-teardown sequence (previously duplicated in
+  shutdown and auto-repair) is now a single `_drop_chroma_client(close)`
+  helper. `close=True` releases the Rust lock (the new mine path);
+  `close=False` keeps the legacy cache-only drop (shutdown, auto-repair).
+- **Stale-comment fix**: the shutdown teardown's "no clean close()
+  (chroma#5868)" note was outdated — chroma 1.5.x does expose
+  `Client.close()`. Shutdown deliberately keeps the cache-only path
+  (the process is exiting); the comment now says why.
+
 ## 1.8.2 — 2026-05-25
 
 ### Changed — *`/graph` splits RELATION triples and MENTIONS edges*
