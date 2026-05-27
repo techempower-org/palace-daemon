@@ -70,6 +70,17 @@ API_KEY = os.getenv("PALACE_API_KEY", "")  # read at startup for argparse defaul
 PALACE_MAX_CONCURRENCY = int(os.getenv("PALACE_MAX_CONCURRENCY", "4"))
 PALACE_MAX_READ_CONCURRENCY = int(os.getenv("PALACE_MAX_READ_CONCURRENCY", str(PALACE_MAX_CONCURRENCY)))
 PALACE_MAX_WRITE_CONCURRENCY = int(os.getenv("PALACE_MAX_WRITE_CONCURRENCY", str(max(1, PALACE_MAX_CONCURRENCY // 2))))
+# Per-tool ceiling for /mcp. Surfaces a JSON-RPC error envelope instead of an
+# indefinite TCP-level hang when an MCP tool stalls (issue #49). Mine and any
+# tool listed in _MCP_TIMEOUT_EXEMPT are excluded — they're legitimately long.
+# 0 disables the timeout entirely.
+PALACE_MCP_TOOL_TIMEOUT_SECONDS = float(os.getenv("PALACE_MCP_TOOL_TIMEOUT_SECONDS", "60"))
+# When on (default), /mcp intercepts mempalace_status and mempalace_kg_stats and
+# returns from the daemon's direct-SQL fast paths (~100× faster than the upstream
+# Python-side aggregations at our production scale). Set to 0 to fall through to
+# the slow path — useful when you need the full relationship_types list that the
+# fast kg_stats can't enumerate cheaply. Issue #49.
+PALACE_MCP_FAST_INTERCEPT = os.getenv("PALACE_MCP_FAST_INTERCEPT", "1") not in ("0", "false", "False", "")
 
 # Canonical topic for Stop-hook auto-save checkpoint diary entries.
 # Defined here so /silent-save can canonicalize at the daemon boundary
@@ -388,6 +399,14 @@ _READ_TOOLS = {
     "mempalace_walk_palace",
 }
 
+# Tools exempt from PALACE_MCP_TOOL_TIMEOUT_SECONDS because they're
+# legitimately long-running (a mine can take minutes on a large palace).
+# Anything not in this set, including writes, is bounded — a hung MCP call
+# producing no response is strictly worse than a JSON-RPC timeout error.
+_MCP_TIMEOUT_EXEMPT = {
+    "mempalace_mine",  # subprocess that scans an entire repo
+}
+
 
 def _check_auth(x_api_key: str | None):
     key = os.getenv("PALACE_API_KEY", "")
@@ -526,7 +545,11 @@ def _sem_for(request_dict: dict) -> asyncio.Semaphore:
     method = request_dict.get("method", "")
     if method == "ping":
         return _read_sem
-    tool_name = request_dict.get("params", {}).get("name", "")
+    # JSON-RPC params can be null or a positional list; only the dict form
+    # carries a tool name. Treat everything else as a write so we err on the
+    # side of holding the write semaphore for malformed requests.
+    params = request_dict.get("params")
+    tool_name = params.get("name", "") if isinstance(params, dict) else ""
     return _read_sem if tool_name in _READ_TOOLS else _write_sem
 
 
@@ -881,14 +904,44 @@ async def _do_silent_save_write(payload: dict) -> dict:
 async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
     async with _sem_for(request_dict):
         loop = asyncio.get_running_loop()
+        # JSON-RPC params can be a dict, an array, or null; only the dict
+        # form has a tool name. Be defensive so malformed requests turn
+        # into a normal error envelope instead of a 500.
+        params = request_dict.get("params")
+        tool_name = params.get("name", "") if isinstance(params, dict) else ""
+        # Bound every MCP tool except the long-running mine. A handler that
+        # never returns produces no ASGI response bytes at all (issue #49) —
+        # surfacing as a JSON-RPC timeout error is strictly more debuggable
+        # than a silent client-side TCP timeout. asyncio.wait_for cancels the
+        # awaitable, but a thread spawned via run_in_executor keeps running;
+        # the daemon eats the work, the caller gets the error envelope.
+        timeout = (
+            None
+            if PALACE_MCP_TOOL_TIMEOUT_SECONDS <= 0 or tool_name in _MCP_TIMEOUT_EXEMPT
+            else PALACE_MCP_TOOL_TIMEOUT_SECONDS
+        )
         try:
-            result = await loop.run_in_executor(None, _mp.handle_request, request_dict)
-            
+            fut = loop.run_in_executor(None, _mp.handle_request, request_dict)
+            result = await (asyncio.wait_for(fut, timeout) if timeout else fut)
+        except asyncio.TimeoutError:
+            return {
+                "jsonrpc": "2.0",
+                "id": request_dict.get("id"),
+                "error": {
+                    "code": -32001,
+                    "message": (
+                        f"MCP tool {tool_name!r} exceeded "
+                        f"PALACE_MCP_TOOL_TIMEOUT_SECONDS={PALACE_MCP_TOOL_TIMEOUT_SECONDS}s"
+                    ),
+                },
+            }
+        except Exception as e:
+            return {"jsonrpc": "2.0", "id": request_dict.get("id"), "error": {"code": -32000, "message": str(e)}}
+
+        try:
             if result and "error" in result:
                 msg = str(result["error"].get("message", ""))
                 is_hnsw_error = "Internal error: Error finding id" in msg or "Internal error: id" in msg
-                
-                tool_name = request_dict.get("params", {}).get("name", "")
                 if is_hnsw_error and retry_on_hnsw and tool_name in _READ_TOOLS:
                     # Auto-repair and retry ONCE (write ops are excluded: retrying risks duplicate drawers)
                     repaired_count = await _auto_repair()
@@ -1138,6 +1191,38 @@ async def mcp_proxy(request: Request, x_api_key: str | None = Header(default=Non
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
+    # Fast-intercept the two tools that scan the full corpus upstream
+    # (mempalace_status sweeps chroma metadata; mempalace_kg_stats runs
+    # three full Cypher graph walks). Both have direct-SQL equivalents
+    # that return the same envelope shape in sub-millisecond time.
+    # The dispatch table is built per-request rather than at module load
+    # so the helpers can live next to their /status/fast / /graph cousins
+    # below — they aren't defined yet at this point in the source file.
+    # Issue #49.
+    params = body.get("params") if isinstance(body, dict) else None
+    tool = params.get("name") if isinstance(params, dict) else None
+    fast_fn = None
+    if PALACE_MCP_FAST_INTERCEPT and tool in ("mempalace_status", "mempalace_kg_stats"):
+        fast_fn = {
+            "mempalace_status": _fast_mcp_status_payload,
+            "mempalace_kg_stats": _fast_mcp_kg_stats_payload,
+        }[tool]
+    if fast_fn is not None:
+        loop = asyncio.get_running_loop()
+        try:
+            payload = await loop.run_in_executor(None, fast_fn)
+            envelope = {
+                "jsonrpc": "2.0",
+                "id": body.get("id"),
+                "result": {
+                    "content": [{"type": "text", "text": json.dumps(payload)}]
+                },
+            }
+            return JSONResponse(content=envelope)
+        except Exception as e:
+            # Any failure (postgres unreachable, AGE down, chroma backend)
+            # falls back to the slow path so behaviour matches upstream.
+            _log.warning("fast-intercept %s failed (%s); falling back to /mcp slow path", tool, e)
     response = await _call(body)
     return JSONResponse(content=response)
 
@@ -1802,20 +1887,31 @@ async def stats(x_api_key: str | None = Header(default=None)):
 # operations. Designed for CLI tools that need sub-second responses.
 
 
-@app.get("/status/fast")
-async def status_fast(x_api_key: str | None = Header(default=None)):
-    """Fast palace status via direct SQL — no MCP, no AGE, no locks."""
-    _check_auth(x_api_key)
-    dsn = os.environ.get("MEMPALACE_POSTGRES_DSN") or getattr(
+def _postgres_dsn() -> str | None:
+    """Best-effort postgres DSN lookup for direct-SQL paths."""
+    return os.environ.get("MEMPALACE_POSTGRES_DSN") or getattr(
         _mp._config, "postgres_dsn", None
     )
-    if not dsn:
-        raise HTTPException(status_code=503, detail="postgres backend not configured")
 
-    loop = asyncio.get_running_loop()
-    def _query():
-        import psycopg2
-        with psycopg2.connect(dsn, connect_timeout=3) as conn:
+
+def _fast_status_payload() -> dict:
+    """Per-wing / per-room counts via direct SQL — no MCP, no AGE, no locks.
+
+    Shared between ``GET /status/fast`` and the ``/mcp`` fast-intercept
+    path (issue #49); the latter wraps this into the ``tool_status``
+    envelope shape, the former returns it as-is.
+    """
+    dsn = _postgres_dsn()
+    if not dsn:
+        raise RuntimeError("postgres backend not configured")
+    import psycopg2
+    # psycopg2's connection context manager commits/rolls-back the
+    # transaction but does NOT close the connection — leaving the close
+    # to garbage collection leaks file descriptors under load. Wrap in
+    # try/finally so the connection is always released on exit.
+    conn = psycopg2.connect(dsn, connect_timeout=3)
+    try:
+        with conn:
             with conn.cursor() as cur:
                 cur.execute("SET LOCAL statement_timeout = '3s'")
                 cur.execute("SELECT count(*) FROM mempalace_drawers")
@@ -1828,12 +1924,87 @@ async def status_fast(x_api_key: str | None = Header(default=None)):
                     "SELECT room, count(*) FROM mempalace_drawers WHERE room IS NOT NULL GROUP BY room ORDER BY count(*) DESC"
                 )
                 rooms = {r[0]: r[1] for r in cur.fetchall()}
-        return {"total_drawers": total, "wings": wings, "rooms": rooms}
+    finally:
+        conn.close()
+    return {"total_drawers": total, "wings": wings, "rooms": rooms}
 
+
+@app.get("/status/fast")
+async def status_fast(x_api_key: str | None = Header(default=None)):
+    """Fast palace status via direct SQL — no MCP, no AGE, no locks."""
+    _check_auth(x_api_key)
+    if not _postgres_dsn():
+        raise HTTPException(status_code=503, detail="postgres backend not configured")
+    loop = asyncio.get_running_loop()
     try:
-        return await loop.run_in_executor(None, _query)
+        return await loop.run_in_executor(None, _fast_status_payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── /mcp fast-intercept payloads (issue #49) ──────────────────────────────────
+# When /mcp proxies mempalace_status or mempalace_kg_stats, the upstream
+# implementations sweep the full chroma metadata and run three Cypher scans —
+# 29s and 9s respectively at our production size, which exceeds client
+# timeouts. These helpers produce the same envelope shape from direct-SQL
+# fast paths so the response stays sub-second under load.
+
+
+def _fast_mcp_status_payload() -> dict:
+    """``tool_status`` shape via the direct-SQL fast path.
+
+    Adds ``protocol`` and ``aaak_dialect`` (imported lazily because they live
+    in the mempalace.mcp_server module the daemon proxies into) so the
+    response is byte-compatible with the slow tool. Falling back to the empty
+    strings on import failure keeps the intercept usable even if mempalace
+    ever drops those constants.
+    """
+    payload = _fast_status_payload()
+    try:
+        from mempalace.mcp_server import PALACE_PROTOCOL, AAAK_SPEC
+
+        payload["protocol"] = PALACE_PROTOCOL
+        payload["aaak_dialect"] = AAAK_SPEC
+    except Exception:
+        payload.setdefault("protocol", "")
+        payload.setdefault("aaak_dialect", "")
+    return payload
+
+
+def _fast_mcp_kg_stats_payload() -> dict:
+    """``tool_kg_stats`` shape from the AGE backing-table fast path.
+
+    The upstream tool runs three Cypher scans — ``MATCH (n:Entity)``,
+    ``MATCH ()-[r:RELATION]->()`` (with a CASE for current/expired), and
+    ``DISTINCT r.relation_type``. Each is a full graph walk through agtype
+    and exhausts shared memory under the production-scale palace, which is
+    exactly what blocks /mcp (#49).
+
+    The fast path uses ``_read_kg_postgres_stats`` which counts the AGE
+    backing label tables directly — sub-millisecond. Trade-off: it can't
+    cheaply split current vs expired (needs property access on edges) and
+    can't enumerate distinct ``r.relation_type`` values (same), so:
+
+      * ``current_facts`` defaults to ``triples`` (we have no semantic
+        triples yet; once extraction lands, set
+        ``PALACE_MCP_FAST_INTERCEPT=0`` to get the precise split).
+      * ``relationship_types`` is the AGE edge labels present
+        (``["RELATION", "MENTIONS"]``-style, filtered to non-empty), not
+        the ``r.relation_type`` predicate values the slow path returns.
+
+    Raises if AGE isn't reachable — the caller falls back to the slow path.
+    """
+    stats = _read_kg_postgres_stats()
+    if not stats:
+        raise RuntimeError("AGE knowledge graph unreachable")
+    triples = int(stats.get("triples", 0))
+    return {
+        "entities": int(stats.get("entities", 0)),
+        "triples": triples,
+        "current_facts": triples,
+        "expired_facts": 0,
+        "relationship_types": list(stats.get("relationship_types", [])),
+    }
 
 
 @app.get("/search/fast")
