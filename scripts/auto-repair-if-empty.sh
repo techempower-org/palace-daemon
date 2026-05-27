@@ -89,7 +89,8 @@ if echo "$WARN" | grep -qE 'vector ranked 0|vector ranked 1[^0-9]'; then
   log "kicking off /repair {mode:\"rebuild\"} in background — daemon stays available"
   # Fire-and-forget; the daemon's /repair endpoint serializes on the rebuild
   # semaphore, so concurrent silent-saves auto-queue to pending.jsonl during.
-  repair_log="/tmp/palace-auto-repair-$(date +%s).log"
+  # mktemp avoids the symlink-attack risk of a predictable /tmp filename.
+  repair_log="$(mktemp "${TMPDIR:-/tmp}/palace-auto-repair-XXXXXX.log" 2>/dev/null || echo "/tmp/palace-auto-repair-$$.log")"
   nohup curl -sS --max-time 7200 -X POST \
     "${HEADERS[@]}" \
     -H 'content-type: application/json' \

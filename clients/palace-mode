@@ -45,7 +45,10 @@ PLUGIN_CACHE_ROOT="${PALACE_PLUGIN_CACHE_ROOT:-$HOME/.claude/plugins/cache/mempa
 if [ -n "${PALACE_PLUGIN_CACHE_DIR:-}" ]; then
     PLUGIN_CACHE_DIR="${PALACE_PLUGIN_CACHE_DIR%/}"
 else
-    PLUGIN_CACHE_DIR="$(find "$PLUGIN_CACHE_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -1)"
+    # `|| true` so a missing cache root (find exits 1 under pipefail/set -e)
+    # leaves PLUGIN_CACHE_DIR empty for require_cache_dir to report cleanly,
+    # rather than aborting the script with no message.
+    PLUGIN_CACHE_DIR="$(find "$PLUGIN_CACHE_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -1 || true)"
 fi
 
 # ------------------------------------------------------------------ helpers
@@ -137,7 +140,20 @@ install_cache_hooks_json() {
 EOF
 }
 
+# Guard against an empty PLUGIN_CACHE_DIR — without this, every
+# "$PLUGIN_CACHE_DIR/..." path would resolve under "/" and the install/verify
+# steps would silently operate on the filesystem root.
+require_cache_dir() {
+    if [ -z "$PLUGIN_CACHE_DIR" ] || [ ! -d "$PLUGIN_CACHE_DIR" ]; then
+        echo "error: no mempalace plugin cache found under $PLUGIN_CACHE_ROOT" >&2
+        echo "       set PALACE_PLUGIN_CACHE_DIR to the versioned plugin dir, or" >&2
+        echo "       PALACE_PLUGIN_CACHE_ROOT to its parent." >&2
+        exit 1
+    fi
+}
+
 do_install() {
+    require_cache_dir
     [ -x "$DISPATCH" ] || { echo "missing dispatcher: $DISPATCH" >&2; exit 1; }
     [ -x "$FAST"     ] || { echo "missing fast-path:  $FAST"     >&2; exit 1; }
     install_cache_plugin_json
@@ -149,6 +165,7 @@ do_install() {
 # ------------------------------------------------------------------ verify
 
 verify() {
+    require_cache_dir
     local fail=0
     check() { if [ -e "$1" ]; then echo "  ok    $1"; else echo "  MISS  $1"; fail=1; fi; }
     check_x() { if [ -x "$1" ]; then echo "  ok    $1"; else echo "  N/X   $1"; fail=1; fi; }
