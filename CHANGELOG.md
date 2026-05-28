@@ -299,6 +299,17 @@ consumers were getting the wrong picture.
 
 ## [Unreleased]
 
+### Refactored — 2026-05-28 — *extract postgres helpers to `postgres.py` (fourth slice of #101)*
+
+Fourth slice of the main.py refactor. The postgres-connection helpers (`_DaemonToolError`, `_RPC_*` codes, `_postgres_dsn`, `_require_postgres`, `_connect_postgres`) — used by every daemon-native MCP tool — are now in `postgres.py`. ~95 lines extracted.
+
+- `postgres.py` exports `_DaemonToolError`, `_RPC_INVALID_PARAMS`/`_RPC_BACKEND_DOWN`/`_RPC_INTERNAL`, `postgres_dsn()`, `require_postgres()`, `connect_postgres()`.
+- `main.py` re-exports under the `_`-prefixed names existing call sites use.
+- 3 test files updated via sed: `patch.object(main, "_postgres_dsn", …)` → `patch.object(postgres, "postgres_dsn", …)` (24 patches across `test_daemon_native_tools.py`, `test_db_error_integration.py`, `test_observability_hooks.py`).
+- `connect_postgres` now uses a lazy `import db_errors` inside the OperationalError catch (avoids circular import at module-load time).
+
+Cumulative #101 progress: **~470 lines extracted from main.py across four slices** (bench_lock.py, canaries.py, db_errors.py, postgres.py). The daemon-native MCP tools themselves (`_fast_mcp_rooms_*`, `_fast_mcp_mined`, `_fast_mcp_wakeup`, the `_DAEMON_NATIVE_TOOLS` dispatch table) remain in main.py for now — they touch the `/mcp` route handler closely and want their own coordinated extract if the file size keeps growing.
+
 ### Refactored — 2026-05-28 — *extract DB-error ring buffer to `db_errors.py` (third slice of #101)*
 
 Third slice of the main.py refactor. The DB-error observability ring buffer (#97/#99/#108/#110) — bounded deque, lock, classifier, recorder, summarizer — is now in `db_errors.py`. ~125 lines extracted; tests pass *unchanged* (71 affected tests all green on first try) because:
