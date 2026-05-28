@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Refactored — *#101 tenth slice: extract rebuild progress capture to `rebuild_progress.py`*
+
+Moved the stdout-capturing buffer that powers `/repair/status` progress
+reporting (~115 lines: `_REBUILD_RE_*` regexes, `_make_rebuild_progress_state`,
+`_RebuildProgressBuffer` class, `_capture_rebuild_progress`
+contextmanager) into a dedicated module. Pure logic — no FastAPI deps,
+no mempalace deps beyond the stdout-capture contract documented in
+upstream `MemPalace/mempalace#1485`. Re-exports under `_`-prefixed names.
+
+main.py: 3551 → 3482 lines.
+
 ### Fixed — *#143: `/health` no longer returns 503 just because crash_loop=True*
 
 The `crash_loop` signal is informational — it means the daemon has been
