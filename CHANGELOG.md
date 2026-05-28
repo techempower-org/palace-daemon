@@ -245,7 +245,6 @@ consumers were getting the wrong picture.
 
 ## [Unreleased]
 
-<<<<<<< HEAD
 ### Added — 2026-05-28 — *`bench-active.lock` pauses auto-mine during external bench runs (#104)*
 
 External bench runs (SME LongMemEval, candidate-strategy ablation, etc.) drive the daemon hard. The WatcherService-spawned auto-mine running concurrently with the bench contributed to today's morning postgres OOMs (#97, #102) and the daemon SIGTERM cycle root-caused upstream. This lands a file-lock contract so the bench runner can pause auto-mine without restarting the daemon (which would be catastrophic mid-bench).
@@ -281,7 +280,7 @@ Forward-compatible: the daemon accepts and forwards `fusion_mode` via the existi
 6 tests in `tests/test_search_hybrid_fusion_mode.py` covering: omitted (not forwarded), convex (forwarded), rrf (forwarded), invalid string (400), non-string (400), and explicit null (treated as omitted).
 
 Closes [#105](https://github.com/techempower-org/palace-daemon/issues/105).
-=======
+
 ### Fixed — 2026-05-28 — *db_errors ring buffer populated from fast-status path + fast-intercept fallback (#108)*
 
 #99 landed the DB-error ring buffer and `_connect_postgres()` records, but three daemon-side paths still touched postgres without recording on failure: `_fast_status_payload` (direct `psycopg2.connect`), the `/mcp` fast-intercept fallback (caught generic `Exception` without classification), and `/status/fast` (calls through `_fast_status_payload`). Net effect: a postgres flap could leave `/health.db_errors.by_pattern` empty while the daemon logged the warning, undercutting the observability promise of #97/#99.
@@ -293,7 +292,6 @@ Closes [#105](https://github.com/techempower-org/palace-daemon/issues/105).
 No behavioural change beyond the ring buffer being populated more completely; HTTP status codes, fallback paths, and log messages are all preserved.
 
 Closes [#108](https://github.com/techempower-org/palace-daemon/issues/108).
->>>>>>> c0c2701 (fix(observability): record_db_error on fast-status + fast-intercept paths (closes #108))
 
 ### Added — 2026-05-28 — *DB-error observability + postgres memcg pressure canary (#97)*
 
