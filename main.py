@@ -1349,6 +1349,17 @@ async def mcp_proxy(request: Request, x_api_key: str | None = Header(default=Non
             }
             return JSONResponse(content=envelope)
         except Exception as e:
+            # #108: if the fast-path failed because postgres bounced, record
+            # it on the observability ring buffer so /health.db_errors
+            # reflects the failure. The fall-through to the slow path
+            # below is unchanged — behavioural parity with upstream is
+            # preserved.
+            try:
+                import psycopg2 as _ps2
+                if isinstance(e, _ps2.OperationalError):
+                    _record_db_error(e)
+            except Exception:
+                pass
             _log.warning("fast-intercept %s failed (%s); falling back to /mcp slow path", tool, e)
 
     # Daemon-native tools (#93): rooms CRUD + wakeup + mined. These have no
@@ -2164,7 +2175,15 @@ def _fast_status_payload() -> dict:
     # transaction but does NOT close the connection — leaving the close
     # to garbage collection leaks file descriptors under load. Wrap in
     # try/finally so the connection is always released on exit.
-    conn = psycopg2.connect(dsn, connect_timeout=3)
+    # #108: record OperationalError on connect so the /health observability
+    # ring buffer is populated even on the fast-status path (which doesn't
+    # go through _connect_postgres). Re-raise so existing callers (the
+    # fast-intercept fallback and /status/fast) keep their behaviour.
+    try:
+        conn = psycopg2.connect(dsn, connect_timeout=3)
+    except psycopg2.OperationalError as e:
+        _record_db_error(e)
+        raise
     try:
         with conn:
             with conn.cursor() as cur:
