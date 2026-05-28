@@ -2199,6 +2199,15 @@ async def cypher_query(request: Request, x_api_key: str | None = Header(default=
     def _run():
         import psycopg2
         import psycopg2.errors
+        # mempalace.knowledge_graph_age uses psycopg (v3) for the actual
+        # Cypher execution, so SyntaxError / OutOfMemory / etc. surface
+        # from psycopg.errors — NOT psycopg2.errors. We need both.
+        try:
+            import psycopg
+            import psycopg.errors as _pg_errors
+        except ImportError:
+            psycopg = None
+            _pg_errors = None
 
         from mempalace.knowledge_graph_age import KnowledgeGraphAGE
 
@@ -2225,12 +2234,39 @@ async def cypher_query(request: Request, x_api_key: str | None = Header(default=
             kg._conn.rollback()
             with kg._conn.cursor() as cur:
                 cur.execute("SET TRANSACTION READ ONLY")
+            # Build per-error tuples that include both psycopg2 (legacy)
+            # and psycopg (v3) exception classes — mempalace.knowledge_
+            # graph_age uses psycopg v3 internally so SyntaxError /
+            # OutOfMemory / etc. surface as psycopg.errors.*, not
+            # psycopg2.errors.*.
+            _read_only_excs = (psycopg2.errors.ReadOnlySqlTransaction,)
+            _oom_excs = (psycopg2.errors.OutOfMemory,)
+            _timeout_excs = (psycopg2.errors.QueryCanceled,)
+            _bad_query_excs = (
+                psycopg2.errors.SyntaxError,
+                psycopg2.errors.UndefinedColumn,
+                psycopg2.errors.UndefinedTable,
+                psycopg2.errors.UndefinedFunction,
+            )
+            _generic_excs = (psycopg2.Error,)
+            if _pg_errors is not None:
+                _read_only_excs = _read_only_excs + (_pg_errors.ReadOnlySqlTransaction,)
+                _oom_excs = _oom_excs + (_pg_errors.OutOfMemory,)
+                _timeout_excs = _timeout_excs + (_pg_errors.QueryCanceled,)
+                _bad_query_excs = _bad_query_excs + (
+                    _pg_errors.SyntaxError,
+                    _pg_errors.UndefinedColumn,
+                    _pg_errors.UndefinedTable,
+                    _pg_errors.UndefinedFunction,
+                )
+                _generic_excs = _generic_excs + (psycopg.Error,)
+
             try:
                 rows = kg._run_cypher(cypher, params={}, fetch=True)
-            except psycopg2.errors.ReadOnlySqlTransaction as e:
+            except _read_only_excs as e:
                 kg._conn.rollback()
                 return None, ("read-only", str(e))
-            except psycopg2.errors.OutOfMemory as e:
+            except _oom_excs as e:
                 # Postgres shared memory exhausted — typically from an
                 # unbounded MATCH that materializes too much agtype before
                 # LIMIT applies (see #160 for the structural fix path).
@@ -2241,15 +2277,14 @@ async def cypher_query(request: Request, x_api_key: str | None = Header(default=
                 except Exception:
                     pass
                 return None, ("shared-memory-exhausted", str(e))
-            except psycopg2.errors.QueryCanceled as e:
+            except _timeout_excs as e:
                 # statement_timeout hit — Cypher took longer than allowed.
                 try:
                     kg._conn.rollback()
                 except Exception:
                     pass
                 return None, ("timeout", str(e))
-            except (psycopg2.errors.SyntaxError, psycopg2.errors.UndefinedColumn,
-                    psycopg2.errors.UndefinedTable, psycopg2.errors.UndefinedFunction) as e:
+            except _bad_query_excs as e:
                 # Caller-supplied Cypher has a syntax / schema mismatch.
                 # 400 is more honest than 500 for these.
                 try:
@@ -2257,7 +2292,7 @@ async def cypher_query(request: Request, x_api_key: str | None = Header(default=
                 except Exception:
                     pass
                 return None, ("bad-query", str(e))
-            except psycopg2.Error as e:
+            except _generic_excs as e:
                 # Any other postgres-side failure (connection dropped,
                 # transaction aborted from an earlier error, etc.).
                 try:
