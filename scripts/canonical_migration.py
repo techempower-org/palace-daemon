@@ -19,21 +19,67 @@ not be run without a graph backup + explicit go (see safety note below).
   friction: bulk graph mutation should never originate from a remote read-only
   client.
 
+## Apply mechanism
+
+Set-based postgres UPDATE on the AGE backing table ``mempalace_kg."RELATION"``,
+joining a TEMP ``predicate_mapping`` table of (raw, canonical) pairs. One seq
+scan + set-based join rewrites every edge whose ``properties->>'relation_type'``
+matches a mapping row AND that does not already have ``raw_relation_type`` set.
+
+Proven on the production graph 2026-05-28: 1,467,937 edges in 23 seconds
+(~63k edges/sec). Per-rule cypher ``MATCH ... SET`` was tried first and is
+unworkable at this scale — no postgres index on ``properties->>'relation_type'``
+means each per-rule MATCH is a full edge scan, and MVCC dead-tuple accumulation
+from prior SETs makes successive scans progressively worse (per-batch time
+doubled in the live test). The direct-SQL pattern bypasses both problems.
+
+The exact rewrite is::
+
+    UPDATE mempalace_kg."RELATION" e
+    SET properties = (
+        ((e.properties::text::jsonb)
+         || jsonb_build_object('raw_relation_type',
+                                (e.properties::text::jsonb)->>'relation_type')
+         || jsonb_build_object('relation_type', m.canonical)
+        )::text::ag_catalog.agtype
+    )
+    FROM predicate_mapping m
+    WHERE ((e.properties::text::jsonb)->>'relation_type') = m.raw
+      AND NOT ((e.properties::text::jsonb) ? 'raw_relation_type')
+
+(``ag_catalog.agtype`` must be fully qualified — the default ``search_path``
+does not include ``ag_catalog``, and the cast otherwise fails.) The original
+``relation_type`` is preserved in ``raw_relation_type`` for reversibility.
+
 ## Reversibility
 
-Apply does, per distinct raw predicate ``R`` with canonical ``C != R``::
+Rollback restores ``relation_type`` from ``raw_relation_type`` and drops the
+latter::
 
-    MATCH ()-[r:RELATION]->() WHERE r.relation_type = R
-      SET r.raw_relation_type = R, r.relation_type = C
+    UPDATE mempalace_kg."RELATION" e
+    SET properties = (
+        ((e.properties::text::jsonb - 'raw_relation_type')
+         || jsonb_build_object('relation_type',
+                                (e.properties::text::jsonb)->>'raw_relation_type')
+        )::text::ag_catalog.agtype
+    )
+    WHERE (e.properties::text::jsonb) ? 'raw_relation_type'
 
-The original is preserved in ``raw_relation_type``, so a rollback is::
+## Code tokens
 
-    MATCH ()-[r:RELATION]->() WHERE r.raw_relation_type IS NOT NULL
-      SET r.relation_type = r.raw_relation_type REMOVE r.raw_relation_type
+Code-token predicates the canonical mapper drops are NOT deleted by this
+migration (deletion is destructive and out of scope) — they are reported and
+left as-is. ``--drop-code-tokens`` is reserved for a follow-up; it currently
+prints a no-op warning under ``--apply``.
 
-Code-token predicates the spike would *drop* are NOT deleted by this migration
-(deletion is destructive and out of scope) — they are reported and left as-is
-unless ``--drop-code-tokens`` is passed under ``--apply``.
+## Operational checklist (before --apply)
+
+1. ``pg_dump -F c -n mempalace_kg -n ag_catalog <db> > backup.dump`` — mandatory.
+2. ``sudo systemctl stop mempalace-kg-extract@<port>.service`` — pause concurrent
+   RELATION writes so the seq scan sees a stable snapshot.
+3. ``--apply --dsn $MEMPALACE_POSTGRES_DSN --i-have-a-backup`` — the two gates
+   below refuse to mutate without both.
+4. Resume the kg-extract worker after the UPDATE returns clean counts.
 """
 from __future__ import annotations
 
@@ -192,11 +238,17 @@ def print_plan(plan: dict, mode: str) -> None:
 
 
 def _apply(plan: dict, args: argparse.Namespace) -> None:
-    """Perform the rewrite via a DIRECT postgres connection (host-side only).
+    """Run the set-based UPDATE on ``mempalace_kg."RELATION"`` (host-side only).
 
-    Deliberately does NOT go through the daemon /cypher (read-only). Requires
-    MEMPALACE_POSTGRES_DSN or --dsn. This path is gated and must only be run on
-    the daemon host with a backup + the single-writer daemon paused.
+    Implementation pattern proven 2026-05-28 against the 1.76M-edge production
+    graph: TEMP ``predicate_mapping`` populated via COPY, then one set-based
+    UPDATE joining the backing table to the mapping. Earlier per-rule cypher
+    ``MATCH ... SET`` was unworkable (no index on ``properties->>'relation_type'``,
+    MVCC dead-tuple compounding); see module docstring for the postmortem.
+
+    Goes via a DIRECT postgres DSN (``MEMPALACE_POSTGRES_DSN`` / ``--dsn``) —
+    must run on the daemon host with kg-extract paused and a fresh ``pg_dump``
+    in hand. Both guards below refuse if either condition is unmet.
     """
     dsn = args.dsn or os.environ.get("MEMPALACE_POSTGRES_DSN")
     if not dsn:
@@ -207,13 +259,75 @@ def _apply(plan: dict, args: argparse.Namespace) -> None:
     if not args.i_have_a_backup:
         raise SystemExit(
             "REFUSING --apply without --i-have-a-backup. Snapshot the AGE graph "
-            "and pause the single-writer daemon first. This mutates production."
+            "(pg_dump -F c -n mempalace_kg -n ag_catalog <db>) and pause the "
+            "kg-extract worker first. This mutates production."
         )
-    raise SystemExit(
-        "apply path intentionally not auto-executed in this PR. The rewrite "
-        "rules are in the dry-run report (plan['remaps']); JP + backup gate the "
-        "real run. See module docstring for the exact SET/REMOVE Cypher."
-    )
+
+    remaps = plan.get("remaps") or []
+    if not remaps:
+        print("apply: no raw→canonical changes (graph already canonical)")
+        return
+
+    try:
+        import psycopg
+    except ImportError as e:
+        raise SystemExit(f"--apply requires psycopg in the active venv: {e}")
+
+    import time
+
+    print(f"apply: {len(remaps):,} rules → ~{plan['edges_would_change']:,} edge updates")
+    print("  (set-based UPDATE on mempalace_kg.\"RELATION\" backing table)")
+
+    with psycopg.connect(dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SET statement_timeout = 0")
+
+            cur.execute(
+                'CREATE TEMP TABLE predicate_mapping ('
+                '  raw text PRIMARY KEY, canonical text)'
+            )
+            with cur.copy("COPY predicate_mapping (raw, canonical) FROM STDIN") as cp:
+                for r in remaps:
+                    cp.write_row((r["raw"], r["canonical"]))
+            cur.execute("ANALYZE predicate_mapping")
+
+            t0 = time.time()
+            cur.execute(
+                """
+                UPDATE mempalace_kg."RELATION" e
+                SET properties = (
+                    ((e.properties::text::jsonb)
+                     || jsonb_build_object(
+                          'raw_relation_type',
+                          (e.properties::text::jsonb)->>'relation_type')
+                     || jsonb_build_object('relation_type', m.canonical)
+                    )::text::ag_catalog.agtype
+                )
+                FROM predicate_mapping m
+                WHERE ((e.properties::text::jsonb)->>'relation_type') = m.raw
+                  AND NOT ((e.properties::text::jsonb) ? 'raw_relation_type')
+                """
+            )
+            affected = cur.rowcount
+            conn.commit()
+            elapsed = time.time() - t0
+            rate = affected / max(elapsed, 0.001)
+            print(f"  UPDATE: {affected:,} edges in {elapsed:.0f}s ({rate:.0f} edges/s)")
+
+            cur.execute(
+                """
+                SELECT count(*) FROM mempalace_kg."RELATION"
+                WHERE NOT ((properties::text::jsonb) ? 'raw_relation_type')
+                """
+            )
+            left = cur.fetchone()[0]
+            expected_unmigrated = plan["edges_unchanged"] + plan["dropped_edges"]
+            print(f"  remaining without raw_relation_type: {left:,} "
+                  f"(expected ~{expected_unmigrated:,} = already-canonical + dropped)")
+
+    if args.drop_code_tokens:
+        print("  --drop-code-tokens: NOT YET IMPLEMENTED. Code-token edges remain; "
+              "file a follow-up to add a DELETE pass.")
 
 
 def main(argv: list[str] | None = None) -> int:
