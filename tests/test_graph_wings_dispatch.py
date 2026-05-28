@@ -24,6 +24,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import main  # noqa: E402
+import kg_reader  # noqa: E402
 
 
 class _Cfg:
@@ -40,10 +41,9 @@ class TestReadWingsRoomsDispatch(unittest.TestCase):
         sentinel = ({"familiar_realm_watch": 235}, [
             {"wing": "familiar_realm_watch", "rooms": {"architecture": 40}}
         ])
-        with patch.object(main, "_mp") as mp, \
-             patch.object(main, "_read_wings_rooms_postgres", return_value=sentinel) as pg, \
+        with patch.object(kg_reader, "_config", return_value=_Cfg("postgres")), \
+             patch.object(kg_reader, "read_wings_rooms_postgres", return_value=sentinel) as pg, \
              patch("sqlite3.connect") as sql_connect:
-            mp._config = _Cfg("postgres")
             wings, rooms = main._read_wings_rooms_direct()
         self.assertEqual(pg.call_count, 1)
         # No sqlite open under postgres backend — the chroma path is the
@@ -56,10 +56,9 @@ class TestReadWingsRoomsDispatch(unittest.TestCase):
         """Under MEMPALACE_BACKEND=chroma the legacy sqlite path is
         still authoritative; the postgres helper must not be invoked.
         """
-        with patch.object(main, "_mp") as mp, \
-             patch.object(main, "_read_wings_rooms_postgres") as pg, \
-             patch.object(main, "_chroma_path", return_value="/nonexistent/chroma.sqlite3"):
-            mp._config = _Cfg("chroma")
+        with patch.object(kg_reader, "_config", return_value=_Cfg("chroma")), \
+             patch.object(kg_reader, "read_wings_rooms_postgres") as pg, \
+             patch.object(kg_reader, "chroma_path", return_value="/nonexistent/chroma.sqlite3"):
             wings, rooms = main._read_wings_rooms_direct()
         pg.assert_not_called()
         # File doesn't exist → degrade to empty (the documented behavior).
@@ -71,10 +70,9 @@ class TestReadWingsRoomsDispatch(unittest.TestCase):
         through to the chroma sqlite path rather than risk hitting a
         misconfigured postgres connection.
         """
-        with patch.object(main, "_mp") as mp, \
-             patch.object(main, "_read_wings_rooms_postgres") as pg, \
-             patch.object(main, "_chroma_path", return_value="/nonexistent/chroma.sqlite3"):
-            mp._config = _Cfg(None)
+        with patch.object(kg_reader, "_config", return_value=_Cfg(None)), \
+             patch.object(kg_reader, "read_wings_rooms_postgres") as pg, \
+             patch.object(kg_reader, "chroma_path", return_value="/nonexistent/chroma.sqlite3"):
             main._read_wings_rooms_direct()
         pg.assert_not_called()
 
@@ -98,10 +96,9 @@ class TestReadKgDirectDispatch(unittest.TestCase):
             "valid_to": None, "confidence": 0.5, "source_file": "PROPER_NOUN",
         }]
         sentinel = (sentinel_entities, sentinel_triples, sentinel_mentions)
-        with patch.object(main, "_mp") as mp, \
-             patch.object(main, "_read_kg_postgres", return_value=sentinel) as pg, \
+        with patch.object(kg_reader, "_config", return_value=_Cfg("postgres")), \
+             patch.object(kg_reader, "read_kg_postgres", return_value=sentinel) as pg, \
              patch("sqlite3.connect") as sql_connect:
-            mp._config = _Cfg("postgres")
             entities, triples, mentions = main._read_kg_direct()
         self.assertEqual(pg.call_count, 1)
         # The chroma KG sqlite file must NOT be opened under postgres backend
@@ -116,10 +113,9 @@ class TestReadKgDirectDispatch(unittest.TestCase):
         authoritative; the AGE helper must not be invoked. mentions is
         always empty under chroma (no MENTIONS concept in the sqlite KG).
         """
-        with patch.object(main, "_mp") as mp, \
-             patch.object(main, "_read_kg_postgres") as pg, \
-             patch.object(main, "_kg_path", return_value="/nonexistent/knowledge_graph.sqlite3"):
-            mp._config = _Cfg("chroma")
+        with patch.object(kg_reader, "_config", return_value=_Cfg("chroma")), \
+             patch.object(kg_reader, "read_kg_postgres") as pg, \
+             patch.object(kg_reader, "kg_path", return_value="/nonexistent/knowledge_graph.sqlite3"):
             entities, triples, mentions = main._read_kg_direct()
         pg.assert_not_called()
         # File doesn't exist → degrade to empty.
@@ -178,10 +174,10 @@ class TestReadKgPostgresAGE(unittest.TestCase):
         import sys
         stub_mod = type(sys)("mempalace.knowledge_graph_age")
         stub_mod.KnowledgeGraphAGE = StubKG
+        cfg = _Cfg("postgres")
+        cfg.postgres_dsn = "postgres://stub"
         with patch.dict(sys.modules, {"mempalace.knowledge_graph_age": stub_mod}), \
-             patch.object(main, "_mp") as mp:
-            mp._config = _Cfg("postgres")
-            mp._config.postgres_dsn = "postgres://stub"
+             patch.object(kg_reader, "_config", return_value=cfg):
             entities, triples, mentions = main._read_kg_postgres(
                 entity_limit=50, triple_limit=10, mention_limit=120
             )
@@ -222,10 +218,10 @@ class TestReadKgPostgresAGE(unittest.TestCase):
         ])
 
     def test_age_no_dsn_degrades_to_empty(self):
-        with patch.object(main, "_mp") as mp, \
+        cfg = _Cfg("postgres")
+        cfg.postgres_dsn = None
+        with patch.object(kg_reader, "_config", return_value=cfg), \
              patch.dict(os.environ, {"MEMPALACE_POSTGRES_DSN": ""}, clear=False):
-            mp._config = _Cfg("postgres")
-            mp._config.postgres_dsn = None
             entities, triples, mentions = main._read_kg_postgres()
         self.assertEqual(entities, [])
         self.assertEqual(triples, [])
@@ -301,10 +297,10 @@ class TestReadKgStatsAGE(unittest.TestCase):
         import sys
         stub_mod = type(sys)("mempalace.knowledge_graph_age")
         stub_mod.KnowledgeGraphAGE = StubKG
+        cfg = _Cfg("postgres")
+        cfg.postgres_dsn = "postgres://stub"
         with patch.dict(sys.modules, {"mempalace.knowledge_graph_age": stub_mod}), \
-             patch.object(main, "_mp") as mp:
-            mp._config = _Cfg("postgres")
-            mp._config.postgres_dsn = "postgres://stub"
+             patch.object(kg_reader, "_config", return_value=cfg):
             stats = main._read_kg_postgres_stats()
         self.assertEqual(len(captured["sql"]), 3)
         self.assertIn('mempalace_kg."Entity"', captured["sql"][0])
@@ -326,10 +322,10 @@ class TestReadKgStatsAGE(unittest.TestCase):
         import sys
         stub_mod = type(sys)("mempalace.knowledge_graph_age")
         stub_mod.KnowledgeGraphAGE = StubKG
+        cfg = _Cfg("postgres")
+        cfg.postgres_dsn = "postgres://stub"
         with patch.dict(sys.modules, {"mempalace.knowledge_graph_age": stub_mod}), \
-             patch.object(main, "_mp") as mp:
-            mp._config = _Cfg("postgres")
-            mp._config.postgres_dsn = "postgres://stub"
+             patch.object(kg_reader, "_config", return_value=cfg):
             stats = main._read_kg_postgres_stats()
         self.assertEqual(stats["relationship_types"], ["MENTIONS"])
         self.assertEqual(stats["triples"], 0)
@@ -339,10 +335,10 @@ class TestReadKgStatsAGE(unittest.TestCase):
         """No DSN → return None so the `/graph` handler falls back to
         the MCP `kg_stats` path rather than reporting bogus zeros.
         """
-        with patch.object(main, "_mp") as mp, \
+        cfg = _Cfg("postgres")
+        cfg.postgres_dsn = None
+        with patch.object(kg_reader, "_config", return_value=cfg), \
              patch.dict(os.environ, {"MEMPALACE_POSTGRES_DSN": ""}, clear=False):
-            mp._config = _Cfg("postgres")
-            mp._config.postgres_dsn = None
             stats = main._read_kg_postgres_stats()
         self.assertIsNone(stats)
 
@@ -362,10 +358,10 @@ class TestReadKgStatsAGE(unittest.TestCase):
         import sys
         stub_mod = type(sys)("mempalace.knowledge_graph_age")
         stub_mod.KnowledgeGraphAGE = StubKG
+        cfg = _Cfg("postgres")
+        cfg.postgres_dsn = "postgres://stub"
         with patch.dict(sys.modules, {"mempalace.knowledge_graph_age": stub_mod}), \
-             patch.object(main, "_mp") as mp:
-            mp._config = _Cfg("postgres")
-            mp._config.postgres_dsn = "postgres://stub"
+             patch.object(kg_reader, "_config", return_value=cfg):
             stats = main._read_kg_postgres_stats()
         self.assertEqual(stats, {
             "entities": 10,
@@ -382,9 +378,8 @@ class TestReadKgStatsDirectDispatch(unittest.TestCase):
             "entities": 1, "triples": 0, "mentions": 5_000_000,
             "relationship_types": ["MENTIONS"],
         }
-        with patch.object(main, "_mp") as mp, \
-             patch.object(main, "_read_kg_postgres_stats", return_value=sentinel) as pg:
-            mp._config = _Cfg("postgres")
+        with patch.object(kg_reader, "_config", return_value=_Cfg("postgres")), \
+             patch.object(kg_reader, "read_kg_postgres_stats", return_value=sentinel) as pg:
             stats = main._read_kg_stats_direct()
         pg.assert_called_once()
         self.assertIs(stats, sentinel)
@@ -394,9 +389,8 @@ class TestReadKgStatsDirectDispatch(unittest.TestCase):
         the dispatcher must return None so `/graph` falls back to it
         instead of forcing the postgres helper.
         """
-        with patch.object(main, "_mp") as mp, \
-             patch.object(main, "_read_kg_postgres_stats") as pg:
-            mp._config = _Cfg("chroma")
+        with patch.object(kg_reader, "_config", return_value=_Cfg("chroma")), \
+             patch.object(kg_reader, "read_kg_postgres_stats") as pg:
             stats = main._read_kg_stats_direct()
         pg.assert_not_called()
         self.assertIsNone(stats)
