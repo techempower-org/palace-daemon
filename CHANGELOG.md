@@ -245,6 +245,20 @@ consumers were getting the wrong picture.
 
 ## [Unreleased]
 
+### Fixed — 2026-05-28 — *db_errors ring buffer also populated from /search/keyword + /graph + /backfill-age/status (#110)*
+
+Follow-up to #108. Three more HTTP endpoint paths used direct `psycopg2.connect` without recording on `OperationalError`:
+
+- **`/search/keyword`** (~main.py:2737) — the BM25 keyword endpoint
+- **`/graph`** wing/room count helper (~main.py:2982) — outer try/except degraded gracefully but swallowed the OperationalError unrecorded
+- **`/backfill-age/status`** (~main.py:3985) — same shape as `/graph`'s swallowing pattern
+
+All three now wrap the `psycopg2.connect(dsn, ...)` call in a try/except that calls `_record_db_error(e)` and re-raises. The outer graceful-degradation behaviour is preserved.
+
+No new tests; the wrap-and-record pattern is identical to #108's `test_connect_failure_records_error` which already pins the behaviour.
+
+Closes [#110](https://github.com/techempower-org/palace-daemon/issues/110).
+
 ### Added — 2026-05-28 — *`bench-active.lock` pauses auto-mine during external bench runs (#104)*
 
 External bench runs (SME LongMemEval, candidate-strategy ablation, etc.) drive the daemon hard. The WatcherService-spawned auto-mine running concurrently with the bench contributed to today's morning postgres OOMs (#97, #102) and the daemon SIGTERM cycle root-caused upstream. This lands a file-lock contract so the bench runner can pause auto-mine without restarting the daemon (which would be catastrophic mid-bench).
