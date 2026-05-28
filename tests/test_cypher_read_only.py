@@ -144,5 +144,88 @@ class TestCypherReadOnly(unittest.TestCase):
         self.assertIn("read-only", ctx.exception.detail.lower())
 
 
+class TestCypherStructuredErrors(unittest.TestCase):
+    """Postgres-side errors must surface as specific HTTP codes with
+    structured detail — not a generic 500 with a stringified exception.
+    Added after the 2026-05-28 deploy surfaced /cypher returning
+    `Internal Server Error` for shared-memory exhaustion (a backend
+    resource limit, not a daemon bug).
+    """
+
+    def _run_with_error(self, exc):
+        """Run the endpoint with _run_cypher raising the given psycopg2
+        exception. Returns the HTTPException raised by the endpoint."""
+
+        class _FailingKG(_StubKG):
+            def _run_cypher(self_inner, cypher, params=None, fetch=False):
+                raise exc
+
+        fake_mod = types.ModuleType("mempalace.knowledge_graph_age")
+        fake_mod.KnowledgeGraphAGE = _FailingKG
+        mempalace_pkg = types.ModuleType("mempalace")
+        mempalace_pkg.knowledge_graph_age = fake_mod
+
+        fake_config = types.SimpleNamespace(
+            backend="postgres", postgres_dsn="postgresql://fake/db"
+        )
+        fake_mp = types.SimpleNamespace(_config=fake_config)
+
+        with patch.dict(
+            sys.modules,
+            {"mempalace": mempalace_pkg, "mempalace.knowledge_graph_age": fake_mod},
+            clear=False,
+        ), patch.object(main, "_mp", fake_mp), patch.dict(
+            os.environ, {}, clear=True
+        ):
+            req = _fake_request({"cypher": "MATCH (n) RETURN n"})
+            try:
+                asyncio.run(main.cypher_query(req, x_api_key=None))
+            except HTTPException as e:
+                return e
+            self.fail("expected HTTPException")
+
+    def test_out_of_memory_returns_507(self):
+        """Shared-memory exhaustion → 507 (Insufficient Storage) with hint."""
+        err = self._run_with_error(
+            psycopg2.errors.OutOfMemory("could not resize shared memory segment ...")
+        )
+        self.assertEqual(err.status_code, 507)
+        self.assertEqual(err.detail["error"], "shared-memory-exhausted")
+        self.assertIn("CTE", err.detail["hint"])
+
+    def test_query_canceled_returns_504(self):
+        """statement_timeout → 504 (Gateway Timeout) with hint."""
+        err = self._run_with_error(
+            psycopg2.errors.QueryCanceled("canceling statement due to statement timeout")
+        )
+        self.assertEqual(err.status_code, 504)
+        self.assertEqual(err.detail["error"], "timeout")
+        self.assertIn("LIMIT", err.detail["hint"])
+
+    def test_syntax_error_returns_400(self):
+        """Bad Cypher → 400 with the postgres message."""
+        err = self._run_with_error(
+            psycopg2.errors.SyntaxError('syntax error at or near "AS"')
+        )
+        self.assertEqual(err.status_code, 400)
+        self.assertEqual(err.detail["error"], "bad-query")
+        self.assertIn("AS", err.detail["postgres"])
+
+    def test_undefined_column_returns_400(self):
+        """Schema mismatch → 400 (not 500) — the operator's query was wrong."""
+        err = self._run_with_error(
+            psycopg2.errors.UndefinedColumn("could not find rte for n")
+        )
+        self.assertEqual(err.status_code, 400)
+        self.assertEqual(err.detail["error"], "bad-query")
+
+    def test_generic_postgres_error_returns_502(self):
+        """Other postgres errors → 502 (Bad Gateway) with structured body."""
+        err = self._run_with_error(psycopg2.Error("connection reset"))
+        self.assertEqual(err.status_code, 502)
+        self.assertEqual(err.detail["error"], "postgres-error")
+        self.assertIn("connection reset", err.detail["postgres"])
+
+
 if __name__ == "__main__":
     unittest.main()
