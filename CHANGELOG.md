@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Fixed — *#140: `/mcp` tools/list now includes the 6 daemon-native tools*
+
+The daemon-native tools added by #96 (`mempalace_rooms_list/add/rename/remove`,
+`mempalace_mined`, `mempalace_wakeup`) were reachable via `tools/call` but
+invisible to MCP clients that discover capabilities via the standard
+`tools/list` handshake. Without this fix, every MCP consumer (Claude
+Code, Claude Desktop, etc.) saw the pre-#96 count of 34 tools and would
+have to hardcode the new tool names to use them.
+
+Fix: `/mcp`'s `mcp_proxy` now intercepts `method == "tools/list"`,
+forwards to upstream mempalace, then merges in
+`daemon_tools.DAEMON_NATIVE_TOOL_DESCRIPTORS` (6 entries with full
+MCP-spec name/description/inputSchema) before returning. Duplicate
+names from upstream are skipped defensively.
+
 ### Refactored — *#101 ninth slice: extract auth helpers to `auth.py`*
 
 Moved the four auth helpers (`_check_auth`, `_mint_viz_token`,

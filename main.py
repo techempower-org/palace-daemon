@@ -1355,6 +1355,36 @@ async def mcp_proxy(request: Request, x_api_key: str | None = Header(default=Non
             }
             return JSONResponse(content=envelope)
 
+    # tools/list augmentation (#140). The upstream mempalace MCP server
+    # doesn't know about the 6 daemon-native tools registered in
+    # daemon_tools.DAEMON_NATIVE_TOOLS, so its tools/list response misses
+    # them and MCP clients (Claude Code, Claude Desktop, anyone using the
+    # standard discovery handshake) can't find them. We forward to
+    # upstream, then merge in the daemon-native descriptors before
+    # returning. tools/call already routes through the dispatch above
+    # — this just closes the discovery gap.
+    method = body.get("method") if isinstance(body, dict) else None
+    if method == "tools/list":
+        response = await _call(body)
+        try:
+            from daemon_tools import DAEMON_NATIVE_TOOL_DESCRIPTORS
+            upstream_tools = response.get("result", {}).get("tools", []) if isinstance(response, dict) else []
+            existing_names = {t.get("name") for t in upstream_tools if isinstance(t, dict)}
+            # Skip any descriptor whose name already appears upstream so
+            # we never produce a duplicate. (Defensive — the daemon-native
+            # names were chosen to not collide, but a future mempalace
+            # release adding the same names would otherwise silently
+            # produce duplicates.)
+            additions = [
+                d for d in DAEMON_NATIVE_TOOL_DESCRIPTORS
+                if d["name"] not in existing_names
+            ]
+            if additions and isinstance(response, dict) and isinstance(response.get("result"), dict):
+                response["result"]["tools"] = list(upstream_tools) + additions
+        except Exception:
+            _log.exception("tools/list augmentation failed (non-fatal)")
+        return JSONResponse(content=response)
+
     response = await _call(body)
     return JSONResponse(content=response)
 
