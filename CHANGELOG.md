@@ -245,6 +245,27 @@ consumers were getting the wrong picture.
 
 ## [Unreleased]
 
+### Added — 2026-05-28 — *DB-error observability + postgres memcg pressure canary (#97)*
+
+Today's morning OOM cluster (postgres killed twice inside its docker memcg at 08:57 + 09:19 PDT, surfaced as 26+ `OperationalError: connection is closed` events) was invisible to `/health` — the daemon process stayed up while in-flight queries returned errors. Same silent-failure-under-healthy-surface shape #92 was filed to close, just for the postgres dependency. Three hooks land here so the next time it happens the operator sees it.
+
+- **DB-error ring buffer + `/health` summary.** Every `psycopg2.OperationalError` caught by `_connect_postgres()` or the `/mcp` daemon-native-tools dispatch is classified by surface message and recorded into a bounded deque (max 1000 entries, ~100 KB ceiling). The `/health` response now carries a `db_errors` block:
+  ```json
+  "db_errors": {
+    "total_last_window": 0,
+    "window_seconds": 300,
+    "by_pattern": {},
+    "newest_ts": null
+  }
+  ```
+  Pattern buckets: `in_recovery` / `connection_closed` / `server_closed` / `connection_lost` / `connect_failed` / `timeout` / `other` — matches what the 2026-05-28 journal grep cataloged. Lock-guarded for thread-safe snapshots under concurrent error recording.
+- **Postgres memcg pressure canary at startup.** Lifespan logs the postgres container's docker stats: INFO below threshold, WARNING above. Threshold tunable via `PALACE_POSTGRES_MEMCG_WARN_PERCENT` (default 75 %; today's OOMs happened at 81 % sustained so 75 gives ~5-15 min lead time).
+- **Postgres memcg in `/health`.** `/health` adds a `postgres_memcg` block (`{container, usage, limit, percent, probed_at}`) when docker stats succeeds. Probe is bounded at 2 s with defensive guards against null fields and TypeError; failure modes degrade gracefully (field omitted, `/health` stays green).
+- **Container name override** via `PALACE_POSTGRES_CONTAINER` (default `mempalace-db`), threaded through canary → probe.
+- **33 tests** in `tests/test_observability_hooks.py` covering pattern classification (8 cases including `connect_failed` for psycopg2's "connection refused"), ring-buffer windowing + bounding + truncation, docker-stats happy path + 4 failure modes + null-field guards, canary INFO/WARN/skip flows, env-threading, tz-aware UTC timestamps, lock presence, and the `_connect_postgres()` → `_record_db_error()` integration.
+
+Closes [#97](https://github.com/techempower-org/palace-daemon/issues/97); the postgres-memcg-tuning question (raising the cgroup limit so the OOM doesn't happen in the first place) is a separate concern, not addressed here.
+
 ### Added — 2026-05-28 — *deploy-resilience: rsync backup + drift canary + Syncthing keepalive (#92)*
 
 The 2026-05-28 Syncthing outage (clean exit at 07:55 PDT, no auto-restart, ~1.5 h of mempalace work undeployed before anyone noticed) exposed three gaps in the deploy story. This change closes all three.
