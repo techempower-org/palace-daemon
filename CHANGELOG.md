@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Fixed — *#154: protect palace-daemon from userland `earlyoom` SIGTERM*
+
+The mysterious `Shutting down` mid-deploy that broke smoke tests on
+2026-05-28 was traced to userland `earlyoom` (not systemd, not the
+daemon itself). When familiar's system-wide memory dropped below
+earlyoom's default 10% threshold during a `/graph` call (daemon RSS
+spikes to ~1.4 GiB walking 406k drawers + 1.1M AGE entities),
+earlyoom picked the daemon as the highest-scoring SIGTERM victim
+("badness 706, VmRSS 1440 MiB").
+
+Fix: `OOMScoreAdjust=-500` in `palace-daemon.service`. This lowers the
+daemon's `/proc/$pid/oom_score` (verified: was 706+, now 336) so
+earlyoom selects other processes when system memory pressure rises.
+The cgroup `MemoryMax=2G` drop-in still caps daemon memory; this just
+prevents preemption by the system-wide killer.
+
+Applied to familiar via `/etc/systemd/system/palace-daemon.service.d/
+oom.conf` drop-in for the running install. New installs pick up the
+adjustment from the in-repo unit file.
+
 ### Refactored — *#101 twelfth slice: extract wing-slug + canonical-rooms to `rooms.py`*
 
 Moved `_normalize_wing_slug` (~10 LOC), `_canonical_rooms` (~35 LOC),

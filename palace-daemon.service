@@ -28,5 +28,14 @@ StandardOutput=journal
 StandardError=journal
 KillMode=mixed
 
+# Lower oom_score so userland earlyoom (running on familiar at default
+# 10% mem / 10% swap thresholds) doesn't pick the daemon as its
+# SIGTERM victim during memory-heavy /graph or /backfill-age calls.
+# The daemon's MemoryMax=2G drop-in caps its cgroup; this just keeps
+# system-wide pressure from preempting it. -500 displaces the daemon
+# below routine python processes without making it completely
+# invulnerable. See palace-daemon#154.
+OOMScoreAdjust=-500
+
 [Install]
 WantedBy=multi-user.target
