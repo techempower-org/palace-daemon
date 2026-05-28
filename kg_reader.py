@@ -36,6 +36,7 @@ this module's namespace, bypassing main's re-exports, so patches on the
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 
@@ -108,9 +109,12 @@ def read_wings_rooms_postgres() -> tuple[dict[str, int], list[dict]]:
                 for wing, room, n in cur.fetchall():
                     if wing and room:
                         rooms_by_wing.setdefault(wing, {})[room] = n
-    except Exception:
+    except Exception as e:
         # Schema drift, connection issue, statement timeout, anything —
-        # degrade to empty rather than 500 the /graph request.
+        # degrade to empty rather than 500 the /graph request. Log so
+        # the underlying failure is visible to journalctl (lesson from
+        # palace-daemon#157 — silent swallows hide bugs for weeks).
+        logging.warning("read_wings_rooms_postgres: query failed: %s", e)
         return {}, []
 
     all_wings = set(wings) | set(rooms_by_wing)
@@ -243,7 +247,8 @@ def read_kg_postgres(
         from mempalace.knowledge_graph_age import KnowledgeGraphAGE
 
         kg = KnowledgeGraphAGE(dsn=dsn)
-    except Exception:
+    except Exception as e:
+        logging.warning("read_kg_postgres: KnowledgeGraphAGE init failed: %s", e)
         return [], [], []
 
     entities: list[dict] = []
@@ -256,7 +261,12 @@ def read_kg_postgres(
                 {"n": int(entity_limit)},
                 fetch=True,
             )
-        except Exception:
+        except Exception as e:
+            # Log so failures don't disappear into silent fallback (lesson
+            # from palace-daemon#157). The empty-list fallback below still
+            # gives /graph a valid response shape; the warning surfaces
+            # the underlying cause to journalctl.
+            logging.warning("read_kg_postgres: Entity query failed: %s", e)
             ent_rows = []
         for r in ent_rows:
             name = kg._unwrap_agtype(r[0])
@@ -279,7 +289,8 @@ def read_kg_postgres(
                 {"n": int(triple_limit)},
                 fetch=True,
             )
-        except Exception:
+        except Exception as e:
+            logging.warning("read_kg_postgres: RELATION query failed: %s", e)
             rel_rows = []
         for r in rel_rows:
             subj = kg._unwrap_agtype(r[0])
@@ -307,7 +318,8 @@ def read_kg_postgres(
                 {"n": int(mention_limit)},
                 fetch=True,
             )
-        except Exception:
+        except Exception as e:
+            logging.warning("read_kg_postgres: MENTIONS query failed: %s", e)
             men_rows = []
         for r in men_rows:
             subj = kg._unwrap_agtype(r[0])
@@ -383,7 +395,8 @@ def read_kg_postgres_stats() -> dict | None:
                 cur.execute(f'SELECT count(*) FROM {graph}."MENTIONS"')
                 row = cur.fetchone()
                 mentions = int(row[0]) if row else 0
-        except Exception:
+        except Exception as e:
+            logging.warning("read_kg_postgres_stats: count queries failed: %s", e)
             try:
                 kg._conn.rollback()
             except Exception:
