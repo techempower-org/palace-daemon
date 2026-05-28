@@ -194,15 +194,32 @@ ok "restart issued"
 
 nstep "wait for daemon health"
 deadline=$((SECONDS + HEALTH_TIMEOUT))
+deployed_version="?"
 while (( SECONDS < deadline )); do
-    if curl -fs --max-time 3 "$URL/health" >/dev/null 2>&1; then
-        version=$(curl -s "$URL/health" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("version","?"))' 2>/dev/null || echo "?")
-        ok "healthy on v$version (after $((SECONDS - (deadline - HEALTH_TIMEOUT)))s)"
+    # Try a 2xx fetch first. /health may return 503 during crash_loop windows
+    # but still has a populated body — re-fetch without -f so we still parse
+    # the version field for the verification step below.
+    health=$(curl -fs --max-time 3 "$URL/health" 2>/dev/null) || true
+    [ -z "$health" ] && health=$(curl -s --max-time 3 "$URL/health" 2>/dev/null) || true
+    if [ -n "$health" ]; then
+        deployed_version=$(printf '%s' "$health" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("version","?"))' 2>/dev/null || echo "?")
+        ok "healthy on v$deployed_version (after $((SECONDS - (deadline - HEALTH_TIMEOUT)))s)"
         break
     fi
     sleep 1
 done
 (( SECONDS >= deadline )) && fail "daemon did not respond on $URL within ${HEALTH_TIMEOUT}s"
+
+# #119: verify the deployed VERSION matches the local code constant.
+# Today's 1.9.0 deploy (commit 3dc4d39) returned green here even though
+# Syncthing hadn't delivered the new code — the daemon restarted on the
+# old VERSION=1.8.4 main.py. This check turns silent failure loud.
+expected_version=$(grep -E '^VERSION\s*=' "$(git rev-parse --show-toplevel)/main.py" 2>/dev/null \
+    | head -1 | sed -E 's/^VERSION\s*=\s*"([^"]+)".*/\1/')
+if [ -n "$expected_version" ] && [ "$deployed_version" != "?" ] && [ "$expected_version" != "$deployed_version" ]; then
+    warn "VERSION mismatch: expected v$expected_version (local) but daemon reports v$deployed_version"
+    warn "Code may not have synced to $HOST. Try: scripts/rsync-palace-daemon.sh"
+fi
 
 if [ "$RUN_VERIFY" = "1" ]; then
     nstep "smoke-test routes"
