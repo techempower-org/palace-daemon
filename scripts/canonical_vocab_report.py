@@ -35,17 +35,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 from collections import defaultdict
 from typing import Optional
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.dirname(_HERE)
-if _ROOT not in sys.path:
-    sys.path.insert(0, _ROOT)
-
-from kg_canonical_vocab import CANONICAL_RELATIONS, CanonicalMapper  # noqa: E402
-from kg_predicate_norm import normalize_predicate  # noqa: E402
+from mempalace.kg_canonical_vocab import CANONICAL_RELATIONS, CanonicalMapper
+from mempalace.kg_predicate_norm import normalize_predicate
 
 
 def _load_freq(args: argparse.Namespace) -> list[dict]:

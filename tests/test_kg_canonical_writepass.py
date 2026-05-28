@@ -15,15 +15,9 @@ Run with::
     venv/bin/python -m pytest tests/test_kg_canonical_writepass.py -q
 """
 import os
-import sys
 import unittest
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.dirname(_HERE)
-if _ROOT not in sys.path:
-    sys.path.insert(0, _ROOT)
-
-import kg_canonical_writepass as wp  # noqa: E402
+import mempalace.kg_canonical_writepass as wp
 
 
 class _FakeMapper:
