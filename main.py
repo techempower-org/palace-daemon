@@ -2837,7 +2837,13 @@ async def search_fast(
     loop = asyncio.get_running_loop()
     def _query():
         import psycopg2
-        with psycopg2.connect(dsn, connect_timeout=3) as conn:
+        # #110: record OperationalError on connect for /health.db_errors visibility
+        try:
+            conn = psycopg2.connect(dsn, connect_timeout=3)
+        except psycopg2.OperationalError as e:
+            _record_db_error(e)
+            raise
+        with conn:
             with conn.cursor() as cur:
                 cur.execute("SET LOCAL statement_timeout = '5s'")
                 sql = """
@@ -3078,7 +3084,14 @@ def _read_wings_rooms_postgres() -> tuple[dict[str, int], list[dict]]:
         import psycopg2
         # Short timeout — /graph is interactive; we'd rather degrade than
         # block the request behind a stuck planner.
-        with psycopg2.connect(dsn, connect_timeout=5) as conn:
+        # #110: record OperationalError on connect before allowing the outer
+        # except to swallow it for graceful degradation.
+        try:
+            conn = psycopg2.connect(dsn, connect_timeout=5)
+        except psycopg2.OperationalError as e:
+            _record_db_error(e)
+            raise
+        with conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "SET LOCAL statement_timeout = '10s'; "
@@ -4074,7 +4087,14 @@ async def backfill_age_status(
         import psycopg2, subprocess as _sp
         dsn = os.environ.get("MEMPALACE_POSTGRES_DSN") or getattr(_mp.MempalaceConfig(), "postgres_dsn", None)
         if dsn:
-            with psycopg2.connect(dsn, connect_timeout=5) as conn:
+            # #110: record OperationalError on connect before allowing the outer
+            # except to swallow it for graceful degradation.
+            try:
+                _bf_conn = psycopg2.connect(dsn, connect_timeout=5)
+            except psycopg2.OperationalError as e:
+                _record_db_error(e)
+                raise
+            with _bf_conn as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         "SET LOCAL statement_timeout = '5s'; "
