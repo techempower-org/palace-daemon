@@ -1311,6 +1311,12 @@ async def mcp_proxy(request: Request, x_api_key: str | None = Header(default=Non
     # Issue #49.
     params = body.get("params") if isinstance(body, dict) else None
     tool = params.get("name") if isinstance(params, dict) else None
+    arguments = params.get("arguments") if isinstance(params, dict) else None
+    if not isinstance(arguments, dict):
+        arguments = {}
+
+    # Fast-intercepts that have an upstream MCP equivalent — failures fall
+    # through to the slow path so behaviour matches the upstream MCP server.
     fast_fn = None
     if PALACE_MCP_FAST_INTERCEPT and tool in ("mempalace_status", "mempalace_kg_stats"):
         fast_fn = {
@@ -1330,9 +1336,42 @@ async def mcp_proxy(request: Request, x_api_key: str | None = Header(default=Non
             }
             return JSONResponse(content=envelope)
         except Exception as e:
-            # Any failure (postgres unreachable, AGE down, chroma backend)
-            # falls back to the slow path so behaviour matches upstream.
             _log.warning("fast-intercept %s failed (%s); falling back to /mcp slow path", tool, e)
+
+    # Daemon-native tools (#93): rooms CRUD + wakeup + mined. These have no
+    # upstream MCP equivalent — the CLI commands they replace open a local
+    # ChromaDB client which breaks under daemon-strict mode. JSON-RPC error
+    # codes (-32602 invalid params, -32004 backend down, -32000 internal)
+    # let the CLI consumer branch on failure mode rather than guessing.
+    native_fn = _DAEMON_NATIVE_TOOLS.get(tool)
+    if native_fn is not None:
+        loop = asyncio.get_running_loop()
+        try:
+            payload = await loop.run_in_executor(None, native_fn, arguments)
+            envelope = {
+                "jsonrpc": "2.0",
+                "id": body.get("id"),
+                "result": {
+                    "content": [{"type": "text", "text": json.dumps(payload, default=str)}]
+                },
+            }
+            return JSONResponse(content=envelope)
+        except _DaemonToolError as e:
+            envelope = {
+                "jsonrpc": "2.0",
+                "id": body.get("id"),
+                "error": {"code": e.code, "message": str(e), "data": e.data},
+            }
+            return JSONResponse(content=envelope)
+        except Exception as e:
+            _log.exception("daemon-native %s failed", tool)
+            envelope = {
+                "jsonrpc": "2.0",
+                "id": body.get("id"),
+                "error": {"code": -32000, "message": f"internal error: {e}"},
+            }
+            return JSONResponse(content=envelope)
+
     response = await _call(body)
     return JSONResponse(content=response)
 
@@ -2037,6 +2076,324 @@ def _fast_status_payload() -> dict:
     finally:
         conn.close()
     return {"total_drawers": total, "wings": wings, "rooms": rooms}
+
+
+# ── Daemon-native MCP tools (#93) ─────────────────────────────────────────────
+# Six tools the CLI needs when daemon-strict mode is on. The mempalace CLI's
+# `cmd_rooms` / `cmd_wakeup` / `cmd_mined` open a local ChromaDB client today
+# and break against the retired local palace; routing them through the daemon
+# closes that gap. Companion to mempalace#285. See Cirrus's recon notes on
+# techempower-org/palace-daemon#93 for the design rationale.
+
+
+class _DaemonToolError(Exception):
+    """JSON-RPC error from a daemon-native tool handler.
+
+    Carries a JSON-RPC error code + optional structured data so the CLI
+    can branch on failure mode (bad params vs backend down vs internal).
+    """
+
+    def __init__(self, code: int, message: str, data=None):
+        super().__init__(message)
+        self.code = code
+        self.data = data
+
+
+_RPC_INVALID_PARAMS = -32602   # standard
+_RPC_BACKEND_DOWN = -32004     # custom — postgres unreachable / DSN missing
+_RPC_INTERNAL = -32000         # standard
+
+
+def _require_postgres():
+    """Return the DSN or raise BACKEND_DOWN. Used by every native tool."""
+    dsn = _postgres_dsn()
+    if not dsn:
+        raise _DaemonToolError(
+            _RPC_BACKEND_DOWN,
+            "postgres backend not configured (set MEMPALACE_POSTGRES_DSN)",
+        )
+    return dsn
+
+
+def _normalize_room_name(raw):
+    """Match the CLI's normalization: stripped, lowercased, non-empty str."""
+    if not isinstance(raw, str):
+        raise _DaemonToolError(
+            _RPC_INVALID_PARAMS, "room name must be a string"
+        )
+    name = raw.strip().lower()
+    if not name:
+        raise _DaemonToolError(
+            _RPC_INVALID_PARAMS, "room name cannot be blank"
+        )
+    return name
+
+
+def _invalidate_rooms_cache():
+    """Drop the in-process canonical-rooms cache; next read rebuilds it."""
+    global _canonical_rooms_cache
+    _canonical_rooms_cache = None
+
+
+def _fast_mcp_rooms_list(arguments: dict) -> list[dict]:
+    """`mempalace_rooms_list({})` → list of {name, description, added_at}.
+
+    Schema-not-deployed (UndefinedTable) returns [] rather than erroring,
+    matching `cmd_rooms list`'s "(no canonical rooms registered)" UX.
+    """
+    dsn = _require_postgres()
+    import psycopg2
+    from psycopg2 import errors as pg_errors
+    conn = psycopg2.connect(dsn, connect_timeout=3)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = '5s'")
+                try:
+                    cur.execute(
+                        "SELECT name, COALESCE(description, '') AS description, added_at "
+                        "FROM mempalace_canonical_rooms ORDER BY name"
+                    )
+                    rows = cur.fetchall()
+                except pg_errors.UndefinedTable:
+                    return []
+    finally:
+        conn.close()
+    return [
+        {"name": r[0], "description": r[1], "added_at": r[2]} for r in rows
+    ]
+
+
+def _fast_mcp_rooms_add(arguments: dict) -> dict:
+    """`mempalace_rooms_add({name, description?})` → {action, name}.
+
+    `action` is "added" on INSERT, "updated" on the ON CONFLICT branch.
+    Mirrors the CLI's `xmax=0` trick so the user-visible verbiage matches.
+    """
+    name = _normalize_room_name(arguments.get("name"))
+    description = arguments.get("description")
+    if description is not None and not isinstance(description, str):
+        raise _DaemonToolError(
+            _RPC_INVALID_PARAMS, "description must be a string or omitted"
+        )
+    dsn = _require_postgres()
+    import psycopg2
+    conn = psycopg2.connect(dsn, connect_timeout=3)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = '5s'")
+                # xmax = 0 ⇒ the row was INSERTed; non-zero ⇒ UPDATEd.
+                # Postgres's writeable-CTE trick: the system column is only
+                # available on the row produced by the INSERT path.
+                cur.execute(
+                    "INSERT INTO mempalace_canonical_rooms (name, description, added_at) "
+                    "VALUES (%s, %s, now()) "
+                    "ON CONFLICT (name) DO UPDATE "
+                    "  SET description = EXCLUDED.description "
+                    "RETURNING (xmax = 0) AS inserted",
+                    (name, description),
+                )
+                inserted = cur.fetchone()[0]
+    finally:
+        conn.close()
+    _invalidate_rooms_cache()
+    return {"action": "added" if inserted else "updated", "name": name}
+
+
+def _fast_mcp_rooms_rename(arguments: dict) -> dict:
+    """`mempalace_rooms_rename({old, new})` → {old, new, affected_drawers}.
+
+    Relies on the `ON UPDATE CASCADE` FK on `mempalace_drawers.room` so the
+    rename is a single statement that cascades to every referencing row.
+    """
+    old = _normalize_room_name(arguments.get("old"))
+    new = _normalize_room_name(arguments.get("new"))
+    if old == new:
+        raise _DaemonToolError(
+            _RPC_INVALID_PARAMS, "old and new room names are identical"
+        )
+    dsn = _require_postgres()
+    import psycopg2
+    from psycopg2 import errors as pg_errors
+    conn = psycopg2.connect(dsn, connect_timeout=3)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = '10s'")
+                # Count first so we can report the cascade size — the count
+                # is approximate (no advisory lock) but inside the same
+                # transaction it's accurate enough for "drawers affected".
+                cur.execute(
+                    "SELECT count(*) FROM mempalace_drawers WHERE room = %s",
+                    (old,),
+                )
+                affected = cur.fetchone()[0]
+                try:
+                    cur.execute(
+                        "UPDATE mempalace_canonical_rooms SET name = %s WHERE name = %s",
+                        (new, old),
+                    )
+                    if cur.rowcount == 0:
+                        raise _DaemonToolError(
+                            _RPC_INVALID_PARAMS,
+                            f"room {old!r} does not exist",
+                        )
+                except pg_errors.UniqueViolation:
+                    raise _DaemonToolError(
+                        _RPC_INVALID_PARAMS,
+                        f"target room {new!r} already exists",
+                    )
+    finally:
+        conn.close()
+    _invalidate_rooms_cache()
+    return {"old": old, "new": new, "affected_drawers": int(affected)}
+
+
+def _fast_mcp_rooms_remove(arguments: dict) -> dict:
+    """`mempalace_rooms_remove({name})` → {name, removed: bool}.
+
+    Refuses with -32602 + drawer count if any drawer still references the
+    room — the operator should `mempalace purge --room <name>` or rename
+    first. The count makes the refusal actionable rather than blunt.
+    """
+    name = _normalize_room_name(arguments.get("name"))
+    dsn = _require_postgres()
+    import psycopg2
+    conn = psycopg2.connect(dsn, connect_timeout=3)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = '5s'")
+                cur.execute(
+                    "SELECT count(*) FROM mempalace_drawers WHERE room = %s",
+                    (name,),
+                )
+                referencing = cur.fetchone()[0]
+                if referencing > 0:
+                    raise _DaemonToolError(
+                        _RPC_INVALID_PARAMS,
+                        f"cannot remove {name!r}: {referencing} drawers still reference it",
+                        data={"name": name, "referencing_drawers": referencing},
+                    )
+                cur.execute(
+                    "DELETE FROM mempalace_canonical_rooms WHERE name = %s",
+                    (name,),
+                )
+                removed = cur.rowcount > 0
+    finally:
+        conn.close()
+    _invalidate_rooms_cache()
+    return {"name": name, "removed": bool(removed)}
+
+
+def _fast_mcp_mined(arguments: dict) -> dict:
+    """`mempalace_mined({wing?, limit?})` → grouped sources by wing.
+
+    Walks ``mempalace_drawers.metadata`` for `source_file` and groups by
+    wing. Skips drawers whose metadata lacks the key entirely OR has a
+    blank source_file (diary entries / kg drawers / manual additions).
+    """
+    wing_filter = arguments.get("wing")
+    if wing_filter is not None and not isinstance(wing_filter, str):
+        raise _DaemonToolError(
+            _RPC_INVALID_PARAMS, "wing must be a string or omitted"
+        )
+    limit = arguments.get("limit")
+    if limit is not None:
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            raise _DaemonToolError(
+                _RPC_INVALID_PARAMS, "limit must be an integer or omitted"
+            )
+        if limit <= 0:
+            raise _DaemonToolError(
+                _RPC_INVALID_PARAMS, "limit must be positive"
+            )
+    dsn = _require_postgres()
+    import psycopg2
+    conn = psycopg2.connect(dsn, connect_timeout=3)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = '10s'")
+                sql = (
+                    "SELECT wing, metadata->>'source_file' AS source_file, count(*) AS n "
+                    "FROM mempalace_drawers "
+                    "WHERE metadata ? 'source_file' "
+                    "  AND metadata->>'source_file' <> '' "
+                )
+                params_list: list = []
+                if wing_filter:
+                    sql += "AND wing = %s "
+                    params_list.append(wing_filter)
+                sql += "GROUP BY wing, source_file ORDER BY wing, n DESC"
+                cur.execute(sql, params_list)
+                rows = cur.fetchall()
+    finally:
+        conn.close()
+    # Group into the issue's shape, honouring per-wing limit.
+    by_wing: dict[str, dict] = {}
+    total_sources = 0
+    for wing, source_file, n in rows:
+        slot = by_wing.setdefault(
+            wing, {"sources": [], "total_sources": 0, "total_drawers": 0, "truncated": False}
+        )
+        if limit is None or slot["total_sources"] < limit:
+            slot["sources"].append({"source_file": source_file, "drawer_count": int(n)})
+        else:
+            slot["truncated"] = True
+        slot["total_sources"] += 1
+        slot["total_drawers"] += int(n)
+    total_sources = sum(slot["total_sources"] for slot in by_wing.values())
+    return {
+        "sources_by_wing": by_wing,
+        "wing_filter": wing_filter,
+        "total_wings": len(by_wing),
+        "total_sources": total_sources,
+    }
+
+
+def _fast_mcp_wakeup(arguments: dict) -> dict:
+    """`mempalace_wakeup({wing?})` → {text, tokens}.
+
+    Delegates to ``mempalace.layers.MemoryStack().wake_up(wing=...)`` so
+    the L0 (identity) + L1 (essential story) rendering stays in one place
+    and the daemon doesn't drift from the CLI's output shape. MemoryStack
+    reads ``mempalace.config.MempalaceConfig`` for its palace path and
+    talks to whichever backend is configured (chroma / postgres) — the
+    daemon's editable mempalace install makes this transparent.
+    """
+    wing = arguments.get("wing")
+    if wing is not None and not isinstance(wing, str):
+        raise _DaemonToolError(
+            _RPC_INVALID_PARAMS, "wing must be a string or omitted"
+        )
+    try:
+        from mempalace.layers import MemoryStack
+        stack = MemoryStack()
+        text = stack.wake_up(wing=wing)
+    except Exception as e:
+        # Bubble up as internal so the operator can see the cause; the
+        # MemoryStack path can fail for many reasons (config missing,
+        # identity file unreadable, backend down) and the message is the
+        # most useful signal for triage.
+        raise _DaemonToolError(
+            _RPC_INTERNAL, f"wake_up failed: {e}"
+        )
+    tokens = len(text) // 4  # match the CLI's rough estimate
+    return {"text": text, "tokens": tokens, "wing": wing}
+
+
+_DAEMON_NATIVE_TOOLS = {
+    "mempalace_rooms_list": _fast_mcp_rooms_list,
+    "mempalace_rooms_add": _fast_mcp_rooms_add,
+    "mempalace_rooms_rename": _fast_mcp_rooms_rename,
+    "mempalace_rooms_remove": _fast_mcp_rooms_remove,
+    "mempalace_mined": _fast_mcp_mined,
+    "mempalace_wakeup": _fast_mcp_wakeup,
+}
 
 
 @app.get("/status/fast")
