@@ -308,69 +308,15 @@ from auth import (  # noqa: E402
 )
 
 
-# Sentinel for "no value passed" — distinguishes _parse_path_map() (read env)
-# from _parse_path_map(None) (no mapping). Closes Copilot's test-isolation
-# concern on jphein/palace-daemon#1: the previous None default coupled tests
-# to whatever PALACE_DAEMON_PATH_MAP happened to be in the test process env.
-_PATH_MAP_USE_ENV: object = object()
-
-
-def _parse_path_map(raw=_PATH_MAP_USE_ENV) -> list[tuple[str, str]]:
-    """Parse PALACE_DAEMON_PATH_MAP into ordered (client_prefix, daemon_prefix) pairs.
-
-    Format: comma-separated ``client_prefix=daemon_prefix`` entries. Whitespace
-    around each token is stripped. Empty entries and entries missing ``=`` are
-    skipped silently. Order is preserved so the operator can put more-specific
-    prefixes first.
-
-    Args:
-        raw: When omitted, reads from ``PALACE_DAEMON_PATH_MAP``. Pass an
-            explicit string (or ``""``/``None``) to bypass env entirely —
-            tests use this to stay deterministic regardless of CI / dev env.
-
-    Example::
-
-        PALACE_DAEMON_PATH_MAP="/home/jp/.claude/=/home/jp/.claude/,/home/jp/Projects/=/home/jp/Projects/"
-    """
-    if raw is _PATH_MAP_USE_ENV:
-        raw = os.environ.get("PALACE_DAEMON_PATH_MAP", "")
-    raw = (raw or "").strip()
-    if not raw:
-        return []
-    pairs: list[tuple[str, str]] = []
-    for entry in raw.split(","):
-        entry = entry.strip()
-        if not entry or "=" not in entry:
-            continue
-        client_prefix, daemon_prefix = entry.split("=", 1)
-        client_prefix = client_prefix.strip()
-        daemon_prefix = daemon_prefix.strip()
-        if client_prefix and daemon_prefix:
-            pairs.append((client_prefix, daemon_prefix))
-    return pairs
-
-
-def _translate_client_path(path: str) -> str:
-    """Translate a client-side absolute path to a daemon-side path.
-
-    Hooks running on a client machine (e.g. katana) speak in their own
-    filesystem namespace (``/home/jp/.claude/...``); the daemon may see the
-    same files at a different path (e.g. via Syncthing). When client and
-    daemon paths are identical (Syncthing to same absolute paths), the map
-    is identity — still set it so the mechanism is explicit.
-
-    The first matching prefix wins; non-matching paths pass through
-    unchanged so daemon-side absolute paths still work.
-
-    Joining is normalized so mismatched trailing/leading slashes between
-    the two prefixes can't produce mangled paths
-    (Copilot finding on jphein/palace-daemon#1).
-    """
-    for client_prefix, daemon_prefix in _parse_path_map():
-        if path.startswith(client_prefix):
-            suffix = path[len(client_prefix):]
-            return daemon_prefix.rstrip("/") + "/" + suffix.lstrip("/")
-    return path
+# ── Path-map translation (#101 eleventh slice) ─────────────────────────────
+# Lives in path_map.py now. main.py keeps the `_`-prefixed names alive via
+# re-export so the /mine, /silent-save, watcher translator, and existing
+# tests in test_path_translation.py / test_mine_*.py keep working unchanged.
+from path_map import (  # noqa: E402
+    PATH_MAP_USE_ENV as _PATH_MAP_USE_ENV,
+    parse_path_map as _parse_path_map,
+    translate_client_path as _translate_client_path,
+)
 
 
 def _sem_for(request_dict: dict) -> asyncio.Semaphore:
