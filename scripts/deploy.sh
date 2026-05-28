@@ -266,6 +266,23 @@ if [ -n "$expected_version" ] && [ "$deployed_version" != "?" ] && [ "$expected_
 fi
 
 if [ "$RUN_VERIFY" = "1" ]; then
+    # #151: /graph reads ~406k drawers + walks AGE backing tables — cold
+    # latency is 28-35s on the production palace. /health returning 200
+    # only means the ping + collection-open succeeded; it doesn't warm
+    # /graph's caches. Issuing one /graph hit before verify-routes
+    # ensures subsequent probes are sub-second and the smoke test stays
+    # reliable. Failures here are non-fatal — verify-routes will catch
+    # any real problem with a more detailed error.
+    nstep "warm /graph cache"
+    warm_args=(-s -o /dev/null -w "%{http_code}" --max-time 120)
+    [ -n "$KEY" ] && warm_args+=(-H "X-API-Key: $KEY")
+    warm_code=$(curl "${warm_args[@]}" "$URL/graph" 2>/dev/null || echo "000")
+    if [ "$warm_code" = "200" ]; then
+        ok "/graph warmed (HTTP $warm_code)"
+    else
+        warn "/graph warm returned HTTP $warm_code — verify-routes may still recover"
+    fi
+
     nstep "smoke-test routes"
     PALACE_DAEMON_URL="$URL" PALACE_API_KEY="$KEY" \
         bash "$SCRIPT_DIR/verify-routes.sh" \
