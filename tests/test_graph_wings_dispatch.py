@@ -125,51 +125,104 @@ class TestReadKgDirectDispatch(unittest.TestCase):
 
 
 class TestReadKgPostgresAGE(unittest.TestCase):
-    """`_read_kg_postgres` (1.8.0+) runs Cypher against AGE for entities
-    and Drawer→Entity MENTIONS edges. These tests stub the
-    ``KnowledgeGraphAGE`` import so the wiring (which queries run, what
-    LIMITs they carry, how rows project into the public schema) is
-    pinned without needing a live Postgres + AGE.
+    """`_read_kg_postgres` (1.8.0+) reads from AGE label tables.
+
+    Post-#160 the implementation switched from Cypher walks (which
+    exhaust postgres shared memory at production scale) to direct
+    SQL on the backing label tables with a CTE that bounds the edge
+    scan before the Entity/Drawer join.
+
+    These tests stub a psycopg2 connection so the wiring (which
+    queries run, what LIMITs they carry, how rows project) is pinned
+    without needing a live Postgres + AGE.
     """
 
-    def _make_kg_class(self, ent_rows, rel_rows, men_rows):
+    def _make_pg(self, ent_rows, rel_rows, men_rows):
+        """Build a fake psycopg2 connection capturing executed SQL +
+        returning the staged rows based on which table is referenced.
+
+        The kg_reader code issues three SELECTs; we dispatch on substrings
+        in the SQL ("FROM ...Entity\"", "FROM rel_sample", etc.) so the
+        test stays decoupled from exact whitespace.
+        """
+        from unittest.mock import MagicMock
+
         captured = {"calls": []}
 
-        class _StubKG:
-            def __init__(self, dsn=None):
-                self.dsn = dsn
+        class _FakeCursor:
+            def __init__(self):
+                self._rows = []
 
-            def _run_cypher(self, cypher, params, fetch=True):
-                captured["calls"].append((cypher, dict(params)))
-                if "Entity)" in cypher and "RELATION" not in cypher and "MENTIONS" not in cypher:
-                    return ent_rows
-                if "RELATION" in cypher:
-                    return rel_rows
-                return men_rows
+            def __enter__(self):
+                return self
 
-            @staticmethod
-            def _unwrap_agtype(v):
-                return v
+            def __exit__(self, *_):
+                pass
+
+            def execute(self, sql, params=None):
+                captured["calls"].append((sql, params))
+                # Bare SETs return no rows.
+                if sql.strip().upper().startswith("SET"):
+                    self._rows = []
+                    return
+                # Project to the staged rows by table reference.
+                if 'FROM rel_sample' in sql or '"RELATION"' in sql and 'rel_sample' in sql:
+                    self._rows = list(rel_rows)
+                elif 'FROM men_sample' in sql or '"MENTIONS"' in sql and 'men_sample' in sql:
+                    self._rows = list(men_rows)
+                elif '"Entity"' in sql:
+                    self._rows = list(ent_rows)
+                else:
+                    self._rows = []
+
+            def fetchall(self):
+                return self._rows
+
+        class _FakeConn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                pass
+
+            def cursor(self):
+                return _FakeCursor()
+
+            def rollback(self):
+                pass
 
             def close(self):
                 pass
 
-        return _StubKG, captured
+        return _FakeConn, captured
+
+    def _make_stub_kg(self):
+        """The new code still instantiates KnowledgeGraphAGE just to read
+        GRAPH_NAME from it. Stub it so the import resolves."""
+        class _StubKG:
+            GRAPH_NAME = "mempalace_kg"
+
+            def __init__(self, dsn=None):
+                self.dsn = dsn
+
+            def close(self):
+                pass
+
+        return _StubKG
 
     def test_age_projection_and_limits(self):
-        """Three Cypher queries fire in order: entities, RELATION
-        triples, MENTIONS. Each gets its own ``LIMIT`` from a distinct
-        kwarg so /graph can size them independently. Pre-1.8.2 the
-        MENTIONS rows came back projected as ``triples`` — now they
-        land in their own list.
+        """Three SQL queries fire after the SET statements: Entity scan,
+        RELATION CTE+join, MENTIONS CTE+join. Each gets its own ``LIMIT``
+        from a distinct kwarg so /graph can size them independently.
         """
-        ent_rows = [["alpha"], ["beta"]]
-        rel_rows = [["alpha", "works_at", "beta", 1.0]]
+        ent_rows = [("alpha",), ("beta",)]
+        rel_rows = [("alpha", "works_at", "beta", "1.0")]
         men_rows = [
-            ["drawer-1", "alpha", "PROPER_NOUN", 0.5],
-            ["drawer-2", "beta", "TECH_IDENT", 0.5],
+            ("drawer-1", "alpha", "PROPER_NOUN", "0.5"),
+            ("drawer-2", "beta", "TECH_IDENT", "0.5"),
         ]
-        StubKG, captured = self._make_kg_class(ent_rows, rel_rows, men_rows)
+        FakeConn, captured = self._make_pg(ent_rows, rel_rows, men_rows)
+        StubKG = self._make_stub_kg()
 
         import sys
         stub_mod = type(sys)("mempalace.knowledge_graph_age")
@@ -177,21 +230,32 @@ class TestReadKgPostgresAGE(unittest.TestCase):
         cfg = _Cfg("postgres")
         cfg.postgres_dsn = "postgres://stub"
         with patch.dict(sys.modules, {"mempalace.knowledge_graph_age": stub_mod}), \
-             patch.object(kg_reader, "_config", return_value=cfg):
+             patch.object(kg_reader, "_config", return_value=cfg), \
+             patch("psycopg2.connect", return_value=FakeConn()):
             entities, triples, mentions = main._read_kg_postgres(
                 entity_limit=50, triple_limit=10, mention_limit=120
             )
 
-        self.assertEqual(len(captured["calls"]), 3)
-        ent_call_cypher, ent_params = captured["calls"][0]
-        self.assertIn("MATCH (e:Entity)", ent_call_cypher)
-        self.assertEqual(ent_params, {"n": 50})
-        rel_call_cypher, rel_params = captured["calls"][1]
-        self.assertIn("(a:Entity)-[r:RELATION]->(b:Entity)", rel_call_cypher)
-        self.assertEqual(rel_params, {"n": 10})
-        men_call_cypher, men_params = captured["calls"][2]
-        self.assertIn("(d:Drawer)-[r:MENTIONS]->(e:Entity)", men_call_cypher)
-        self.assertEqual(men_params, {"n": 120})
+        # Filter out the SET statements — three data queries remain.
+        data_calls = [
+            (sql, params) for sql, params in captured["calls"]
+            if not sql.strip().upper().startswith("SET")
+        ]
+        self.assertEqual(len(data_calls), 3)
+
+        ent_sql, ent_params = data_calls[0]
+        self.assertIn('"Entity"', ent_sql)
+        self.assertEqual(ent_params, (50,))
+
+        rel_sql, rel_params = data_calls[1]
+        self.assertIn('rel_sample', rel_sql)
+        self.assertIn('"RELATION"', rel_sql)
+        self.assertEqual(rel_params, (10,))
+
+        men_sql, men_params = data_calls[2]
+        self.assertIn('men_sample', men_sql)
+        self.assertIn('"MENTIONS"', men_sql)
+        self.assertEqual(men_params, (120,))
 
         self.assertEqual(entities, [
             {"id": "alpha", "name": "alpha", "type": "entity", "properties": {}},

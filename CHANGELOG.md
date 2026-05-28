@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+### Fixed — *#160: replace AGE Cypher walks in `/graph` with CTE-bounded direct SQL*
+
+`/graph`'s `kg_triples` and `kg_mentions` arrays have been silently
+returning `[]` since 1.8.2 (visible after PR #159 added logging) —
+AGE's Cypher engine materializes the full match set in postgres
+shared memory before applying `LIMIT`, which exhausts `shared_buffers`
+on the production-scale corpus (1.86M RELATION + 6.4M MENTIONS):
+
+```
+read_kg_postgres: RELATION query failed: could not resize shared memory segment ...
+read_kg_postgres: MENTIONS query failed: current transaction is aborted, ...
+```
+
+Fix: replace the three Cypher walks in `read_kg_postgres` with direct
+SQL on the AGE label tables, using a CTE to bound the edge scan
+*before* joining to Entity/Drawer for property lookup:
+
+```sql
+WITH rel_sample AS (
+    SELECT id, start_id, end_id, properties
+    FROM mempalace_kg."RELATION"
+    LIMIT %s
+)
+SELECT
+    (a.properties::json->>'name')::text AS subject,
+    (r.properties::json->>'relation_type')::text AS predicate,
+    (b.properties::json->>'name')::text AS object,
+    r.properties::json->>'confidence' AS confidence
+FROM rel_sample r
+JOIN mempalace_kg."Entity" a ON a.id = r.start_id
+JOIN mempalace_kg."Entity" b ON b.id = r.end_id
+```
+
+`SET search_path = ag_catalog, public` resolves the graphid `=`
+operator (lives in `ag_catalog`, isn't on the default path).
+`SET statement_timeout = '10s'` bounds per-query cost.
+
+The output shape is preserved exactly. The existing
+`tests/test_graph_wings_dispatch.py::TestReadKgPostgresAGE` was
+updated to mock the new psycopg2 path instead of the Cypher path.
+
 ### Fixed — *log silent exception swallowers in kg_reader + rooms*
 
 Applies the lesson from #157 across the codebase: `try/except: pass`-style
