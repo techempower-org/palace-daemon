@@ -245,6 +245,34 @@ consumers were getting the wrong picture.
 
 ## [Unreleased]
 
+### Added — 2026-05-28 — *DB-error observability + postgres memcg pressure canary (#97)*
+
+Today's morning OOM cluster (postgres killed twice inside its docker memcg at 08:57 + 09:19 PDT, surfaced as 26+ `OperationalError: connection is closed` events) was invisible to `/health` — the daemon process stayed up while in-flight queries returned errors. Same silent-failure-under-healthy-surface shape #92 was filed to close, just for the postgres dependency. Three hooks land here so the next time it happens the operator sees it.
+
+- **DB-error ring buffer + `/health` summary.** Every `psycopg2.OperationalError` caught by `_connect_postgres()` or the `/mcp` daemon-native-tools dispatch is classified by surface message and recorded into a bounded deque (max 1000 entries, ~100 KB ceiling). The `/health` response now carries a `db_errors` block:
+  ```json
+  "db_errors": {
+    "total_last_window": 0,
+    "window_seconds": 300,
+    "by_pattern": {},
+    "newest_ts": null
+  }
+  ```
+  Pattern buckets: `in_recovery` / `connection_closed` / `server_closed` / `connection_lost` / `connect_failed` / `timeout` / `other` — matches what the 2026-05-28 journal grep cataloged.
+- **Postgres memcg pressure canary at startup.** Lifespan logs the postgres container's docker stats:
+  ```
+  postgres memcg canary: mempalace-db usage=2.43GiB limit=3GiB percent=81.0% (warn-threshold 75.0%)
+   — postgres container approaching OOM; consider raising the cgroup limit
+  ```
+  INFO when below threshold, WARNING when above. Threshold tunable via `PALACE_POSTGRES_MEMCG_WARN_PERCENT` (default 75 %; today's OOMs happened at 81 % sustained so 75 gives ~5-15 min lead time).
+- **Postgres memcg in `/health`.** `/health` adds a `postgres_memcg` block (`{container, usage, limit, percent, probed_at}`) when docker stats succeeds. Probe is bounded at 2 s; if docker is unreachable or the container is missing, the field is omitted rather than degrading `/health` status.
+- **Container name override** via `PALACE_POSTGRES_CONTAINER` (default `mempalace-db`).
+- **27 tests** in `tests/test_observability_hooks.py` covering pattern classification (8 cases including `connect_failed` for psycopg2's "connection refused"), ring-buffer windowing + bounding + truncation, docker-stats happy path + 4 failure modes, canary INFO/WARN/skip flows, and the `_connect_postgres()` → `_record_db_error()` integration.
+
+Closes the observability half of [#97](https://github.com/techempower-org/palace-daemon/issues/97); the postgres-memcg-tuning question (raising the cgroup limit so the OOM doesn't happen in the first place) is a separate concern, not addressed here.
+
+Branched off [#96](https://github.com/techempower-org/palace-daemon/pull/96) — uses the `_connect_postgres()` helper that PR introduces. Merge order: #96 first, then this PR.
+
 ### Added — 2026-05-28 — *daemon-native MCP tools for rooms / wakeup / mined (#93)*
 
 Six new daemon-native tools that close the gap mempalace's CLI hit under daemon-strict mode. The CLI commands `mempalace rooms list/add/rename/remove`, `mempalace wake-up`, and `mempalace mined` all opened a local ChromaDB client and silently broke once the local palace was retired. They now route through `/mcp` to the daemon, which is the single writer to the postgres backend.
