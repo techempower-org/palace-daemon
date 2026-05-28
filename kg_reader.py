@@ -254,88 +254,138 @@ def read_kg_postgres(
     entities: list[dict] = []
     triples: list[dict] = []
     mentions: list[dict] = []
+    # #160: AGE's Cypher engine materializes the full match set in postgres
+    # shared memory before applying LIMIT, which exhausts shared_buffers on
+    # production-scale corpora (1.86M RELATION + 6.4M MENTIONS triggered
+    # `could not resize shared memory segment`). Replace the Cypher walks
+    # with CTE-bounded direct SQL on the label tables. The CTE caps the
+    # edge scan to the requested limit *before* joining to Entity/Drawer
+    # for property lookups, so the working set stays small regardless of
+    # corpus size.
+    graph = getattr(kg, "GRAPH_NAME", "mempalace_kg")
+    # Use a fresh psycopg2 connection so we can set ag_catalog in the
+    # search_path (needed for the graphid `=` operator to resolve). The
+    # KnowledgeGraphAGE client uses its own internal session and doesn't
+    # expose that knob.
+    import psycopg2 as _psycopg2
     try:
+        conn = _psycopg2.connect(dsn, connect_timeout=3)
+    except Exception as e:
+        logging.warning("read_kg_postgres: connect failed, falling back to empty: %s", e)
         try:
-            ent_rows = kg._run_cypher(
-                "MATCH (e:Entity) RETURN e.name AS name LIMIT $n",
-                {"n": int(entity_limit)},
-                fetch=True,
-            )
-        except Exception as e:
-            # Log so failures don't disappear into silent fallback (lesson
-            # from palace-daemon#157). The empty-list fallback below still
-            # gives /graph a valid response shape; the warning surfaces
-            # the underlying cause to journalctl.
-            logging.warning("read_kg_postgres: Entity query failed: %s", e)
-            ent_rows = []
-        for r in ent_rows:
-            name = kg._unwrap_agtype(r[0])
-            if name:
-                entities.append({
-                    "id": name,
-                    "name": name,
-                    "type": "entity",
-                    "properties": {},
-                })
+            kg.close()
+        except Exception:
+            pass
+        return [], [], []
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL search_path = ag_catalog, public")
+                cur.execute("SET LOCAL statement_timeout = '10s'")
 
-        try:
-            rel_rows = kg._run_cypher(
-                """
-                MATCH (a:Entity)-[r:RELATION]->(b:Entity)
-                RETURN a.name AS subject, r.relation_type AS predicate,
-                       b.name AS object, r.confidence AS confidence
-                LIMIT $n
-                """,
-                {"n": int(triple_limit)},
-                fetch=True,
-            )
-        except Exception as e:
-            logging.warning("read_kg_postgres: RELATION query failed: %s", e)
-            rel_rows = []
-        for r in rel_rows:
-            subj = kg._unwrap_agtype(r[0])
-            obj = kg._unwrap_agtype(r[2])
-            if not (subj and obj):
-                continue
-            triples.append({
-                "subject": subj,
-                "predicate": kg._unwrap_agtype(r[1]) or "RELATION",
-                "object": obj,
-                "valid_from": None,
-                "valid_to": None,
-                "confidence": kg._unwrap_agtype(r[3]),
-                "source_file": None,
-            })
+                try:
+                    cur.execute(
+                        f'''
+                        SELECT (properties::json->>'name')::text AS name
+                        FROM {graph}."Entity"
+                        LIMIT %s
+                        ''',
+                        (int(entity_limit),),
+                    )
+                    for (name,) in cur.fetchall():
+                        if name:
+                            entities.append({
+                                "id": name,
+                                "name": name,
+                                "type": "entity",
+                                "properties": {},
+                            })
+                except Exception as e:
+                    logging.warning("read_kg_postgres: Entity scan failed: %s", e)
+                    conn.rollback()
 
-        try:
-            men_rows = kg._run_cypher(
-                """
-                MATCH (d:Drawer)-[r:MENTIONS]->(e:Entity)
-                RETURN d.id AS subject, e.name AS object,
-                       r.etype AS etype, r.confidence AS confidence
-                LIMIT $n
-                """,
-                {"n": int(mention_limit)},
-                fetch=True,
-            )
-        except Exception as e:
-            logging.warning("read_kg_postgres: MENTIONS query failed: %s", e)
-            men_rows = []
-        for r in men_rows:
-            subj = kg._unwrap_agtype(r[0])
-            obj = kg._unwrap_agtype(r[1])
-            if not (subj and obj):
-                continue
-            mentions.append({
-                "subject": subj,
-                "predicate": "MENTIONS",
-                "object": obj,
-                "valid_from": None,
-                "valid_to": None,
-                "confidence": kg._unwrap_agtype(r[3]),
-                "source_file": kg._unwrap_agtype(r[2]),
-            })
+                try:
+                    cur.execute(
+                        f'''
+                        WITH rel_sample AS (
+                            SELECT id, start_id, end_id, properties
+                            FROM {graph}."RELATION"
+                            LIMIT %s
+                        )
+                        SELECT
+                            (a.properties::json->>'name')::text AS subject,
+                            (r.properties::json->>'relation_type')::text AS predicate,
+                            (b.properties::json->>'name')::text AS object,
+                            r.properties::json->>'confidence' AS confidence
+                        FROM rel_sample r
+                        JOIN {graph}."Entity" a ON a.id = r.start_id
+                        JOIN {graph}."Entity" b ON b.id = r.end_id
+                        ''',
+                        (int(triple_limit),),
+                    )
+                    for subj, pred, obj, conf in cur.fetchall():
+                        if not (subj and obj):
+                            continue
+                        try:
+                            confidence = float(conf) if conf is not None else None
+                        except (TypeError, ValueError):
+                            confidence = None
+                        triples.append({
+                            "subject": subj,
+                            "predicate": pred or "RELATION",
+                            "object": obj,
+                            "valid_from": None,
+                            "valid_to": None,
+                            "confidence": confidence,
+                            "source_file": None,
+                        })
+                except Exception as e:
+                    logging.warning("read_kg_postgres: RELATION scan failed: %s", e)
+                    conn.rollback()
+
+                try:
+                    cur.execute(
+                        f'''
+                        WITH men_sample AS (
+                            SELECT id, start_id, end_id, properties
+                            FROM {graph}."MENTIONS"
+                            LIMIT %s
+                        )
+                        SELECT
+                            (d.properties::json->>'id')::text AS subject,
+                            (e.properties::json->>'name')::text AS object,
+                            (m.properties::json->>'etype')::text AS etype,
+                            m.properties::json->>'confidence' AS confidence
+                        FROM men_sample m
+                        JOIN {graph}."Drawer" d ON d.id = m.start_id
+                        JOIN {graph}."Entity" e ON e.id = m.end_id
+                        ''',
+                        (int(mention_limit),),
+                    )
+                    for subj, obj, etype, conf in cur.fetchall():
+                        if not (subj and obj):
+                            continue
+                        try:
+                            confidence = float(conf) if conf is not None else None
+                        except (TypeError, ValueError):
+                            confidence = None
+                        mentions.append({
+                            "subject": subj,
+                            "predicate": "MENTIONS",
+                            "object": obj,
+                            "valid_from": None,
+                            "valid_to": None,
+                            "confidence": confidence,
+                            "source_file": etype,
+                        })
+                except Exception as e:
+                    logging.warning("read_kg_postgres: MENTIONS scan failed: %s", e)
+                    conn.rollback()
     finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
         try:
             kg.close()
         except Exception:
