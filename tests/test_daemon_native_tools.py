@@ -24,6 +24,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import main  # noqa: E402
+import rooms  # noqa: E402  — #101 twelfth slice: canonical-rooms cache lives here
 import postgres  # noqa: E402  — #101 extraction
 
 
@@ -103,7 +104,7 @@ class _BaseTool(unittest.TestCase):
     def setUp(self):
         # Reset the rooms cache between tests so invalidation behavior is
         # observable.
-        main._canonical_rooms_cache = None
+        rooms._canonical_rooms_cache = None
 
 
 class TestRequirePostgres(_BaseTool):
@@ -204,12 +205,12 @@ class TestRoomsAdd(_BaseTool):
         self.assertEqual(result, {"action": "updated", "name": "planning"})
 
     def test_add_invalidates_cache(self):
-        main._canonical_rooms_cache = {"existing"}
+        rooms._canonical_rooms_cache = {"existing"}
         cur = _FakeCursor([("INSERT", [(True,)])])
         with patch.object(postgres, "postgres_dsn", return_value="x"), \
              patch("psycopg2.connect", return_value=_FakeConn(cur)):
             main._fast_mcp_rooms_add({"name": "new"})
-        self.assertIsNone(main._canonical_rooms_cache)
+        self.assertIsNone(rooms._canonical_rooms_cache)
 
     def test_blank_name_raises_invalid_params(self):
         with self.assertRaises(main._DaemonToolError) as cm:

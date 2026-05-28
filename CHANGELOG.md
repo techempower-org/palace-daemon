@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Refactored — *#101 twelfth slice: extract wing-slug + canonical-rooms to `rooms.py`*
+
+Moved `_normalize_wing_slug` (~10 LOC), `_canonical_rooms` (~35 LOC),
+and the module-level `_canonical_rooms_cache` mutable to a new
+`rooms.py` (~85 LOC total). main.py re-exports the two functions under
+their original `_`-prefixed names.
+
+The cache lives in `rooms.py` now (not main). The /admin/refresh-rooms
+endpoint, /memory + /search validators, and daemon_tools.invalidate_rooms_cache
+all touch the live binding via the module reference, not main's
+re-exported alias (module-level attribute writes don't propagate
+through `from rooms import ... as ...`).
+
+Test sites that mutated `main._canonical_rooms_cache` directly (~12
+sites across 3 test files) were updated to mutate
+`rooms._canonical_rooms_cache`. `patch.object(main, "_canonical_rooms", ...)`
+sites were left alone — they work because `_canonical_rooms` is called
+only from main's namespace and the re-exported binding is what gets
+patched.
+
+main.py: 3428 → 3384 lines. Cumulative #101 today: 12 slices,
+~1370 LOC out of main.
+
 ## 1.9.1 — 2026-05-28
 
 Three interlocking arcs landed this afternoon, all closing internal-quality issues without changing the public HTTP/MCP surface:

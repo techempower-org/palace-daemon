@@ -1764,64 +1764,20 @@ async def update_memory(drawer_id: str, request: Request, x_api_key: str | None 
     return _unwrap(result)
 
 
-def _normalize_wing_slug(s: str) -> str:
-    """Canonical wing-slug form per the 2026-05-14 taxonomy spec §3.2.
-
-    Idempotent: applying twice yields the same result. Used at the
-    /memory boundary so writes from any caller (familiar, manual curl,
-    test rigs) land with the same slug shape as the miner produces.
-    """
-    import re as _re
-    if not s:
-        return "unknown"
-    s = s.lower()
-    if s.startswith("wing_"):
-        s = s[5:]
-    s = _re.sub(r"[^a-z0-9_]", "_", s)
-    return s or "unknown"
-
-
-# Cached set of canonical room names. Populated lazily on first /memory
-# write; invalidate via POST /admin/refresh-rooms after registering a new
-# canonical room (e.g. `mempalace rooms add`). Otherwise cached for the
-# daemon's lifetime.
-_canonical_rooms_cache: set[str] | None = None
-
-
-def _canonical_rooms() -> set[str]:
-    """Read the configurable room set from mempalace_canonical_rooms.
-
-    Falls back to the spec's default 7 when the lookup table is absent
-    or the backend isn't postgres (legacy chroma path doesn't have the
-    FK lookup; validate against the spec defaults).
-    """
-    global _canonical_rooms_cache
-    if _canonical_rooms_cache is not None:
-        return _canonical_rooms_cache
-
-    DEFAULTS = {"architecture", "decisions", "problems", "planning",
-                "sessions", "references", "discoveries"}
-
-    try:
-        if _mp._config.backend != "postgres":
-            _canonical_rooms_cache = DEFAULTS
-            return _canonical_rooms_cache
-        import psycopg2
-        dsn = os.environ.get("MEMPALACE_POSTGRES_DSN")
-        if not dsn:
-            _canonical_rooms_cache = DEFAULTS
-            return _canonical_rooms_cache
-        with psycopg2.connect(dsn) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT name FROM mempalace_canonical_rooms")
-                rows = cur.fetchall()
-        if rows:
-            _canonical_rooms_cache = {r[0] for r in rows}
-        else:
-            _canonical_rooms_cache = DEFAULTS
-    except Exception:
-        _canonical_rooms_cache = DEFAULTS
-    return _canonical_rooms_cache
+# ── Wing-slug + canonical-rooms validation (#101 twelfth slice) ────────────
+# Lives in rooms.py now. main.py keeps the `_`-prefixed names alive via
+# re-export so the /memory and /search route handlers and the /admin/
+# refresh-rooms handler keep working unchanged.
+#
+# Tests that mutated `main._canonical_rooms_cache` directly were updated
+# to mutate `rooms._canonical_rooms_cache` — module-level attribute
+# writes don't propagate through re-exports, so the test needs to touch
+# the source-of-truth binding in rooms.py.
+import rooms as _rooms  # noqa: E402
+from rooms import (  # noqa: E402
+    canonical_rooms as _canonical_rooms,
+    normalize_wing_slug as _normalize_wing_slug,
+)
 
 
 @app.post("/memory")
@@ -1897,10 +1853,12 @@ async def refresh_rooms(x_api_key: str | None = Header(default=None)):
     separate admin token).
     """
     _check_auth(x_api_key)
-    global _canonical_rooms_cache
-    _canonical_rooms_cache = None
-    rooms = sorted(_canonical_rooms())
-    return {"refreshed": True, "rooms": rooms, "count": len(rooms)}
+    # #101 twelfth slice: the cache lives in rooms.py now. Mutate it
+    # through the module so the live binding (not a re-exported alias)
+    # is cleared.
+    _rooms._canonical_rooms_cache = None
+    rooms_list = sorted(_canonical_rooms())
+    return {"refreshed": True, "rooms": rooms_list, "count": len(rooms_list)}
 
 
 @app.get("/stats")

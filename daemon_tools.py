@@ -47,14 +47,14 @@ def normalize_room_name(raw):
 
 
 def invalidate_rooms_cache():
-    """Drop main's in-process canonical-rooms cache; next read rebuilds it.
+    """Drop the in-process canonical-rooms cache; next read rebuilds it.
 
-    The cache lives on main.py because the lookup helper that populates it
-    (``_get_canonical_rooms``) is still there. We touch main's attribute
-    via a lazy import so this module doesn't form an import cycle.
+    Post-#101 twelfth slice the cache lives in ``rooms.py`` (not main).
+    No lazy-import dance needed anymore — rooms.py and daemon_tools.py
+    don't import each other, so the top-level import is safe.
     """
-    import main  # lazy — main imports us at module load, so this is safe
-    main._canonical_rooms_cache = None
+    import rooms
+    rooms._canonical_rooms_cache = None
 
 
 def fast_mcp_rooms_list(arguments: dict) -> list[dict]:

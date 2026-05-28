@@ -27,6 +27,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import main  # noqa: E402
+import rooms  # noqa: E402  — #101 twelfth slice: canonical-rooms cache lives here
 
 
 class TestRefreshRoomsBehavior(unittest.TestCase):
@@ -40,25 +41,25 @@ class TestRefreshRoomsBehavior(unittest.TestCase):
         self.client = TestClient(main.app)
         # Always start with a clean module-level cache so test order
         # cannot cross-contaminate.
-        main._canonical_rooms_cache = None
+        rooms._canonical_rooms_cache = None
 
     def tearDown(self):
-        main._canonical_rooms_cache = None
+        rooms._canonical_rooms_cache = None
         self._env_patch.stop()
 
     def test_endpoint_clears_cache_before_rebuilding(self):
         """The cache must be set to None *before* _canonical_rooms() runs,
         otherwise a stale entry would short-circuit the rebuild path."""
         # Seed the cache with a sentinel set that nothing else would produce.
-        main._canonical_rooms_cache = {"stale-room-from-old-process"}
+        rooms._canonical_rooms_cache = {"stale-room-from-old-process"}
 
         observed_cache_at_rebuild = []
 
         def fake_canonical_rooms():
             # When the endpoint calls us, the cache must already have been cleared.
-            observed_cache_at_rebuild.append(main._canonical_rooms_cache)
-            main._canonical_rooms_cache = {"alpha", "beta", "gamma"}
-            return main._canonical_rooms_cache
+            observed_cache_at_rebuild.append(rooms._canonical_rooms_cache)
+            rooms._canonical_rooms_cache = {"alpha", "beta", "gamma"}
+            return rooms._canonical_rooms_cache
 
         with patch.object(main, "_canonical_rooms", side_effect=fake_canonical_rooms):
             resp = self.client.post("/admin/refresh-rooms")
@@ -100,10 +101,10 @@ class TestRefreshRoomsAuth(unittest.TestCase):
 
     def setUp(self):
         self.client = TestClient(main.app)
-        main._canonical_rooms_cache = None
+        rooms._canonical_rooms_cache = None
 
     def tearDown(self):
-        main._canonical_rooms_cache = None
+        rooms._canonical_rooms_cache = None
 
     def test_wrong_key_rejected(self):
         with patch.dict(os.environ, {"PALACE_API_KEY": "the-key"}, clear=False):

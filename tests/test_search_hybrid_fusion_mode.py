@@ -33,6 +33,7 @@ except ImportError:
     HAVE_FASTAPI = False
 
 import main  # noqa: E402
+import rooms  # noqa: E402  — #101 twelfth slice: canonical-rooms cache lives here
 
 
 @unittest.skipUnless(HAVE_FASTAPI, "fastapi not installed in test env")
