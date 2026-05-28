@@ -36,9 +36,10 @@ ssh familiar 'docker update --memory=6g --memory-swap=6g mempalace-db'
 ssh familiar 'docker stats --no-stream mempalace-db'   # confirm new limit
 ```
 
-The postgresql.conf tuning (shared_buffers 4GB → 2GB, effective_cache_size
-12GB → 6GB) requires a postgres restart to take effect. Schedule alongside
-a maintenance window — see palace-daemon#102 for the full sequence.
+The postgresql.conf tuning (shared_buffers 4GB → 2GB → 3GB, max_connections
+200 → 32, effective_cache_size 12GB → 6GB) requires a postgres restart to
+take effect. Schedule alongside a maintenance window — see palace-daemon#102
+and familiar.realm.watch#61 for the full sequence.
 
 ## Backup before any destructive op
 
@@ -54,9 +55,12 @@ notes in `postgresql.conf`. Short version:
 - 3 GiB ceiling + 4 GiB declared shared_buffers was mathematically
   impossible — postgres OOMed every time it tried to page in its own
   shared region (5+ kills in 1h on 2026-05-28).
-- 6 GiB ceiling + 2 GiB shared_buffers gives postgres ~4 GiB of working
-  set with ~25% headroom, while leaving ~7 GiB on the host for llama-server
+- 6 GiB ceiling + 3 GiB shared_buffers gives postgres ~4.5 GiB of working
+  set with ~20% headroom, while leaving ~7 GiB on the host for llama-server
   (3.1 GiB), palace-daemon (~1 GiB), familiar-api, kg-extract, and the OS.
+  The bump from 2 GiB → 3 GiB was unlocked by dropping max_connections
+  from 200 → 32 (observed peak: ~16 backends), which cut worst-case
+  work_mem reservation from 6.4 GiB to 1 GiB.
 - effective_cache_size lowered from 12 GiB to 6 GiB to match what the host
   can actually keep hot — the planner was previously being told to assume
   a page cache that never existed.
