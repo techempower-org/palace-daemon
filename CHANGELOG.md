@@ -263,6 +263,24 @@ External bench runs (SME LongMemEval, candidate-strategy ablation, etc.) drive t
 
 Closes [#104](https://github.com/techempower-org/palace-daemon/issues/104). The companion change on the SME side (touch the lock around each bench run) is tracked upstream.
 
+### Added — 2026-05-28 — *`/search/hybrid` accepts `fusion_mode` (#105)*
+
+mempalace#162 (merged as #295) added `fusion_mode="rrf"` as an opt-in alongside the default convex blend in `search_memories`. The internal A/B finding favors convex on a 3K-drawer local palace, but the corpus-level test that matters needs the production 402K-drawer palace. This adds the daemon-side surface so callers can pass `fusion_mode` through `/search/hybrid`:
+
+```json
+POST /search/hybrid
+{
+  "query": "...",
+  "fusion_mode": "rrf"   // optional; "convex" default
+}
+```
+
+Forward-compatible: the daemon accepts and forwards `fusion_mode` via the existing `mempalace_search` MCP envelope. End-to-end effect is gated on **mempalace#302** (companion change adding `fusion_mode` to the MCP input schema + threading through `tool_search` to `search_memories()`). Until that lands, the value is dropped by mempalace's MCP whitelist — the daemon-side accept/validate is in place so when mempalace#302 ships, no further palace-daemon change is needed.
+
+6 tests in `tests/test_search_hybrid_fusion_mode.py` covering: omitted (not forwarded), convex (forwarded), rrf (forwarded), invalid string (400), non-string (400), and explicit null (treated as omitted).
+
+Closes [#105](https://github.com/techempower-org/palace-daemon/issues/105).
+
 ### Added — 2026-05-28 — *DB-error observability + postgres memcg pressure canary (#97)*
 
 Today's morning OOM cluster (postgres killed twice inside its docker memcg at 08:57 + 09:19 PDT, surfaced as 26+ `OperationalError: connection is closed` events) was invisible to `/health` — the daemon process stayed up while in-flight queries returned errors. Same silent-failure-under-healthy-surface shape #92 was filed to close, just for the postgres dependency. Three hooks land here so the next time it happens the operator sees it.
