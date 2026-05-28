@@ -37,9 +37,23 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 
 # ---------------------------------------------------------------- config file
 # Same lookup order as deploy.sh — the two scripts share config knobs.
+# Special case: if PALACE_DEPLOY_CONF is set explicitly and the file is
+# missing/unreadable, fail loudly rather than silently falling back to the
+# default search path — the user expressed an intent that we shouldn't
+# discard. The implicit candidates fall through silently as before.
 _load_conf() {
+    if [ -n "${PALACE_DEPLOY_CONF:-}" ]; then
+        if [ ! -r "$PALACE_DEPLOY_CONF" ]; then
+            printf 'rsync-mempalace: PALACE_DEPLOY_CONF=%s is set but not readable\n' \
+                "$PALACE_DEPLOY_CONF" >&2
+            exit 1
+        fi
+        # shellcheck disable=SC1090
+        . "$PALACE_DEPLOY_CONF"
+        CONF_LOADED="$PALACE_DEPLOY_CONF"
+        return 0
+    fi
     local candidates=(
-        "${PALACE_DEPLOY_CONF:-}"
         "$SCRIPT_DIR/deploy.conf"
         "${XDG_CONFIG_HOME:-$HOME/.config}/palace-daemon/deploy.conf"
         "$HOME/.config/palace-daemon/deploy.conf"
@@ -127,8 +141,11 @@ ok "restart issued"
 nstep "wait for daemon health"
 deadline=$((SECONDS + HEALTH_TIMEOUT))
 while (( SECONDS < deadline )); do
-    if curl -fs --max-time 3 "$URL/health" >/dev/null 2>&1; then
-        version=$(curl -s "$URL/health" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("version","?"))' 2>/dev/null || echo "?")
+    # Single curl — capture the response and parse the version from it
+    # rather than doing a probe call followed by a version call.
+    health=$(curl -fs --max-time 3 "$URL/health" 2>/dev/null) || true
+    if [ -n "$health" ]; then
+        version=$(printf '%s' "$health" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("version","?"))' 2>/dev/null || echo "?")
         ok "healthy on v$version (after $((SECONDS - (deadline - HEALTH_TIMEOUT)))s)"
         break
     fi

@@ -5,11 +5,11 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-# `is-active` returns 0 when the unit is running and non-zero otherwise; we
-# only fire `start` on the non-zero case so this is a no-op when Syncthing
-# is healthy. ExitOnFailure keeps systemd from flapping if the start fails;
-# the next timer tick will retry.
-ExecStart=/bin/bash -c "/usr/bin/systemctl is-active --quiet syncthing@%i.service || /usr/bin/systemctl start syncthing@%i.service"
+# `systemctl start` is idempotent — if the target service is already active
+# it returns 0 immediately without re-starting. So a bare `start` call is
+# both correct *and* simpler than the previous `is-active && start` shell
+# pipeline (which spawned an extra bash process per probe).
+ExecStart=/usr/bin/systemctl start syncthing@%i.service
 
 # We intentionally do NOT set Restart= — a oneshot that succeeds is the
 # whole point; the timer is what schedules the next probe.
