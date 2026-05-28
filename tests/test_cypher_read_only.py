@@ -227,5 +227,118 @@ class TestCypherStructuredErrors(unittest.TestCase):
         self.assertIn("connection reset", err.detail["postgres"])
 
 
+class TestCypherStructuredErrorsPsycopg3(unittest.TestCase):
+    """The mempalace AGE helper uses psycopg v3 internally, so live errors
+    surface as ``psycopg.errors.*`` — not ``psycopg2.errors.*``. PR #162
+    initially only caught the psycopg2 variants and quietly didn't change
+    live behavior; PR #163 added the v3 catches. These tests pin the
+    psycopg3 mappings so a future library-version drift can't silently
+    regress.
+
+    Skipped if psycopg (v3) isn't installed — the daemon's primary
+    requirement is psycopg2, v3 is via mempalace.
+    """
+
+    try:
+        import psycopg as _pg
+        import psycopg.errors as _pg_err
+        HAS_PSYCOPG3 = True
+    except ImportError:
+        HAS_PSYCOPG3 = False
+
+    def setUp(self):
+        if not self.HAS_PSYCOPG3:
+            self.skipTest("psycopg (v3) not installed; live daemon imports it via mempalace")
+
+    def _run_with_error(self, exc):
+        """Same as TestCypherStructuredErrors._run_with_error but in a
+        separate class so the skipTest contract is clearer."""
+
+        class _FailingKG(_StubKG):
+            def _run_cypher(self_inner, cypher, params=None, fetch=False):
+                raise exc
+
+        fake_mod = types.ModuleType("mempalace.knowledge_graph_age")
+        fake_mod.KnowledgeGraphAGE = _FailingKG
+        mempalace_pkg = types.ModuleType("mempalace")
+        mempalace_pkg.knowledge_graph_age = fake_mod
+
+        fake_config = types.SimpleNamespace(
+            backend="postgres", postgres_dsn="postgresql://fake/db"
+        )
+        fake_mp = types.SimpleNamespace(_config=fake_config)
+
+        with patch.dict(
+            sys.modules,
+            {"mempalace": mempalace_pkg, "mempalace.knowledge_graph_age": fake_mod},
+            clear=False,
+        ), patch.object(main, "_mp", fake_mp), patch.dict(
+            os.environ, {}, clear=True
+        ):
+            req = _fake_request({"cypher": "MATCH (n) RETURN n"})
+            try:
+                asyncio.run(main.cypher_query(req, x_api_key=None))
+            except HTTPException as e:
+                return e
+            self.fail("expected HTTPException")
+
+    def test_psycopg3_out_of_memory_returns_507(self):
+        """The v3 OutOfMemory must also produce 507 — was a 500 in
+        production prior to PR #163 because only psycopg2 was caught."""
+        import psycopg.errors as pg_err
+        err = self._run_with_error(
+            pg_err.OutOfMemory("could not resize shared memory segment ...")
+        )
+        self.assertEqual(err.status_code, 507)
+        self.assertEqual(err.detail["error"], "shared-memory-exhausted")
+
+    def test_psycopg3_query_canceled_returns_504(self):
+        """v3 QueryCanceled (statement_timeout) → 504."""
+        import psycopg.errors as pg_err
+        err = self._run_with_error(
+            pg_err.QueryCanceled("canceling statement due to statement timeout")
+        )
+        self.assertEqual(err.status_code, 504)
+        self.assertEqual(err.detail["error"], "timeout")
+
+    def test_psycopg3_syntax_error_returns_400(self):
+        """v3 SyntaxError → 400 (the actual error live /cypher hits when
+        callers send malformed Cypher — confirmed by curl post-deploy)."""
+        import psycopg.errors as pg_err
+        err = self._run_with_error(
+            pg_err.SyntaxError('syntax error at or near "AS"')
+        )
+        self.assertEqual(err.status_code, 400)
+        self.assertEqual(err.detail["error"], "bad-query")
+
+    def test_psycopg3_undefined_column_returns_400(self):
+        """v3 UndefinedColumn → 400."""
+        import psycopg.errors as pg_err
+        err = self._run_with_error(
+            pg_err.UndefinedColumn("could not find rte for n")
+        )
+        self.assertEqual(err.status_code, 400)
+        self.assertEqual(err.detail["error"], "bad-query")
+
+    def test_psycopg3_generic_error_returns_502(self):
+        """v3 base Error → 502."""
+        import psycopg as pg
+        err = self._run_with_error(pg.Error("connection lost"))
+        self.assertEqual(err.status_code, 502)
+        self.assertEqual(err.detail["error"], "postgres-error")
+        self.assertIn("connection lost", err.detail["postgres"])
+
+    def test_psycopg3_read_only_returns_403(self):
+        """v3 ReadOnlySqlTransaction must still hit the 403 path —
+        was broken pre-#163 because the daemon imported psycopg2 in the
+        original handler."""
+        import psycopg.errors as pg_err
+        err = self._run_with_error(
+            pg_err.ReadOnlySqlTransaction("cannot execute MERGE")
+        )
+        self.assertEqual(err.status_code, 403)
+        self.assertIn("read-only", err.detail.lower())
+
+
 if __name__ == "__main__":
     unittest.main()

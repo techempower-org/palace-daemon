@@ -6,6 +6,13 @@ watchdog>=3.0.0
 # demand by mempalace's postgres backend, so safe to ship unconditionally.
 # See palace-daemon#15: degraded-state at runtime is worse than 3 MB on disk.
 psycopg2-binary>=2.9
+# psycopg (v3) — mempalace.knowledge_graph_age uses this for Cypher
+# execution. Already a transitive dep via mempalace, but listed
+# explicitly so the test venv has it: the tests for /cypher's structured
+# error mappings need to catch v3 exception classes (PR #163), and
+# without psycopg installed locally those tests skip silently, letting
+# a future library-version drift regress unnoticed.
+psycopg[binary]>=3.1
 # Neural reranking — FlashRank nano (ms-marco-TinyBERT-L-2-v2, ~4 MB ONNX,
 # CPU-friendly). Spike for techempower-org/familiar.realm.watch#43. Gated
 # by PALACE_RERANK_ENABLED (default: true). Fall-through is graceful: if
