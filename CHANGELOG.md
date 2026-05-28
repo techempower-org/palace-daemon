@@ -245,6 +245,7 @@ consumers were getting the wrong picture.
 
 ## [Unreleased]
 
+<<<<<<< HEAD
 ### Added — 2026-05-28 — *deploy-resilience: rsync backup + drift canary + Syncthing keepalive (#92)*
 
 The 2026-05-28 Syncthing outage (clean exit at 07:55 PDT, no auto-restart, ~1.5 h of mempalace work undeployed before anyone noticed) exposed three gaps in the deploy story. This change closes all three.
@@ -259,6 +260,29 @@ The 2026-05-28 Syncthing outage (clean exit at 07:55 PDT, no auto-restart, ~1.5 
 - **`scripts/syncthing-keepalive/`** — templated systemd unit + timer that probes `syncthing@<user>.service` every 5 minutes and starts it if clean-exited. `Restart=on-failure` on the Syncthing unit wouldn't have caught today's exit (status=0); the keepalive overlay does without modifying the upstream Syncthing unit. README in the directory walks through installation on familiar.
 
 The three together convert silent staleness into a journal-grep-able signal (canary) backed by a working recovery path (rsync) and proactive watchdog (keepalive). See [#92](https://github.com/techempower-org/palace-daemon/issues/92) for the original gap analysis.
+=======
+### Added — 2026-05-28 — *daemon-native MCP tools for rooms / wakeup / mined (#93)*
+
+Six new daemon-native tools that close the gap mempalace's CLI hit under daemon-strict mode. The CLI commands `mempalace rooms list/add/rename/remove`, `mempalace wake-up`, and `mempalace mined` all opened a local ChromaDB client and silently broke once the local palace was retired. They now route through `/mcp` to the daemon, which is the single writer to the postgres backend.
+
+| Tool | Args | Returns |
+|---|---|---|
+| `mempalace_rooms_list` | `{}` | `[{name, description, added_at}]` — empty list when the table doesn't exist (`UndefinedTable`) |
+| `mempalace_rooms_add` | `{name, description?}` | `{action: "added"\|"updated", name}` — uses the `xmax=0` system column |
+| `mempalace_rooms_rename` | `{old, new}` | `{old, new, affected_drawers}` — cascades via the existing `ON UPDATE CASCADE` FK |
+| `mempalace_rooms_remove` | `{name}` | `{name, removed: bool}` — refuses with `error.data.referencing_drawers` if any drawer references the room |
+| `mempalace_mined` | `{wing?, limit?}` | grouped `{sources_by_wing, wing_filter, total_wings, total_sources}` |
+| `mempalace_wakeup` | `{wing?}` | `{text, tokens, wing}` — delegates to `mempalace.layers.MemoryStack().wake_up(wing=...)` |
+
+**Implementation notes:**
+- Hangs off the existing `/mcp` fast-intercept dispatch; the new `_DAEMON_NATIVE_TOOLS` table is additive.
+- JSON-RPC error codes: `-32602` (invalid params), `-32004` (custom: backend down), `-32000` (internal). CLI consumer can branch on failure mode.
+- Connection pattern matches `_fast_status_payload()`: `psycopg2.connect(dsn, connect_timeout=3)` + `SET LOCAL statement_timeout` + tight `try/finally`.
+- All rooms-mutating tools invalidate the in-process `_canonical_rooms_cache` after success.
+- 29 tests in `tests/test_daemon_native_tools.py` covering happy/sad paths for every handler.
+
+Companion mempalace work: [mempalace#285](https://github.com/techempower-org/mempalace/issues/285). Once that ships, the CLI commands will pick these up automatically through `_call_daemon_mcp()`.
+>>>>>>> f219730 (docs(changelog): cover the #93 landing)
 
 ### Added — 2026-05-28 — *canonical predicate vocabulary mapping for the RELATION edge type*
 
