@@ -176,7 +176,7 @@ class TestPostgresMemcgStatus(_BaseObs):
             status = main._postgres_memcg_status()
         self.assertIsNone(status)
 
-    def test_missing_memperc_returns_none(self):
+    def test_missing_memperc_falls_back_to_zero_percent(self):
         out = json.dumps({"MemUsage": "1GiB / 2GiB"})  # no MemPerc
         proc = MagicMock()
         proc.stdout = out
