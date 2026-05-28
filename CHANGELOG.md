@@ -245,7 +245,25 @@ consumers were getting the wrong picture.
 
 ## [Unreleased]
 
-### Fixed — 2026-05-28 — *db_errors ring buffer also populated from /search/keyword + /graph + /backfill-age/status (#110)*
+## 1.9.0 — 2026-05-28
+
+### Release theme — *canonical predicate vocabulary collapse + the deploy/observability scaffolding around it*
+
+The 2026-05-28 work covered four interlocking arcs:
+
+1. **Canonical predicate vocabulary collapse** (#75 / #77 / #85, plus mempalace #290 / #292 / #293 / #295) — the production RELATION edge vocabulary went from ~64k freeform LLM strings to 40 canonicals + ~195 retained code-token raws. Migration applied to 1.76M edges at ~63k edges/sec via set-based postgres UPDATE on the AGE backing table. GPU-accelerated MiniLM embedding (onnxruntime-gpu on a 2080 Ti) for ~65× speedup over CPU. Latency half of #80 closed via mempalace#292's directional-cypher fix (~100× faster hybrid call: 3.3 s p50 → 1.5 s live).
+
+2. **Daemon-native MCP tools for daemon-strict mode** (#93 / closes mempalace#285 / closes #89) — six new tools (`mempalace_rooms_{list,add,rename,remove}`, `mempalace_mined`, `mempalace_wakeup`) that close the gap where the mempalace CLI's `cmd_rooms`/`cmd_wakeup`/`cmd_mined` were opening local ChromaDB clients and silently breaking under daemon-strict mode. Companion `_connect_postgres()` helper introduces BACKEND_DOWN error mapping that the observability work then leans on.
+
+3. **Deploy resilience** (#92) — three-part response to the morning Syncthing outage that left 1.5 hours of mempalace work undeployed: `scripts/rsync-mempalace.sh` (backup deploy), startup mempalace canary log line, Syncthing keepalive systemd timer.
+
+4. **DB-error observability + postgres OOM canary** (#97 / #108 / #110) — bounded ring buffer in `/health.db_errors` populated from every daemon-side postgres path, plus `postgres_memcg` field + startup canary log so the next OOM is visible in journal before the cgroup limit bites.
+
+Plus a long tail of smaller fixes: shim retirement (#89/#90), `.pth` installer retirement (#88), README catch-up (#91), deploy-conf loud-failure (#100), bench-active lock for benches (#104), `fusion_mode` passthrough (#105), Stop-hook canonical-topic forwarding, CLI rooms-routing, kg-extract worker retry, and 27+ tests across 7 new test files.
+
+Net: **+~3000 lines on main, +480 tests** (was 396 → 480 at end of day).
+
+### Added — 2026-05-28 — *db_errors ring buffer also populated from /search/keyword + /graph + /backfill-age/status (#110)*
 
 Follow-up to #108. Three more HTTP endpoint paths used direct `psycopg2.connect` without recording on `OperationalError`:
 

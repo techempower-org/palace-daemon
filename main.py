@@ -62,7 +62,7 @@ import rerank as _rerank
 
 # ── Config (env vars override CLI defaults) ───────────────────────────────────
 
-VERSION = "1.8.4"
+VERSION = "1.9.0"
 DEFAULT_HOST = os.getenv("PALACE_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.getenv("PALACE_PORT", "8085"))
 DEFAULT_PALACE = os.getenv("PALACE_PATH", "")
