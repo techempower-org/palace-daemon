@@ -1598,7 +1598,12 @@ async def search_age_fused(request: Request, x_api_key: str | None = Header(defa
         logging.warning("/search/age-fused: AGE lookup failed: %s — falling back to vector-only", e)
 
     # Step 3: RRF fusion. Vector rank by position; graph rank by overlap count.
-    vec_ranks = {hit.get("id"): i for i, hit in enumerate(vec_hits)}
+    # Vector hits from mempalace_search expose the drawer id as `drawer_id`
+    # (not `id`) — pre-#150 the `hit.get("id")` lookup returned None for
+    # every hit, collapsing vec_ranks to {None: last_index} and effectively
+    # disabling the vector half of the fusion. Falling back to `drawer_id`
+    # restores the intended ranking.
+    vec_ranks = {(hit.get("id") or hit.get("drawer_id")): i for i, hit in enumerate(vec_hits)}
     graph_ranks = {did: i for i, did in enumerate(sorted(graph_hits_by_drawer, key=lambda d: -graph_hits_by_drawer[d])[:graph_top_k])}
 
     union = set(vec_ranks) | set(graph_ranks)
@@ -1612,9 +1617,50 @@ async def search_age_fused(request: Request, x_api_key: str | None = Header(defa
         fused_scores[did] = score
 
     # Build the merged result list — preserve full hit metadata when
-    # vector saw the drawer; synth minimal metadata when graph-only.
-    vec_by_id = {hit.get("id"): hit for hit in vec_hits}
+    # vector saw the drawer; hydrate graph-only drawers from postgres so
+    # the response shape matches /search (palace-daemon#150). Pre-#150 the
+    # graph-only stubs had document=None and no text field, which caused
+    # bench consumers (LongMemEval, /context) to see ~5.5× narrower
+    # context vs /search default and a corresponding QA-acc regression.
+    vec_by_id = {(hit.get("id") or hit.get("drawer_id")): hit for hit in vec_hits}
     fused_order = sorted(fused_scores.items(), key=lambda kv: -kv[1])[:limit]
+
+    # Pre-fetch text + metadata for any graph-only drawers in one query
+    # so we don't N+1 the database. Vector-matched drawers already have
+    # their full hit dict from mempalace_search and don't need hydration.
+    graph_only_ids = [did for did, _ in fused_order if did not in vec_by_id]
+    hydrated: dict[str, dict] = {}
+    if graph_only_ids:
+        def _hydrate_drawers(ids: list[str]) -> dict[str, dict]:
+            import psycopg2
+            try:
+                with psycopg2.connect(dsn, connect_timeout=3) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SET LOCAL statement_timeout = '5s'")
+                        cur.execute(
+                            "SELECT id, content, wing, room, "
+                            "       COALESCE(metadata->>'topic', '') AS topic, "
+                            "       COALESCE(metadata->>'source_file', '') AS source_file, "
+                            "       created_at "
+                            "FROM mempalace_drawers WHERE id = ANY(%s)",
+                            (ids,),
+                        )
+                        return {
+                            r[0]: {
+                                "text": r[1] or "",
+                                "wing": r[2],
+                                "room": r[3],
+                                "topic": r[4],
+                                "source_file": r[5],
+                                "created_at": r[6].isoformat() if r[6] else None,
+                            }
+                            for r in cur.fetchall()
+                        }
+            except Exception as e:
+                logging.warning("/search/age-fused: graph-only hydration failed: %s", e)
+                return {}
+        hydrated = await asyncio.to_thread(_hydrate_drawers, graph_only_ids)
+
     out_hits: list[dict] = []
     for did, score in fused_order:
         if did in vec_by_id:
@@ -1622,15 +1668,32 @@ async def search_age_fused(request: Request, x_api_key: str | None = Header(defa
             hit["matched_via"] = "both" if did in graph_ranks else "vector"
             hit["rrf_score"] = score
         else:
-            # Graph-only drawer — minimal stub. Caller can fetch full
-            # drawer via /memory/{id} if needed.
-            hit = {
-                "id": did,
-                "document": None,
-                "matched_via": "graph",
-                "rrf_score": score,
-                "graph_mentions": graph_hits_by_drawer.get(did, 0),
-            }
+            # Graph-only drawer — emit a hit matching /search's shape so
+            # bench consumers see the same context width. If hydration
+            # failed (postgres bounced etc.), fall back to the historic
+            # minimal-stub shape so the response is still valid.
+            row = hydrated.get(did)
+            if row:
+                hit = {
+                    "drawer_id": did,
+                    "text": row["text"],
+                    "wing": row["wing"],
+                    "room": row["room"],
+                    "topic": row["topic"],
+                    "source_file": row["source_file"],
+                    "created_at": row["created_at"],
+                    "matched_via": "graph",
+                    "rrf_score": score,
+                    "graph_mentions": graph_hits_by_drawer.get(did, 0),
+                }
+            else:
+                hit = {
+                    "id": did,
+                    "document": None,
+                    "matched_via": "graph",
+                    "rrf_score": score,
+                    "graph_mentions": graph_hits_by_drawer.get(did, 0),
+                }
         out_hits.append(hit)
 
     response = {"results": out_hits}

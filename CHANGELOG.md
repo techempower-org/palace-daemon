@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Fixed — *#150: hydrate graph-only hits in `/search/age-fused` + restore vector ranking*
+
+JP filed this after a LongMemEval rerun showed `/search/age-fused`
+returning ~5.5× narrower context per question than `/search` default
+(457 vs 2539 mean context_chars, with QA-acc dropping 60% → 17%).
+
+Root cause was actually **two bugs** in `search_age_fused`:
+
+1. **Graph-only hits had no text.** When a drawer matched via graph
+   entity overlap but not via vector, the handler emitted a stub
+   `{"id": did, "document": None, ...}` with no `text` field. Bench
+   consumers received empty context for those hits.
+
+2. **Vector ranks were always None.** The line
+   `vec_ranks = {hit.get("id"): i for i, hit in enumerate(vec_hits)}`
+   looked up the wrong field — `mempalace_search` returns hits keyed
+   by `drawer_id`, not `id`. Every vector hit collapsed onto the same
+   `None` key, leaving `vec_ranks = {None: last_index}` and effectively
+   disabling the vector half of RRF fusion.
+
+Fix:
+
+- `vec_ranks` and `vec_by_id` now fall back to `hit.get("drawer_id")`
+  when `hit.get("id")` is None, so vector hits are tracked correctly.
+- Graph-only drawer IDs are batch-fetched from `mempalace_drawers` in
+  a single `WHERE id = ANY(...)` query and emitted with the same
+  `{drawer_id, text, wing, room, topic, source_file, created_at}`
+  shape as `/search`. If hydration fails (postgres bounced), the
+  handler falls back to the historic minimal-stub shape.
+- New test file `tests/test_search_age_fused_hydration.py` (3 tests)
+  pins both the hydration contract and the fallback path.
+
 ### Fixed — *#154: protect palace-daemon from userland `earlyoom` SIGTERM*
 
 The mysterious `Shutting down` mid-deploy that broke smoke tests on
