@@ -245,6 +245,24 @@ consumers were getting the wrong picture.
 
 ## [Unreleased]
 
+### Added — 2026-05-28 — *`bench-active.lock` pauses auto-mine during external bench runs (#104)*
+
+External bench runs (SME LongMemEval, candidate-strategy ablation, etc.) drive the daemon hard. The WatcherService-spawned auto-mine running concurrently with the bench contributed to today's morning postgres OOMs (#97, #102) and the daemon SIGTERM cycle root-caused upstream. This lands a file-lock contract so the bench runner can pause auto-mine without restarting the daemon (which would be catastrophic mid-bench).
+
+- **Lock file**: default `<palace_data_dir>/.bench-active.lock`; override via `PALACE_BENCH_LOCK_PATH`.
+- **Daemon behavior**: `WatcherService._internal_mine` checks `_bench_lock_active()` at every spawn. If present and fresh, the daemon **skips** spawning a new mine and logs a single INFO line (`watcher: auto_mine_paused (reason=...)`). Doesn't fail; just defers until the next watch event after the bench finishes.
+- **Stale-lock auto-cleanup**: a lock older than `PALACE_BENCH_LOCK_MAX_AGE_SECONDS` (default 6 h) is ignored, so a crashed bench can't wedge auto-mine indefinitely.
+- **`scripts/bench-lock.sh`** — operator/bench-runner CLI:
+  ```
+  scripts/bench-lock.sh acquire    # touch the lock
+  scripts/bench-lock.sh release    # remove the lock
+  scripts/bench-lock.sh status     # present/absent + age
+  ```
+  Picks the lock path the same way the daemon does (`PALACE_BENCH_LOCK_PATH` env, else `$PALACE_DATA/.bench-active.lock`, else `/srv/mempalace-data/palace/.bench-active.lock`).
+- **9 tests** in `tests/test_bench_lock.py` covering path resolution (env override, default, fallback when `_mp._config` is unavailable), lock detection (present/absent), stale-lock auto-ignore, custom max-age override + non-numeric fallback, and graceful degradation on unreadable paths.
+
+Closes [#104](https://github.com/techempower-org/palace-daemon/issues/104). The companion change on the SME side (touch the lock around each bench run) is tracked upstream.
+
 ### Added — 2026-05-28 — *DB-error observability + postgres memcg pressure canary (#97)*
 
 Today's morning OOM cluster (postgres killed twice inside its docker memcg at 08:57 + 09:19 PDT, surfaced as 26+ `OperationalError: connection is closed` events) was invisible to `/health` — the daemon process stayed up while in-flight queries returned errors. Same silent-failure-under-healthy-surface shape #92 was filed to close, just for the postgres dependency. Three hooks land here so the next time it happens the operator sees it.
