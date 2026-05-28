@@ -305,3 +305,100 @@ DAEMON_NATIVE_TOOLS = {
     "mempalace_mined": fast_mcp_mined,
     "mempalace_wakeup": fast_mcp_wakeup,
 }
+
+
+# MCP tool descriptors for /mcp tools/list (#140). The /mcp proxy in main.py
+# augments the upstream mempalace tools/list response with these so MCP
+# clients (Claude Code, Claude Desktop, anyone using the standard
+# discovery handshake) can find them. Without this, the tools are
+# callable but invisible to discovery — consumers would have to hardcode
+# the names, which defeats the protocol.
+DAEMON_NATIVE_TOOL_DESCRIPTORS = [
+    {
+        "name": "mempalace_rooms_list",
+        "description": (
+            "List canonical rooms registered in the palace. Returns "
+            "name + description + added_at for each row in "
+            "mempalace_canonical_rooms. Empty list if the schema isn't "
+            "deployed yet."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "mempalace_rooms_add",
+        "description": (
+            "Register a canonical room (or update its description). "
+            "Returns {action: 'added'|'updated', name}. Name is "
+            "lowercased and stripped; blank names are rejected."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Room name (case-insensitive)."},
+                "description": {"type": "string", "description": "Optional human-readable description."},
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "mempalace_rooms_rename",
+        "description": (
+            "Rename a canonical room. Cascades to mempalace_drawers.room "
+            "via the FK's ON UPDATE CASCADE. Returns the count of "
+            "affected drawers."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "old": {"type": "string", "description": "Current room name."},
+                "new": {"type": "string", "description": "New room name."},
+            },
+            "required": ["old", "new"],
+        },
+    },
+    {
+        "name": "mempalace_rooms_remove",
+        "description": (
+            "Remove a canonical room. Refuses with the referencing drawer "
+            "count if any drawer still uses the room — purge or rename "
+            "those first."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Room name to remove."},
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "mempalace_mined",
+        "description": (
+            "List source files that have been mined into drawers, grouped "
+            "by wing. Skips drawers with no source_file metadata "
+            "(diary, KG, manual additions). Returns "
+            "{sources_by_wing, total_wings, total_sources}."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "wing": {"type": "string", "description": "Optional: restrict to one wing."},
+                "limit": {"type": "integer", "description": "Optional: cap sources reported per wing."},
+            },
+        },
+    },
+    {
+        "name": "mempalace_wakeup",
+        "description": (
+            "Render the L0 (identity) + L1 (essential story) wake-up "
+            "context. Delegates to mempalace.layers.MemoryStack.wake_up. "
+            "Returns {text, tokens, wing}."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "wing": {"type": "string", "description": "Optional: scope to one wing."},
+            },
+        },
+    },
+]
