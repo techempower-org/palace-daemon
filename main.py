@@ -2059,11 +2059,14 @@ from bench_lock import bench_lock_path as _bench_lock_path  # noqa: E402
 from bench_lock import bench_lock_active as _bench_lock_active  # noqa: E402
 
 
-def _postgres_dsn() -> str | None:
-    """Best-effort postgres DSN lookup for direct-SQL paths."""
-    return os.environ.get("MEMPALACE_POSTGRES_DSN") or getattr(
-        _mp._config, "postgres_dsn", None
-    )
+# Postgres helpers (#93/#96/#108) — extracted to postgres.py per #101 (fourth slice).
+# main.py re-exports the `_`-prefixed names so existing call sites keep working.
+# Tests must patch `postgres.postgres_dsn` (not `main._postgres_dsn`) because
+# intra-module callers in postgres.py bypass main's namespace.
+from postgres import _DaemonToolError, _RPC_INVALID_PARAMS, _RPC_BACKEND_DOWN, _RPC_INTERNAL  # noqa: E402,F401
+from postgres import postgres_dsn as _postgres_dsn  # noqa: E402
+from postgres import require_postgres as _require_postgres  # noqa: E402,F401
+from postgres import connect_postgres as _connect_postgres  # noqa: E402,F401
 
 
 def _fast_status_payload() -> dict:
@@ -2113,64 +2116,8 @@ def _fast_status_payload() -> dict:
 # Six tools the CLI needs when daemon-strict mode is on. The mempalace CLI's
 # `cmd_rooms` / `cmd_wakeup` / `cmd_mined` open a local ChromaDB client today
 # and break against the retired local palace; routing them through the daemon
-# closes that gap. Companion to mempalace#285. See Cirrus's recon notes on
-# techempower-org/palace-daemon#93 for the design rationale.
-
-
-class _DaemonToolError(Exception):
-    """JSON-RPC error from a daemon-native tool handler.
-
-    Carries a JSON-RPC error code + optional structured data so the CLI
-    can branch on failure mode (bad params vs backend down vs internal).
-    """
-
-    def __init__(self, code: int, message: str, data=None):
-        super().__init__(message)
-        self.code = code
-        self.data = data
-
-
-_RPC_INVALID_PARAMS = -32602   # standard
-_RPC_BACKEND_DOWN = -32004     # custom — postgres unreachable / DSN missing
-_RPC_INTERNAL = -32000         # standard
-
-
-def _require_postgres():
-    """Return the DSN or raise BACKEND_DOWN. Used by every native tool."""
-    dsn = _postgres_dsn()
-    if not dsn:
-        raise _DaemonToolError(
-            _RPC_BACKEND_DOWN,
-            "postgres backend not configured (set MEMPALACE_POSTGRES_DSN)",
-        )
-    return dsn
-
-
-def _connect_postgres(connect_timeout: int = 3):
-    """Connect with proper BACKEND_DOWN error mapping for daemon-native tools.
-
-    Without this helper, a connection-failed-to-establish error
-    (postgres OOM-killed, network down, wrong DSN) raises
-    psycopg2.OperationalError, which the /mcp dispatch's generic
-    except-clause maps to -32000 INTERNAL. The CLI consumer then can't
-    distinguish backend-down from an actual daemon bug.
-
-    Catching here lets us surface every flavour of "can't reach
-    postgres" as -32004 BACKEND_DOWN — same code as missing DSN, so the
-    CLI handles them uniformly (typically: surface clear error, no retry
-    storm). Gemini-flagged on #96; informed by today's morning OOM
-    cluster (palace-daemon#97).
-    """
-    dsn = _require_postgres()
-    import psycopg2
-    try:
-        return psycopg2.connect(dsn, connect_timeout=connect_timeout)
-    except psycopg2.OperationalError as e:
-        _record_db_error(e)
-        raise _DaemonToolError(
-            _RPC_BACKEND_DOWN,
-            f"postgres connection failed: {e}",
-        )
+# closes that gap. Companion to mempalace#285. _DaemonToolError + _RPC_*
+# constants live in postgres.py — see re-exports above.
 
 
 # DB-error observability (#97) — extracted to db_errors.py per #101 refactor.

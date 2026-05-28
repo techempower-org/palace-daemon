@@ -26,6 +26,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import main  # noqa: E402
+import postgres  # noqa: E402  — #101 extraction
 
 
 class _Base(unittest.TestCase):
@@ -50,7 +51,7 @@ class TestFastStatusPayloadRecords(_Base):
 
     def test_missing_dsn_does_not_record(self):
         """Missing DSN is a config error, not a DB-error event."""
-        with patch.object(main, "_postgres_dsn", return_value=None), \
+        with patch.object(postgres, "postgres_dsn", return_value=None), \
              patch.dict(os.environ, {}, clear=False):
             os.environ.pop("MEMPALACE_POSTGRES_DSN", None)
             with self.assertRaises(RuntimeError):

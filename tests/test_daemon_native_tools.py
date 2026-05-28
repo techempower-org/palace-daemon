@@ -24,6 +24,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import main  # noqa: E402
+import postgres  # noqa: E402  — #101 extraction
 
 
 class _FakeCursor:
@@ -91,9 +92,9 @@ class _FakeConn:
 def _patch_psycopg(cursor, error_to_raise=None):
     """Build a patch for psycopg2.connect that returns our fake conn."""
     if error_to_raise is not None:
-        return patch.object(main, "_postgres_dsn", return_value="postgres://x")
+        return patch.object(postgres, "postgres_dsn", return_value="postgres://x")
     return [
-        patch.object(main, "_postgres_dsn", return_value="postgres://x"),
+        patch.object(postgres, "postgres_dsn", return_value="postgres://x"),
         patch("psycopg2.connect", return_value=_FakeConn(cursor)),
     ]
 
@@ -107,7 +108,7 @@ class _BaseTool(unittest.TestCase):
 
 class TestRequirePostgres(_BaseTool):
     def test_missing_dsn_raises_backend_down(self):
-        with patch.object(main, "_postgres_dsn", return_value=None):
+        with patch.object(postgres, "postgres_dsn", return_value=None):
             with self.assertRaises(main._DaemonToolError) as cm:
                 main._require_postgres()
         self.assertEqual(cm.exception.code, main._RPC_BACKEND_DOWN)
@@ -124,14 +125,14 @@ class TestConnectPostgres(_BaseTool):
     """
 
     def test_dsn_missing_raises_backend_down(self):
-        with patch.object(main, "_postgres_dsn", return_value=None):
+        with patch.object(postgres, "postgres_dsn", return_value=None):
             with self.assertRaises(main._DaemonToolError) as cm:
                 main._connect_postgres()
         self.assertEqual(cm.exception.code, main._RPC_BACKEND_DOWN)
 
     def test_connect_operational_error_maps_to_backend_down(self):
         import psycopg2
-        with patch.object(main, "_postgres_dsn", return_value="postgres://x"), \
+        with patch.object(postgres, "postgres_dsn", return_value="postgres://x"), \
              patch("psycopg2.connect",
                    side_effect=psycopg2.OperationalError("connection refused")):
             with self.assertRaises(main._DaemonToolError) as cm:
@@ -141,14 +142,14 @@ class TestConnectPostgres(_BaseTool):
 
     def test_successful_connect_returns_conn(self):
         fake_conn = MagicMock()
-        with patch.object(main, "_postgres_dsn", return_value="postgres://x"), \
+        with patch.object(postgres, "postgres_dsn", return_value="postgres://x"), \
              patch("psycopg2.connect", return_value=fake_conn):
             result = main._connect_postgres()
         self.assertIs(result, fake_conn)
 
     def test_passes_through_non_operational_errors(self):
         """Non-OperationalError exceptions (programming bugs) pass through unchanged."""
-        with patch.object(main, "_postgres_dsn", return_value="postgres://x"), \
+        with patch.object(postgres, "postgres_dsn", return_value="postgres://x"), \
              patch("psycopg2.connect", side_effect=TypeError("bad config")):
             with self.assertRaises(TypeError):
                 main._connect_postgres()
@@ -158,7 +159,7 @@ class TestRoomsList(_BaseTool):
     def test_returns_rows(self):
         rows = [("planning", "Planning room", "2026-01-01")]
         cur = _FakeCursor([("FROM mempalace_canonical_rooms", rows)])
-        with patch.object(main, "_postgres_dsn", return_value="x"), \
+        with patch.object(postgres, "postgres_dsn", return_value="x"), \
              patch("psycopg2.connect", return_value=_FakeConn(cur)):
             result = main._fast_mcp_rooms_list({})
         self.assertEqual(len(result), 1)
@@ -175,13 +176,13 @@ class TestRoomsList(_BaseTool):
                 super().execute(sql, params)
 
         cur = _UndefinedCursor([])
-        with patch.object(main, "_postgres_dsn", return_value="x"), \
+        with patch.object(postgres, "postgres_dsn", return_value="x"), \
              patch("psycopg2.connect", return_value=_FakeConn(cur)):
             result = main._fast_mcp_rooms_list({})
         self.assertEqual(result, [])
 
     def test_backend_down(self):
-        with patch.object(main, "_postgres_dsn", return_value=None):
+        with patch.object(postgres, "postgres_dsn", return_value=None):
             with self.assertRaises(main._DaemonToolError) as cm:
                 main._fast_mcp_rooms_list({})
         self.assertEqual(cm.exception.code, main._RPC_BACKEND_DOWN)
@@ -190,14 +191,14 @@ class TestRoomsList(_BaseTool):
 class TestRoomsAdd(_BaseTool):
     def test_add_inserts_returns_added(self):
         cur = _FakeCursor([("INSERT INTO mempalace_canonical_rooms", [(True,)])])
-        with patch.object(main, "_postgres_dsn", return_value="x"), \
+        with patch.object(postgres, "postgres_dsn", return_value="x"), \
              patch("psycopg2.connect", return_value=_FakeConn(cur)):
             result = main._fast_mcp_rooms_add({"name": "Planning", "description": "Planning room"})
         self.assertEqual(result, {"action": "added", "name": "planning"})
 
     def test_add_existing_returns_updated(self):
         cur = _FakeCursor([("INSERT INTO mempalace_canonical_rooms", [(False,)])])
-        with patch.object(main, "_postgres_dsn", return_value="x"), \
+        with patch.object(postgres, "postgres_dsn", return_value="x"), \
              patch("psycopg2.connect", return_value=_FakeConn(cur)):
             result = main._fast_mcp_rooms_add({"name": "planning"})
         self.assertEqual(result, {"action": "updated", "name": "planning"})
@@ -205,7 +206,7 @@ class TestRoomsAdd(_BaseTool):
     def test_add_invalidates_cache(self):
         main._canonical_rooms_cache = {"existing"}
         cur = _FakeCursor([("INSERT", [(True,)])])
-        with patch.object(main, "_postgres_dsn", return_value="x"), \
+        with patch.object(postgres, "postgres_dsn", return_value="x"), \
              patch("psycopg2.connect", return_value=_FakeConn(cur)):
             main._fast_mcp_rooms_add({"name": "new"})
         self.assertIsNone(main._canonical_rooms_cache)
@@ -227,7 +228,7 @@ class TestRoomsAdd(_BaseTool):
 
     def test_normalizes_name(self):
         cur = _FakeCursor([("INSERT", [(True,)])])
-        with patch.object(main, "_postgres_dsn", return_value="x"), \
+        with patch.object(postgres, "postgres_dsn", return_value="x"), \
              patch("psycopg2.connect", return_value=_FakeConn(cur)):
             result = main._fast_mcp_rooms_add({"name": "  PLANNING  "})
         self.assertEqual(result["name"], "planning")
@@ -239,7 +240,7 @@ class TestRoomsRename(_BaseTool):
             ("count(*) FROM mempalace_drawers", [(7,)], 1),
             ("UPDATE mempalace_canonical_rooms", None, 1),
         ])
-        with patch.object(main, "_postgres_dsn", return_value="x"), \
+        with patch.object(postgres, "postgres_dsn", return_value="x"), \
              patch("psycopg2.connect", return_value=_FakeConn(cur)):
             result = main._fast_mcp_rooms_rename({"old": "Planning", "new": "Plans"})
         self.assertEqual(result, {"old": "planning", "new": "plans", "affected_drawers": 7})
@@ -249,7 +250,7 @@ class TestRoomsRename(_BaseTool):
             ("count(*) FROM mempalace_drawers", [(0,)], 1),
             ("UPDATE mempalace_canonical_rooms", None, 0),
         ])
-        with patch.object(main, "_postgres_dsn", return_value="x"), \
+        with patch.object(postgres, "postgres_dsn", return_value="x"), \
              patch("psycopg2.connect", return_value=_FakeConn(cur)):
             with self.assertRaises(main._DaemonToolError) as cm:
                 main._fast_mcp_rooms_rename({"old": "ghost", "new": "spirit"})
@@ -266,7 +267,7 @@ class TestRoomsRename(_BaseTool):
                 super().execute(sql, params)
 
         cur = _CollideCursor([("count(*) FROM mempalace_drawers", [(3,)], 1)])
-        with patch.object(main, "_postgres_dsn", return_value="x"), \
+        with patch.object(postgres, "postgres_dsn", return_value="x"), \
              patch("psycopg2.connect", return_value=_FakeConn(cur)):
             with self.assertRaises(main._DaemonToolError) as cm:
                 main._fast_mcp_rooms_rename({"old": "a", "new": "b"})
@@ -285,14 +286,14 @@ class TestRoomsRemove(_BaseTool):
             ("count(*) FROM mempalace_drawers", [(0,)], 1),
             ("DELETE FROM mempalace_canonical_rooms", None, 1),
         ])
-        with patch.object(main, "_postgres_dsn", return_value="x"), \
+        with patch.object(postgres, "postgres_dsn", return_value="x"), \
              patch("psycopg2.connect", return_value=_FakeConn(cur)):
             result = main._fast_mcp_rooms_remove({"name": "old_room"})
         self.assertEqual(result, {"name": "old_room", "removed": True})
 
     def test_remove_refused_when_referenced(self):
         cur = _FakeCursor([("count(*) FROM mempalace_drawers", [(5,)], 1)])
-        with patch.object(main, "_postgres_dsn", return_value="x"), \
+        with patch.object(postgres, "postgres_dsn", return_value="x"), \
              patch("psycopg2.connect", return_value=_FakeConn(cur)):
             with self.assertRaises(main._DaemonToolError) as cm:
                 main._fast_mcp_rooms_remove({"name": "used"})
@@ -306,7 +307,7 @@ class TestRoomsRemove(_BaseTool):
             ("count(*) FROM mempalace_drawers", [(0,)], 1),
             ("DELETE FROM mempalace_canonical_rooms", None, 0),
         ])
-        with patch.object(main, "_postgres_dsn", return_value="x"), \
+        with patch.object(postgres, "postgres_dsn", return_value="x"), \
              patch("psycopg2.connect", return_value=_FakeConn(cur)):
             result = main._fast_mcp_rooms_remove({"name": "ghost"})
         self.assertEqual(result, {"name": "ghost", "removed": False})
@@ -320,7 +321,7 @@ class TestMined(_BaseTool):
             ("project_b", "/path/c.txt", 7),
         ]
         cur = _FakeCursor([("FROM mempalace_drawers", rows)])
-        with patch.object(main, "_postgres_dsn", return_value="x"), \
+        with patch.object(postgres, "postgres_dsn", return_value="x"), \
              patch("psycopg2.connect", return_value=_FakeConn(cur)):
             result = main._fast_mcp_mined({})
         self.assertEqual(result["total_wings"], 2)
@@ -332,7 +333,7 @@ class TestMined(_BaseTool):
 
     def test_wing_filter_passed_to_sql(self):
         cur = _FakeCursor([("FROM mempalace_drawers", [("project_a", "/x", 1)])])
-        with patch.object(main, "_postgres_dsn", return_value="x"), \
+        with patch.object(postgres, "postgres_dsn", return_value="x"), \
              patch("psycopg2.connect", return_value=_FakeConn(cur)):
             main._fast_mcp_mined({"wing": "project_a"})
         # The executed SQL must include the WHERE wing = %s clause
@@ -343,7 +344,7 @@ class TestMined(_BaseTool):
     def test_limit_truncates_per_wing(self):
         rows = [("w", f"/file{i}.txt", 1) for i in range(5)]
         cur = _FakeCursor([("FROM mempalace_drawers", rows)])
-        with patch.object(main, "_postgres_dsn", return_value="x"), \
+        with patch.object(postgres, "postgres_dsn", return_value="x"), \
              patch("psycopg2.connect", return_value=_FakeConn(cur)):
             result = main._fast_mcp_mined({"limit": 2})
         slot = result["sources_by_wing"]["w"]

@@ -33,6 +33,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import main  # noqa: E402
+import postgres  # noqa: E402  — #101 extraction
 import canaries  # noqa: E402  — #101 extraction
 
 
@@ -276,7 +277,7 @@ class TestConnectPostgresRecordsErrors(_BaseObs):
 
     def test_connect_failure_records_error(self):
         import psycopg2
-        with patch.object(main, "_postgres_dsn", return_value="postgres://x"), \
+        with patch.object(postgres, "postgres_dsn", return_value="postgres://x"), \
              patch("psycopg2.connect",
                    side_effect=psycopg2.OperationalError("connection refused")):
             try:
