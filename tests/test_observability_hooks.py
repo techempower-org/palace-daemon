@@ -33,6 +33,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import main  # noqa: E402
+import canaries  # noqa: E402  — #101 extraction
 
 
 class _BaseObs(unittest.TestCase):
@@ -213,7 +214,7 @@ class TestMemcgCanary(_BaseObs):
             "percent": 0.40, "probed_at": int(time.time()),
         }
         logger = MagicMock()
-        with patch.object(main, "_postgres_memcg_status", return_value=fake_status):
+        with patch.object(canaries, "postgres_memcg_status", return_value=fake_status):
             main._log_postgres_memcg_canary(logger, env={})
         logger.info.assert_called_once()
         logger.warning.assert_not_called()
@@ -225,7 +226,7 @@ class TestMemcgCanary(_BaseObs):
             "percent": 0.83, "probed_at": int(time.time()),
         }
         logger = MagicMock()
-        with patch.object(main, "_postgres_memcg_status", return_value=fake_status):
+        with patch.object(canaries, "postgres_memcg_status", return_value=fake_status):
             main._log_postgres_memcg_canary(logger, env={})
         logger.warning.assert_called_once()
         logger.info.assert_not_called()
@@ -240,7 +241,7 @@ class TestMemcgCanary(_BaseObs):
         }
         logger = MagicMock()
         # Below 75 default, but above 50 custom
-        with patch.object(main, "_postgres_memcg_status", return_value=fake_status):
+        with patch.object(canaries, "postgres_memcg_status", return_value=fake_status):
             main._log_postgres_memcg_canary(
                 logger, env={"PALACE_POSTGRES_MEMCG_WARN_PERCENT": "50"}
             )
@@ -253,7 +254,7 @@ class TestMemcgCanary(_BaseObs):
             "percent": 0.65, "probed_at": int(time.time()),
         }
         logger = MagicMock()
-        with patch.object(main, "_postgres_memcg_status", return_value=fake_status):
+        with patch.object(canaries, "postgres_memcg_status", return_value=fake_status):
             main._log_postgres_memcg_canary(
                 logger, env={"PALACE_POSTGRES_MEMCG_WARN_PERCENT": "not-a-number"}
             )
@@ -262,7 +263,7 @@ class TestMemcgCanary(_BaseObs):
 
     def test_docker_unreachable_logs_skip(self):
         logger = MagicMock()
-        with patch.object(main, "_postgres_memcg_status", return_value=None):
+        with patch.object(canaries, "postgres_memcg_status", return_value=None):
             main._log_postgres_memcg_canary(logger, env={})
         logger.info.assert_called_once()
         msg = logger.info.call_args.args[0]
@@ -343,7 +344,7 @@ class TestGeminiFixes(_BaseObs):
                 "percent": 0.50, "probed_at": int(time.time()),
             }
 
-        with patch.object(main, "_postgres_memcg_status", side_effect=fake_status):
+        with patch.object(canaries, "postgres_memcg_status", side_effect=fake_status):
             main._log_postgres_memcg_canary(
                 logger, env={"PALACE_POSTGRES_CONTAINER": "custom-pg"}
             )

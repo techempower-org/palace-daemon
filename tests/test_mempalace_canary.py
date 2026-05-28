@@ -39,16 +39,21 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import main  # noqa: E402
+import canaries  # noqa: E402  — #101 extraction; tests patch the new module's names
 
 
 class TestMempalaceCanary(unittest.TestCase):
     """The helper logs INFO when fresh, WARNING when stale, never crashes."""
 
     def _patch_newest(self, mtime_offset_secs: float, filename: str = "searcher.py"):
-        """Patch `_newest_mempalace_mtime` to return a controlled (mtime, path)."""
+        """Patch `newest_mempalace_mtime` in the canaries module so production-
+        code intra-module calls see the mock. Patching main's re-export name
+        won't intercept because log_mempalace_canary calls newest_mempalace_mtime
+        from canaries' own namespace.
+        """
         mtime = time.time() + mtime_offset_secs
         return patch.object(
-            main, "_newest_mempalace_mtime",
+            canaries, "newest_mempalace_mtime",
             return_value=(mtime, f"/fake/mempalace/{filename}"),
         )
 
@@ -106,9 +111,9 @@ class TestMempalaceCanary(unittest.TestCase):
         logger.info.assert_called_once()
 
     def test_probe_returns_none_logs_skip(self):
-        """If _newest_mempalace_mtime returns None, log skip — don't crash."""
+        """If newest_mempalace_mtime returns None, log skip — don't crash."""
         logger = MagicMock()
-        with patch.object(main, "_newest_mempalace_mtime", return_value=None):
+        with patch.object(canaries, "newest_mempalace_mtime", return_value=None):
             main._log_mempalace_canary(logger, env={})
         logger.info.assert_called_once()
         msg = logger.info.call_args.args[0]
