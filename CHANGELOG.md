@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Fixed — *#143: `/health` no longer returns 503 just because crash_loop=True*
+
+The `crash_loop` signal is informational — it means the daemon has been
+restarted several times in the configured window (default 3 in 10min).
+It does NOT mean the daemon is broken. Today's #101 deploy session
+triggered the detector and produced a 503 even while the daemon was
+serving 200s to every other endpoint, exactly the false-positive shape
+JP filed in #143.
+
+Fix: `/health` returns 503 only when `palace_ok=False` (the daemon
+truly can't serve). A `crash_loop=True` reading with `palace_ok=True`
+now returns 200 with the informational fields populated, so
+monitoring tools can read `restart_count` without auto-restarting the
+service.
+
+Status semantic table:
+
+| palace_ok | crash_loop | HTTP | status |
+|---|---|---|---|
+| true | false | 200 | ok |
+| true | true | 200 | ok ← was 503 crash_loop |
+| false | * | 503 | degraded |
+
 ### Fixed — *#140: `/mcp` tools/list now includes the 6 daemon-native tools*
 
 The daemon-native tools added by #96 (`mempalace_rooms_list/add/rename/remove`,
