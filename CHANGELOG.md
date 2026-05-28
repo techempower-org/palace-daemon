@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Fixed — *#136 problem (B), follow-up: extend active-mine tracking to /mine, /backfill-age, and drain*
+
+The initial #136(B) fix tracked subprocesses spawned by the watcher's
+auto-mine path. Inspection of familiar's journal showed the watcher
+isn't actually running there — so the `mempalace` children that were
+getting SIGKILL'd by systemd must have come from the user-initiated
+spawn sites:
+
+- POST `/mine` (`_run_mine_subprocess`)
+- POST `/backfill-age` (`_run_backfill`)
+- `_drain_pending_mines` (called post-rebuild from /repair)
+
+All three now register their `asyncio.subprocess.Process` with the
+same `app.state.active_mines` set the auto-mine path uses, so the
+lifespan shutdown sees them too. `getattr(..., None)` guards the
+at-startup drain that runs before lifespan startup completes.
+
 ### Fixed — *#136 problem (B): track + terminate auto-mine subprocesses on lifespan shutdown*
 
 The lifespan handler now tracks each spawned `mempalace mine` subprocess
