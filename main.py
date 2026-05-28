@@ -976,8 +976,50 @@ async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
 _TRUTHY_FLAG = frozenset({"1", "true", "yes", "on"})
 
 
+def _newest_mempalace_mtime() -> "tuple[float, str] | None":
+    """Walk the mempalace package directory and return ``(newest_mtime, filename)``.
+
+    #116: the canary previously read mempalace/__init__.py's mtime, but
+    __init__.py is a stable file that rarely changes — every release with a
+    code change but no __init__.py edit produced a false-positive WARN.
+    Walking the tree and reporting the newest .py file's mtime tracks
+    whole-tree freshness, which is what operators actually care about.
+
+    Returns ``None`` if mempalace can't be imported or the directory walk
+    finds no .py files (defensive — startup must not crash on this probe).
+    """
+    try:
+        import mempalace as _mp_pkg
+        path = _mp_pkg.__file__
+        if not path:
+            return None
+        pkg_dir = os.path.dirname(path)
+    except Exception:
+        return None
+    newest_mtime = 0.0
+    newest_file = ""
+    try:
+        for root, _, files in os.walk(pkg_dir):
+            for f in files:
+                if not f.endswith(".py"):
+                    continue
+                full = os.path.join(root, f)
+                try:
+                    m = os.path.getmtime(full)
+                except OSError:
+                    continue
+                if m > newest_mtime:
+                    newest_mtime = m
+                    newest_file = full
+    except OSError:
+        return None
+    if newest_mtime == 0.0:
+        return None
+    return (newest_mtime, newest_file)
+
+
 def _log_mempalace_canary(logger, env=None) -> None:
-    """Log the deployed mempalace state for drift detection (#92).
+    """Log the deployed mempalace state for drift detection (#92, #116).
 
     Today's Syncthing outage demonstrated the silent-drift failure mode: the
     daemon ran healthy on 2-day-old mempalace code while the actual upstream
@@ -986,11 +1028,11 @@ def _log_mempalace_canary(logger, env=None) -> None:
     `stat -c %y` mtime on the deployed file. This helper hoists that signal
     into journalctl on every restart so drift is one grep away.
 
-    Reports the path + mtime + age of mempalace/__init__.py (the package
-    entry point, which gets touched by ~any meaningful mempalace change).
-    If the canary's age exceeds the warn threshold, the log level is
-    WARNING; otherwise INFO. Defaults to 24h; override via env var
-    PALACE_CANARY_WARN_HOURS.
+    Reports the newest .py mtime across the whole mempalace/ tree (#116
+    fix — __init__.py was a stable file that produced false-positive WARNs
+    on releases that touched other modules but not __init__.py). If the
+    age exceeds the warn threshold, log level is WARNING; otherwise INFO.
+    Defaults to 24h; override via env var PALACE_CANARY_WARN_HOURS.
     """
     import datetime as _dt
     import time as _time
@@ -999,18 +1041,11 @@ def _log_mempalace_canary(logger, env=None) -> None:
         warn_hours = float(env.get("PALACE_CANARY_WARN_HOURS") or "24")
     except (TypeError, ValueError):
         warn_hours = 24.0
-    try:
-        import mempalace as _mp_pkg
-        canary = _mp_pkg.__file__
-        if not canary:
-            logger.info("mempalace canary: no __file__ on package (skipping)")
-            return
-        mtime = os.path.getmtime(canary)
-    except Exception as e:
-        # Defensive — if the import fails we have bigger problems than drift,
-        # but the helper itself must not crash startup.
-        logger.info("mempalace canary: probe failed (%s) — skipping", e)
+    result = _newest_mempalace_mtime()
+    if result is None:
+        logger.info("mempalace canary: probe failed (package walk produced no .py files) — skipping")
         return
+    mtime, canary = result
     mtime_iso = _dt.datetime.fromtimestamp(mtime).isoformat(timespec="seconds")
     # Use _time.time() — direct epoch read, no tz round-trip via datetime.now()
     age_secs = max(0.0, _time.time() - mtime)
@@ -1020,17 +1055,20 @@ def _log_mempalace_canary(logger, env=None) -> None:
         age_h = f"{age_secs / 3600:.1f}h"
     else:
         age_h = f"{age_secs / 86400:.1f}d"
+    # Report the newest file's basename so the operator can confirm
+    # which module triggered the freshness signal.
+    canary_basename = os.path.basename(canary) if canary else "(unknown)"
     msg = (
-        "mempalace canary: %s (mtime %s, age %s, warn-threshold %.1fh)"
+        "mempalace canary: newest .py = %s (mtime %s, age %s, warn-threshold %.1fh)"
     )
     if age_secs > warn_hours * 3600:
         logger.warning(
             msg + " — stale; run scripts/rsync-mempalace.sh "
             "to push from your workstation",
-            canary, mtime_iso, age_h, warn_hours,
+            canary_basename, mtime_iso, age_h, warn_hours,
         )
     else:
-        logger.info(msg, canary, mtime_iso, age_h, warn_hours)
+        logger.info(msg, canary_basename, mtime_iso, age_h, warn_hours)
 
 
 def _log_kg_writethrough_stages(env, logger) -> None:

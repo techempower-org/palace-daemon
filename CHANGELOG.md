@@ -245,6 +245,27 @@ consumers were getting the wrong picture.
 
 ## [Unreleased]
 
+### Fixed — 2026-05-28 — *mempalace canary walks the package tree instead of reading __init__.py (#116)*
+
+The 1.9.0 deploy verification surfaced a false-positive WARN from `_log_mempalace_canary`:
+
+```
+mempalace canary: /home/jp/Projects/memorypalace/mempalace/__init__.py
+(mtime 2026-05-22T08:40:13, age 6.1d, warn-threshold 24.0h) — stale
+```
+
+But `searcher.py` (May 28) and `cross_encoder_rerank.py` (May 28) were fresh — `__init__.py` was just untouched in today's PRs. The canary's choice of file made it a poor signal for whole-package freshness.
+
+New `_newest_mempalace_mtime()` helper walks the mempalace package directory and reports the newest `.py` file's mtime. The log line now names the newest file's basename so operators can confirm which module triggered the freshness signal:
+
+```
+mempalace canary: newest .py = searcher.py (mtime 2026-05-28T09:16:10, age 2.1h, warn-threshold 24.0h)
+```
+
+14 tests in `tests/test_mempalace_canary.py` (was 10, +4 for the tree-walk helper covering missing __file__, empty walk, multi-file mtime selection, and subdirectory recursion).
+
+Closes [#116](https://github.com/techempower-org/palace-daemon/issues/116).
+
 ### Added — 2026-05-28 — *`scripts/rsync-palace-daemon.sh` — backup deploy for the daemon itself (#114)*
 
 Companion to `scripts/rsync-mempalace.sh` (#95). Today's 1.9.0 deploy exposed the gap: `scripts/deploy.sh` push + restart succeeded, but Syncthing on familiar was idle with a 6-day-old palace-daemon snapshot, so the daemon restarted on the old `VERSION = "1.8.4"` code. Manual `rsync -az --delete` from katana → familiar unblocked the deploy. This script automates that fallback path so the next Syncthing failure doesn't require ad-hoc shell.
