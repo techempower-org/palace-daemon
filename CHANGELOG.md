@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Refactored — *#101 eleventh slice: extract path-map translation to `path_map.py`*
+
+Moved `_PATH_MAP_USE_ENV`, `_parse_path_map`, `_translate_client_path`
+(~60 lines) into a dedicated module. Pure env+string logic, no FastAPI
+or mempalace deps. Re-exports under `_`-prefixed names so the 4 call
+sites in main.py (`/mine`, `/silent-save`, the watcher's
+`parse_watch_dirs` translator, the silent-save validator) and the 3
+test files (`test_path_translation.py`, `test_mine_backend_aware.py`,
+`test_mine_queue.py`) keep working unchanged.
+
+main.py: 3482 → 3428 lines.
+
 ### Refactored — *#101 tenth slice: extract rebuild progress capture to `rebuild_progress.py`*
 
 Moved the stdout-capturing buffer that powers `/repair/status` progress
