@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Refactored — *#101 eighth slice: extract crash-loop detection to `crash_loop.py`*
+
+Moved the crash-loop detection (~60 lines: `_record_restart`,
+`_crash_loop_state`, `_CRASH_LOOP_*` constants, `_RESTART_HISTORY_PATH`,
+`_STARTUP_MONOTONIC`) into a dedicated module. Pure file-based state,
+no FastAPI deps. Re-exports under the original `_`-prefixed names so
+the lifespan handler and `/health` endpoint keep working.
+
+The `STARTUP_MONOTONIC` reference timestamp is now captured at
+`crash_loop.py`'s module-load time, which happens during `main.py`'s
+import — preserving the "time since daemon process started" semantics
+used by the auto-recovery logic.
+
+main.py: 3617 → 3600 lines. Cumulative #101 today: ~1150 lines
+extracted across eight slices. main.py is now 24% smaller than at
+session start.
+
 ### Fixed — *#136 problem (B), follow-up: extend active-mine tracking to /mine, /backfill-age, and drain*
 
 The initial #136(B) fix tracked subprocesses spawned by the watcher's

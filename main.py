@@ -111,62 +111,28 @@ _repair_lock = asyncio.Lock()
 
 _log = logging.getLogger("palace-daemon")
 
-# ── Crash-loop detection ───────────────────────────────────────────────────────
-_CRASH_LOOP_DIR = Path.home() / ".cache" / "palace-daemon"
-_RESTART_HISTORY_PATH = _CRASH_LOOP_DIR / "restart_history.json"
-_CRASH_LOOP_WINDOW = int(os.getenv("PALACE_CRASH_LOOP_THRESHOLD_SECONDS", "600"))
-_CRASH_LOOP_THRESHOLD = int(os.getenv("PALACE_CRASH_LOOP_THRESHOLD_COUNT", "3"))
-_CRASH_LOOP_RECOVERY = int(os.getenv("PALACE_CRASH_LOOP_RECOVERY_SECONDS", "1800"))
+# ── Crash-loop detection (#101 eighth slice) ───────────────────────────────
+# Lives in crash_loop.py now. main.py keeps the `_`-prefixed names alive via
+# re-export so the lifespan handler and /health endpoint keep working
+# unchanged. The module-level STARTUP_MONOTONIC is captured at crash_loop's
+# import time, which happens during main.py's load — so the auto-recovery
+# clock still measures daemon process uptime as expected.
+from crash_loop import (  # noqa: E402
+    CRASH_LOOP_DIR as _CRASH_LOOP_DIR,
+    CRASH_LOOP_RECOVERY as _CRASH_LOOP_RECOVERY,
+    CRASH_LOOP_THRESHOLD as _CRASH_LOOP_THRESHOLD,
+    CRASH_LOOP_WINDOW as _CRASH_LOOP_WINDOW,
+    RESTART_HISTORY_PATH as _RESTART_HISTORY_PATH,
+    STARTUP_MONOTONIC as _STARTUP_MONOTONIC,
+    crash_loop_state as _crash_loop_state,
+    record_restart as _record_restart,
+)
 
 # Optional settle margin after the deterministic chroma client close in the
 # /mine lock-and-reopen choreography. close_palace() releases chromadb's
 # Rust-side SQLite file lock synchronously, so 0.0 is correct for normal
 # palaces; this is only a safety knob for very large palaces. (#29)
 PALACE_CHROMA_FLUSH_SECONDS = float(os.getenv("PALACE_CHROMA_FLUSH_SECONDS", "0.0"))
-
-# Monotonic timestamp of when this process started — used by
-# _crash_loop_state() to auto-exit the degraded state after the daemon
-# has been running cleanly for _CRASH_LOOP_RECOVERY seconds.
-_STARTUP_MONOTONIC: float = _time.monotonic()
-
-
-def _record_restart() -> None:
-    _CRASH_LOOP_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-    try:
-        data = json.loads(_RESTART_HISTORY_PATH.read_text()) if _RESTART_HISTORY_PATH.exists() else {}
-    except Exception:
-        data = {}
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(seconds=_CRASH_LOOP_WINDOW)
-    restarts = [r for r in data.get("restarts", []) if datetime.fromisoformat(r) > cutoff]
-    restarts.append(now.isoformat())
-    _RESTART_HISTORY_PATH.write_text(json.dumps({"restarts": restarts}))
-
-
-def _crash_loop_state() -> dict:
-    try:
-        data = json.loads(_RESTART_HISTORY_PATH.read_text()) if _RESTART_HISTORY_PATH.exists() else {}
-        now = datetime.now(timezone.utc)
-        cutoff = now - timedelta(seconds=_CRASH_LOOP_WINDOW)
-        recent = [r for r in data.get("restarts", []) if datetime.fromisoformat(r) > cutoff]
-        in_loop = len(recent) >= _CRASH_LOOP_THRESHOLD
-
-        # Auto-recovery: if the daemon has been running continuously for
-        # _CRASH_LOOP_RECOVERY seconds without crashing, suppress the
-        # crash-loop flag even if old restarts are still in the window.
-        # This lets the daemon self-heal without operator intervention.
-        uptime = _time.monotonic() - _STARTUP_MONOTONIC
-        recovered = in_loop and uptime >= _CRASH_LOOP_RECOVERY
-
-        return {
-            "crash_loop": in_loop and not recovered,
-            "restart_count": len(recent),
-            "window_seconds": _CRASH_LOOP_WINDOW,
-            "uptime_seconds": round(uptime, 1),
-            "recovered": recovered,
-        }
-    except Exception:
-        return {"crash_loop": False, "restart_count": 0, "window_seconds": _CRASH_LOOP_WINDOW}
 
 
 # ── Rebuild progress capture (palace-daemon#12) ──────────────────────────────
