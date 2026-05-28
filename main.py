@@ -2137,58 +2137,12 @@ async def stats(x_api_key: str | None = Header(default=None)):
 
 
 # ── Bench-active lock (#104) ──────────────────────────────────────────────────
-# External bench runs (SME LongMemEval, candidate-strategy ablation, etc.) hit
-# the daemon hard. The auto-mine spawned by the WatcherService can concurrently
-# push the postgres container into OOM territory (#102) and cascade into the
-# connection-closed pattern (#97). A simple file-lock contract gives bench
-# runners a way to pause auto-mine without restarting the daemon (which would
-# be catastrophic mid-bench).
+# Helpers extracted to bench_lock.py per #101 refactor. main.py re-exports
+# the names as `_bench_lock_path` / `_bench_lock_active` so existing tests
+# that mock `main._bench_lock_*` keep working without churn.
 
-
-def _bench_lock_path() -> str:
-    """Resolve the lock file path.
-
-    ``PALACE_BENCH_LOCK_PATH`` env override wins; otherwise defaults to
-    ``<palace_data_dir>/.bench-active.lock`` (matching #104's suggestion).
-    """
-    override = os.environ.get("PALACE_BENCH_LOCK_PATH")
-    if override:
-        return override
-    try:
-        return os.path.join(_mp._config.palace_path, ".bench-active.lock")
-    except Exception:
-        # _mp._config may not be initialized in unusual contexts (tests
-        # importing main before lifespan runs). Fall back to a sensible
-        # default so the daemon doesn't crash trying to compute the path.
-        return os.path.join(os.path.expanduser("~"), ".palace-bench-active.lock")
-
-
-def _bench_lock_active() -> tuple[bool, str]:
-    """Return ``(is_active, reason_string)`` for the bench-active lock.
-
-    A lock older than ``PALACE_BENCH_LOCK_MAX_AGE_SECONDS`` (default 6 h)
-    is treated as stale and ignored — protects against bench runners that
-    crashed without cleaning up. The reason string is plain text suitable
-    for logging.
-    """
-    import time as _time
-    path = _bench_lock_path()
-    try:
-        st = os.stat(path)
-    except FileNotFoundError:
-        return (False, "no lock file")
-    except OSError as e:
-        # Any other stat failure (permissions, ENOTDIR) should not block
-        # auto-mine — surface it in the reason but treat as inactive.
-        return (False, f"stat failed: {e}")
-    try:
-        max_age = float(os.environ.get("PALACE_BENCH_LOCK_MAX_AGE_SECONDS") or "21600")  # 6 h
-    except (TypeError, ValueError):
-        max_age = 21600.0
-    age = _time.time() - st.st_mtime
-    if age > max_age:
-        return (False, f"stale (age {int(age)}s > max {int(max_age)}s)")
-    return (True, f"path={path} age={int(age)}s")
+from bench_lock import bench_lock_path as _bench_lock_path  # noqa: E402
+from bench_lock import bench_lock_active as _bench_lock_active  # noqa: E402
 
 
 def _postgres_dsn() -> str | None:

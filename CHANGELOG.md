@@ -299,6 +299,18 @@ consumers were getting the wrong picture.
 
 ## [Unreleased]
 
+### Refactored — 2026-05-28 — *extract bench-lock helpers to `bench_lock.py` (first slice of #101)*
+
+First small slice of #101's "split 3800-line main.py by concern" plan. The bench-lock helpers (`_bench_lock_path`, `_bench_lock_active`) added in #106 are now in `bench_lock.py` (top-level module, top-level imports work) — single-purpose, self-contained, 85 lines. `main.py` re-exports the names so existing tests that mock `main._bench_lock_*` keep working unchanged.
+
+- `bench_lock.py` — extracted module with `bench_lock_path()` + `bench_lock_active()`. Adds an optional `_config_provider` injection point so tests can substitute the mempalace config lookup without monkey-patching the lazy import.
+- `main.py` — replaces the inline definitions with a 2-line re-export (`from bench_lock import bench_lock_path as _bench_lock_path`).
+- `tests/test_bench_lock.py` — 1 test updated to use the new `_config_provider` injection (cleaner than the old `del mock_mp._config` pattern); 8 tests pass unchanged through the re-export.
+
+No behavioural change. 9 bench-lock tests still pass; full pytest run 495 passed / 1 skipped (no regressions).
+
+The pattern (extract → re-export) lets future #101 slices peel off single-concern modules without forcing churn across the test suite. Next slice candidates: `_postgres_dsn` + `_connect_postgres` → `postgres.py`, the daemon-native MCP tools → `daemon_tools.py`.
+
 ### Added — 2026-05-28 — *`scripts/deploy.sh` detects mempalace-db config drift (#122)*
 
 After #117 merged postgres tuning + a 6 GiB cgroup ceiling, the running container kept its old 3 GiB limit + 4 GB `shared_buffers` until manually applied. The deploy script reported "✓ deploy complete" all the while, masking the persistent OOM risk.
