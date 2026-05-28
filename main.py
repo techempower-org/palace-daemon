@@ -2406,7 +2406,7 @@ async def embed_text(request: Request, x_api_key: str | None = Header(default=No
 
 
 # Direct-SQL KG / wings readers (#49 / 1.8.2 split) — extracted to kg_reader.py
-# per #101 refactor (fifth slice). main.py re-exports the _-prefixed names so
+# per #101 refactor (seventh slice). main.py re-exports the _-prefixed names so
 # existing call sites + tests that patch `main._read_kg_*` / `main._kg_path` /
 # `main._chroma_path` keep working. Tests that patch the intra-module
 # dispatchers (`_read_wings_rooms_direct` → `_read_wings_rooms_postgres`,

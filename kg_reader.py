@@ -1,5 +1,5 @@
 """Direct-SQL readers for wings/rooms and the AGE knowledge graph — extracted
-from main.py per #101 refactor (fifth slice).
+from main.py per #101 refactor (seventh slice).
 
 Owns the read-only helpers the ``/graph`` route uses to bypass the MCP
 fan-out (which serialises through the read semaphore and stalls under
