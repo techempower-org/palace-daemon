@@ -3610,7 +3610,24 @@ def main():
     if args.api_key:
         os.environ["PALACE_API_KEY"] = args.api_key
 
-    uvicorn.run("main:app", host=args.host, port=args.port, log_level="info")
+    # timeout_graceful_shutdown bounds uvicorn's pre-lifespan wait for
+    # in-flight connections + background asyncio tasks (watchdog, /backfill-age,
+    # etc.). Without this it defaults to None (wait indefinitely), which on
+    # 2026-05-28 produced a 20s wait between SIGTERM and the lifespan
+    # shutdown handler firing — eating most of systemd's TimeoutStopSec=30s
+    # budget even though the lifespan shutdown itself completes in <5s.
+    #
+    # 15s is the per-step budget; together with the ~5s lifespan teardown
+    # this keeps total shutdown safely under TimeoutStopSec. Configurable
+    # via PALACE_UVICORN_SHUTDOWN_TIMEOUT_S.
+    uvicorn_shutdown_s = int(os.environ.get("PALACE_UVICORN_SHUTDOWN_TIMEOUT_S", "15"))
+    uvicorn.run(
+        "main:app",
+        host=args.host,
+        port=args.port,
+        log_level="info",
+        timeout_graceful_shutdown=uvicorn_shutdown_s,
+    )
 
 
 if __name__ == "__main__":
