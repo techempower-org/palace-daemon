@@ -288,5 +288,77 @@ class TestConnectPostgresRecordsErrors(_BaseObs):
         self.assertIn("connection refused", preview)
 
 
+class TestGeminiFixes(_BaseObs):
+    """The 4 Gemini findings on #98 — defensive Nones, tz-aware ts, env threading."""
+
+    def _fake_run(self, json_payload):
+        proc = MagicMock()
+        proc.stdout = json_payload + "\n"
+        proc.returncode = 0
+        return proc
+
+    def test_null_memperc_does_not_crash(self):
+        """`docker stats` can return null fields during container transitions."""
+        out = json.dumps({"MemUsage": "1GiB / 2GiB", "MemPerc": None})
+        with patch("subprocess.run", return_value=self._fake_run(out)):
+            status = main._postgres_memcg_status()
+        self.assertIsNotNone(status)
+        self.assertEqual(status["percent"], 0.0)
+
+    def test_null_memusage_does_not_crash(self):
+        out = json.dumps({"MemUsage": None, "MemPerc": "50%"})
+        with patch("subprocess.run", return_value=self._fake_run(out)):
+            status = main._postgres_memcg_status()
+        self.assertIsNotNone(status)
+        self.assertEqual(status["usage"], "")
+        self.assertEqual(status["limit"], "")
+
+    def test_both_null_does_not_crash(self):
+        out = json.dumps({"MemUsage": None, "MemPerc": None})
+        with patch("subprocess.run", return_value=self._fake_run(out)):
+            status = main._postgres_memcg_status()
+        self.assertIsNotNone(status)
+        self.assertEqual(status["percent"], 0.0)
+
+    def test_newest_ts_is_tz_aware_utc(self):
+        """The ISO timestamp should carry an explicit UTC offset."""
+        main._record_db_error(Exception("the connection is closed"))
+        s = main._db_errors_summary()
+        self.assertIsNotNone(s["newest_ts"])
+        self.assertTrue(
+            s["newest_ts"].endswith("+00:00") or s["newest_ts"].endswith("Z"),
+            f"newest_ts={s['newest_ts']!r} should be tz-aware UTC",
+        )
+
+    def test_canary_threads_env_container_to_probe(self):
+        """`env={"PALACE_POSTGRES_CONTAINER": x}` reaches `_postgres_memcg_status`."""
+        logger = MagicMock()
+        captured = {}
+
+        def fake_status(container=None, timeout_s=2.0):
+            captured["container"] = container
+            return {
+                "container": container or "(default)",
+                "usage": "1GiB", "limit": "2GiB",
+                "percent": 0.50, "probed_at": int(time.time()),
+            }
+
+        with patch.object(main, "_postgres_memcg_status", side_effect=fake_status):
+            main._log_postgres_memcg_canary(
+                logger, env={"PALACE_POSTGRES_CONTAINER": "custom-pg"}
+            )
+        self.assertEqual(captured["container"], "custom-pg")
+
+    def test_lock_guards_db_error_log(self):
+        """`_DB_ERROR_LOG_LOCK` exists and record + summary both use it cleanly."""
+        self.assertIsNotNone(main._DB_ERROR_LOG_LOCK)
+        main._record_db_error(Exception("first"))
+        s = main._db_errors_summary()
+        self.assertEqual(s["total_last_window"], 1)
+        main._record_db_error(Exception("second"))
+        s = main._db_errors_summary()
+        self.assertEqual(s["total_last_window"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2176,11 +2176,18 @@ def _connect_postgres(connect_timeout: int = 3):
 # sees it in /health, in journal, and in the startup canary line.
 
 import collections as _collections
+import threading as _threading
 
 # Bounded ring buffer of recent (timestamp, pattern, preview) tuples. 1000
 # entries × ~100 bytes = ~100 KB ceiling; the 5-minute window we summarize
 # over is usually <100 entries even during a postgres flap.
 _DB_ERROR_LOG: "_collections.deque[tuple[float, str, str]]" = _collections.deque(maxlen=1000)
+# Lock guarding both append and iteration. deque.append is thread-safe in
+# CPython, but iterating (e.g. ``list(deque)``) under concurrent mutation
+# can produce duplicated or skipped entries; the lock gives us a clean
+# snapshot for /health responses. Cost is negligible — observability code
+# runs at most a few hundred times per /health probe.
+_DB_ERROR_LOG_LOCK = _threading.Lock()
 
 
 def _classify_db_error(exc: BaseException) -> str:
@@ -2220,33 +2227,36 @@ def _classify_db_error(exc: BaseException) -> str:
 def _record_db_error(exc: BaseException) -> None:
     """Append a classified DB error to the ring buffer with a preview.
 
-    The append is the only mutation; deque.append is atomic in CPython so
-    callers across executor threads can record without a lock. Preview is
-    truncated to 200 chars so a runaway error message can't bloat the
-    ring buffer beyond its rough memory ceiling.
+    Lock-guarded against concurrent ``_db_errors_summary`` iteration so
+    snapshots stay consistent under load. Preview is truncated to 200
+    chars so a runaway error message can't bloat the ring buffer beyond
+    its rough memory ceiling.
     """
     import time as _time
     pattern = _classify_db_error(exc)
     preview = str(exc)[:200]
-    _DB_ERROR_LOG.append((_time.time(), pattern, preview))
+    with _DB_ERROR_LOG_LOCK:
+        _DB_ERROR_LOG.append((_time.time(), pattern, preview))
 
 
 def _db_errors_summary(window_s: float = 300.0) -> dict:
     """Aggregate the ring buffer over the last ``window_s`` seconds.
 
     Returns counts overall and per-pattern, plus the timestamp of the
-    newest error. Read-only; safe to call from any thread. A small race
-    against a concurrent append yields stale-by-one numbers, which is
-    fine for observability.
+    newest error. Lock-guarded snapshot so concurrent ``_record_db_error``
+    appends from executor threads can't yield skipped/duplicated entries.
     """
     import time as _time
     cutoff = _time.time() - window_s
     by_pattern: dict[str, int] = {}
     total = 0
     newest_ts = 0.0
-    # Snapshot via list() — deque doesn't support negative indexing under
-    # mutation, but a single-pass list copy is atomic enough for our use.
-    for ts, pattern, _preview in list(_DB_ERROR_LOG):
+    # Acquire the lock just long enough to snapshot — iteration over the
+    # snapshot then happens lock-free, so /health probing won't block
+    # concurrent error recording.
+    with _DB_ERROR_LOG_LOCK:
+        snapshot = list(_DB_ERROR_LOG)
+    for ts, pattern, _preview in snapshot:
         if ts < cutoff:
             continue
         total += 1
@@ -2258,8 +2268,12 @@ def _db_errors_summary(window_s: float = 300.0) -> dict:
         "total_last_window": total,
         "window_seconds": int(window_s),
         "by_pattern": by_pattern,
+        # tz-aware UTC iso — naive local-time strings confuse consumers
+        # running in other timezones (especially monitoring tools that
+        # diff against UTC `now`).
         "newest_ts": (
-            _dt.datetime.fromtimestamp(newest_ts).isoformat(timespec="seconds")
+            _dt.datetime.fromtimestamp(newest_ts, tz=_dt.timezone.utc)
+                .isoformat(timespec="seconds")
             if newest_ts > 0 else None
         ),
     }
@@ -2297,10 +2311,15 @@ def _postgres_memcg_status(
         data = json.loads(proc.stdout.strip())
         # MemUsage shape: "2.43GiB / 3GiB" — keep as-is for display;
         # MemPerc shape: "81.00%" — strip the % and parse to float.
-        usage = data.get("MemUsage", "")
-        perc_str = data.get("MemPerc", "0%").rstrip("%")
+        # Coerce-via-`or` defends against `null` values in the JSON
+        # (transient docker daemon state during container startup /
+        # shutdown can produce `{"MemPerc": null, "MemUsage": null}`),
+        # which `.rstrip` / `.partition` would otherwise blow up on.
+        usage = data.get("MemUsage") or ""
+        perc_raw = data.get("MemPerc") or "0%"
+        perc_str = perc_raw.rstrip("%") if isinstance(perc_raw, str) else "0"
         percent = float(perc_str) / 100.0 if perc_str else 0.0
-        usage_str, _, limit_str = usage.partition(" / ")
+        usage_str, _, limit_str = usage.partition(" / ") if isinstance(usage, str) else ("", "", "")
         return {
             "container": container,
             "usage": usage_str.strip(),
@@ -2308,7 +2327,7 @@ def _postgres_memcg_status(
             "percent": round(percent, 4),
             "probed_at": int(_time.time()),
         }
-    except (json.JSONDecodeError, ValueError, KeyError):
+    except (json.JSONDecodeError, ValueError, KeyError, AttributeError, TypeError):
         return None
 
 
@@ -2330,7 +2349,11 @@ def _log_postgres_memcg_canary(logger, env=None) -> None:
         warn_pct = float(env.get("PALACE_POSTGRES_MEMCG_WARN_PERCENT") or "75")
     except (TypeError, ValueError):
         warn_pct = 75.0
-    status = _postgres_memcg_status()
+    # Thread the env's container override through to the probe — a caller
+    # passing env={"PALACE_POSTGRES_CONTAINER": "x"} expects "x" to be
+    # probed, not whatever os.environ holds.
+    container = env.get("PALACE_POSTGRES_CONTAINER")
+    status = _postgres_memcg_status(container=container)
     if status is None:
         logger.info("postgres memcg canary: probe failed (docker unreachable or container down) — skipping")
         return
