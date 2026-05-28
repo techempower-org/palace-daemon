@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.9.0 — 2026-05-28
+
+### Added — *daemon-native MCP tools for rooms / wake-up / mined (closes #93)*
+
+Six new MCP tools land on the daemon, dispatched through `/mcp` before
+the upstream proxy:
+
+| Tool | Args | Returns |
+|---|---|---|
+| `mempalace_wakeup` | `{wing?: str}` | `{text: str, tokens: int}` |
+| `mempalace_mined` | `{wing?: str, limit?: int}` | `{sources_by_wing, wing_filter, limit, total_wings, total_sources}` |
+| `mempalace_rooms_list` | `{}` | `[{name, description, added_at}]` |
+| `mempalace_rooms_add` | `{name: str, description?: str}` | `{action: "added"\|"updated", name}` |
+| `mempalace_rooms_rename` | `{old: str, new: str}` | `{old, new, affected_drawers}` |
+| `mempalace_rooms_remove` | `{name: str}` | `{name, removed: bool}` |
+
+These have **no upstream equivalent** — each handler reads (or writes)
+the daemon's authoritative postgres directly. They exist so the
+mempalace CLI's `rooms`, `wake-up`, and `mined` commands can route
+through the daemon in daemon-strict mode (legacy local-palace path
+retired on 2026-05-14).
+
+* `mempalace_wakeup` mirrors `MemoryStack.wake_up()` shape but reads
+  `mempalace_drawers` directly — L0 (identity.txt) + L1 (top-importance
+  drawers grouped by room, capped at 15 drawers / 3200 chars). Falls
+  back to a recent-rows scan when the importance≥3 pool is empty.
+* `mempalace_mined` mirrors `cmd_mined --json` byte-for-byte: a single
+  `GROUP BY wing, source_file` aggregation against the postgres
+  `metadata` JSONB column.
+* `mempalace_rooms_*` are the canonical-rooms CRUD that `cmd_rooms`
+  currently runs against postgres directly. Hosting them on the daemon
+  closes the split-brain risk: the CLI no longer needs the postgres
+  DSN. Each mutator (`add`, `rename`, `remove`) invalidates the
+  daemon's `_canonical_rooms_cache` inline, so `/memory` writes pick
+  up the new set without a second `/admin/refresh-rooms` round-trip.
+
+Error semantics: predictable failures (`bad name`, `room still in use`,
+`postgres backend not configured`) surface as JSON-RPC error envelopes
+— `-32602` for invalid params, `-32004` for backend-down. Unexpected
+exceptions become `-32000` with the exception message. No silent
+fallbacks; the daemon is the authoritative path now.
+
+Companion mempalace issue: techempower-org/mempalace#285 (CLI consumer).
+
 ## 1.8.4 — 2026-05-27
 
 ### Fixed — *watchdog no longer starves the systemd keepalive during a rebuild*
