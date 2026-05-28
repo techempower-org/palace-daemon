@@ -973,6 +973,34 @@ async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
             return {"jsonrpc": "2.0", "id": request_dict.get("id"), "error": {"code": -32000, "message": str(e)}}
 
 
+_TRUTHY_FLAG = frozenset({"1", "true", "yes", "on"})
+
+
+def _log_kg_writethrough_stages(env, logger) -> None:
+    """Log each KG write-through stage's on/off state by env flag (issue #76).
+
+    mempalace logs one generic "KG write-through attached" line on collection
+    init, but the composer reads two independent env flags that compose two
+    different stages: MEMPALACE_KG_WRITETHROUGH (cheap entity-MENTIONS path,
+    runs on every drawer write) and MEMPALACE_KG_EXTRACTION_QUEUE (enqueue
+    each drawer for async LLM triple extraction). One stage being silently
+    OFF is invisible in the generic log — and on 2026-05-27 that silent-OFF
+    meant ~12,300 drawers were never enqueued for triple extraction.
+
+    Log each stage by its env flag so operators can confirm in journalctl
+    which stages actually attached on this boot.
+    """
+    def _on(name: str) -> str:
+        return "on" if env.get(name, "").strip().lower() in _TRUTHY_FLAG else "OFF"
+
+    logger.info(
+        "KG write-through stages: MENTIONS=%s (MEMPALACE_KG_WRITETHROUGH); "
+        "EXTRACTION_QUEUE=%s (MEMPALACE_KG_EXTRACTION_QUEUE)",
+        _on("MEMPALACE_KG_WRITETHROUGH"),
+        _on("MEMPALACE_KG_EXTRACTION_QUEUE"),
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import logging
@@ -1069,6 +1097,7 @@ async def lifespan(app: FastAPI):
         logger.info("Palace client warmed up.")
     except Exception as e:
         logger.warning("Warmup collection open failed (non-fatal): %s", e)
+    _log_kg_writethrough_stages(os.environ, logger)
     await _warn_if_hnsw_threads_unset()
 
     # Signal systemd that startup is complete (Type=notify in service file).
