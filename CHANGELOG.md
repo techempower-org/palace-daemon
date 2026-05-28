@@ -299,6 +299,17 @@ consumers were getting the wrong picture.
 
 ## [Unreleased]
 
+### Refactored — 2026-05-28 — *extract DB-error ring buffer to `db_errors.py` (third slice of #101)*
+
+Third slice of the main.py refactor. The DB-error observability ring buffer (#97/#99/#108/#110) — bounded deque, lock, classifier, recorder, summarizer — is now in `db_errors.py`. ~125 lines extracted; tests pass *unchanged* (71 affected tests all green on first try) because:
+
+- The deque + lock are module-level objects shared by reference; tests that mutate `main._DB_ERROR_LOG.clear()` or `main._DB_ERROR_LOG.append(...)` reach the same underlying object via the re-export.
+- The intra-module call from `record_db_error` to `classify_db_error` now lives inside `db_errors.py`'s namespace, but no test patches `_classify_db_error`, so the re-export is sufficient.
+
+Cleanest slice in the refactor sequence — no test churn at all.
+
+Cumulative #101 progress: ~375 lines extracted from main.py across three slices (bench_lock.py, canaries.py, db_errors.py). Remaining slice candidates: postgres helpers (`_postgres_dsn` / `_require_postgres` / `_connect_postgres`) — kept in main.py for now because they're heavily test-mocked via `patch.object(main, "_postgres_dsn", …)` and moving them requires updating ~10+ test patches.
+
 ### Refactored — 2026-05-28 — *extract startup canaries to `canaries.py` (second slice of #101)*
 
 Second slice of the main.py → multi-module refactor (#101). The mempalace freshness canary (#92/#116) and postgres-memcg pressure canary (#97) are now in `canaries.py` — 4 functions, ~165 lines, single concern (passive startup observability via journalctl).
