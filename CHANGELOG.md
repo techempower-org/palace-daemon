@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Fixed — *#136 problem (B): track + terminate auto-mine subprocesses on lifespan shutdown*
+
+The lifespan handler now tracks each spawned `mempalace mine` subprocess
+in `app.state.active_mines` (a set of `asyncio.subprocess.Process`
+handles), and on shutdown sends each one SIGTERM, waits briefly, then
+SIGKILLs any stragglers — *before* the FastAPI/uvicorn teardown returns.
+
+Without this, in-flight mines were left for systemd to clean up via
+the cgroup boundary at `TimeoutStopSec`, producing journal noise like
+`Killing process N (mempalace) with signal SIGKILL` on every deploy
+that happened to land while a mine was running.
+
+The total cleanup budget is configurable via
+`PALACE_MINE_SHUTDOWN_TIMEOUT_S` (default 3s). Companion to the flush
+timeout in #137 — together they close both halves of #136.
+
 ### Fixed — *#136: bound shutdown flush so the daemon doesn't blow past systemd's TimeoutStopSec*
 
 The lifespan shutdown handler called `mempalace_memories_filed_away` via
