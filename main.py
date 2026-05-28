@@ -2230,6 +2230,41 @@ async def cypher_query(request: Request, x_api_key: str | None = Header(default=
             except psycopg2.errors.ReadOnlySqlTransaction as e:
                 kg._conn.rollback()
                 return None, ("read-only", str(e))
+            except psycopg2.errors.OutOfMemory as e:
+                # Postgres shared memory exhausted — typically from an
+                # unbounded MATCH that materializes too much agtype before
+                # LIMIT applies (see #160 for the structural fix path).
+                # Roll back so the connection stays healthy if the caller
+                # retries with a tighter query.
+                try:
+                    kg._conn.rollback()
+                except Exception:
+                    pass
+                return None, ("shared-memory-exhausted", str(e))
+            except psycopg2.errors.QueryCanceled as e:
+                # statement_timeout hit — Cypher took longer than allowed.
+                try:
+                    kg._conn.rollback()
+                except Exception:
+                    pass
+                return None, ("timeout", str(e))
+            except (psycopg2.errors.SyntaxError, psycopg2.errors.UndefinedColumn,
+                    psycopg2.errors.UndefinedTable, psycopg2.errors.UndefinedFunction) as e:
+                # Caller-supplied Cypher has a syntax / schema mismatch.
+                # 400 is more honest than 500 for these.
+                try:
+                    kg._conn.rollback()
+                except Exception:
+                    pass
+                return None, ("bad-query", str(e))
+            except psycopg2.Error as e:
+                # Any other postgres-side failure (connection dropped,
+                # transaction aborted from an earlier error, etc.).
+                try:
+                    kg._conn.rollback()
+                except Exception:
+                    pass
+                return None, ("postgres-error", str(e))
             aliases = kg._extract_return_aliases(cypher)
             unwrap = kg._unwrap_agtype
             shaped = []
@@ -2245,15 +2280,46 @@ async def cypher_query(request: Request, x_api_key: str | None = Header(default=
     loop = asyncio.get_running_loop()
     rows, err = await loop.run_in_executor(None, _run)
     if err is not None:
-        if isinstance(err, tuple) and err and err[0] == "read-only":
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    "/cypher is read-only; write verbs (CREATE/MERGE/SET/DELETE/"
-                    "DETACH DELETE/REMOVE) are rejected. Use mempalace_kg_* MCP "
-                    f"tools for graph mutations. PostgreSQL: {err[1]}"
-                ),
-            )
+        if isinstance(err, tuple) and err:
+            kind, msg = err[0], err[1]
+            if kind == "read-only":
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "/cypher is read-only; write verbs (CREATE/MERGE/SET/DELETE/"
+                        "DETACH DELETE/REMOVE) are rejected. Use mempalace_kg_* MCP "
+                        f"tools for graph mutations. PostgreSQL: {msg}"
+                    ),
+                )
+            if kind == "bad-query":
+                # Caller's Cypher is malformed — 400 with the postgres
+                # error so they can fix the query.
+                raise HTTPException(
+                    status_code=400,
+                    detail={"error": "bad-query", "postgres": msg},
+                )
+            if kind == "timeout":
+                # 504 (gateway timeout) is the standard HTTP code for
+                # operations that exceeded a backend deadline.
+                raise HTTPException(
+                    status_code=504,
+                    detail={"error": "timeout", "postgres": msg,
+                            "hint": "Tighten the query (add LIMIT, narrow the MATCH) and retry."},
+                )
+            if kind == "shared-memory-exhausted":
+                # 507 (insufficient storage) is the closest standard HTTP
+                # code for a postgres-side resource limit.
+                raise HTTPException(
+                    status_code=507,
+                    detail={"error": "shared-memory-exhausted", "postgres": msg,
+                            "hint": "Bound the MATCH with a CTE LIMIT before joining "
+                                    "to Entity/Drawer for property lookup. See #160."},
+                )
+            if kind == "postgres-error":
+                raise HTTPException(
+                    status_code=502,
+                    detail={"error": "postgres-error", "postgres": msg},
+                )
         raise HTTPException(status_code=500, detail=err)
     return {"graph": graph, "rows": rows, "count": len(rows)}
 

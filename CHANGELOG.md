@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Fixed — */cypher maps postgres errors to structured HTTP responses*
+
+Pre-fix the /cypher endpoint only translated `ReadOnlySqlTransaction`
+into a structured error; every other postgres-side failure (DiskFull
+from shared memory, statement_timeout, Cypher syntax error, schema
+mismatch) escaped as a generic HTTP 500 "Internal Server Error" with
+no useful body.
+
+Surfaced today by the 1.86M-row Cypher walks in `read_kg_postgres`
+hitting `psycopg2.errors.DiskFull` and producing opaque ASGI
+exceptions in journalctl.
+
+Fix: catch the broader `psycopg2.Error` and map to specific HTTP codes
+with structured bodies the caller can branch on:
+
+| Postgres exception | HTTP | error tag | hint |
+|---|---:|---|---|
+| `OutOfMemory` (shared memory) | 507 | `shared-memory-exhausted` | CTE-bound the MATCH before joining |
+| `QueryCanceled` (statement_timeout) | 504 | `timeout` | Tighten the query, retry |
+| `SyntaxError` / `UndefinedColumn` / `UndefinedTable` / `UndefinedFunction` | 400 | `bad-query` | Postgres error message in body |
+| `ReadOnlySqlTransaction` | 403 | `read-only` | (unchanged) |
+| Other `psycopg2.Error` | 502 | `postgres-error` | Stringified cause |
+
+All paths roll back the transaction so a retry on the same connection
+stays healthy. New tests pin all five mappings.
+
 ### Fixed — *#160: replace AGE Cypher walks in `/graph` with CTE-bounded direct SQL*
 
 `/graph`'s `kg_triples` and `kg_mentions` arrays have been silently
