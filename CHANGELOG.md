@@ -245,7 +245,16 @@ consumers were getting the wrong picture.
 
 ## [Unreleased]
 
-<<<<<<< HEAD
+### Fixed — 2026-05-28 — *`scripts/deploy.sh` verifies deployed VERSION matches local main.py (#119)*
+
+Today's 1.9.0 deploy reported "✓ deploy complete" with the daemon still on `VERSION = 1.8.4`. Cause: Syncthing on familiar was idle, so the restart happened on stale code; the script's `/health` check only verified availability, not which code answered.
+
+`deploy.sh` now extracts `VERSION` from `main.py` (the same file the daemon imports) and compares to the daemon's reported `/health.version` after restart. Mismatch → loud warning with a pointer to `scripts/rsync-palace-daemon.sh` (#114). The script doesn't fail on mismatch (some legitimate cases want a slow deploy through multiple daemon restarts), but the warning is impossible to miss in the terminal output.
+
+Also tightened the `/health` poll so it parses the body even on 503 — useful during crash_loop windows where the daemon's response is still JSON, just with a non-2xx status.
+
+Closes [#119](https://github.com/techempower-org/palace-daemon/issues/119).
+
 ### Fixed — 2026-05-28 — *mempalace canary walks the package tree instead of reading __init__.py (#116)*
 
 The 1.9.0 deploy verification surfaced a false-positive WARN from `_log_mempalace_canary`:
@@ -266,10 +275,6 @@ mempalace canary: newest .py = searcher.py (mtime 2026-05-28T09:16:10, age 2.1h,
 14 tests in `tests/test_mempalace_canary.py` (was 10, +4 for the tree-walk helper covering missing __file__, empty walk, multi-file mtime selection, and subdirectory recursion).
 
 Closes [#116](https://github.com/techempower-org/palace-daemon/issues/116).
-=======
-### Fixed — 2026-05-28 — *`scripts/deploy.sh` verifies deployed VERSION matches local main.py (#119)*
-
-Today's 1.9.0 deploy reported "✓ deploy complete" with the daemon still on `VERSION = 1.8.4`. Cause: Syncthing on familiar was idle, so the restart happened on stale code; the script's `/health` check only verified availability, not which code answered.
 
 `deploy.sh` now extracts `VERSION` from `main.py` (the same file the daemon imports) and compares to the daemon's reported `/health.version` after restart. Mismatch → loud warning with a pointer to `scripts/rsync-palace-daemon.sh` (#114). The script doesn't fail on mismatch (some legitimate cases want a slow deploy through multiple daemon restarts), but the warning is impossible to miss in the terminal output.
 
