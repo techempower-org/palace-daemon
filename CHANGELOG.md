@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Refactored — *#101 sixth slice: extract /mcp fast-intercept payloads to `fast_intercept.py`*
+
+Moved the two /mcp fast-intercept payload wrappers (`_fast_mcp_status_payload`
+and `_fast_mcp_kg_stats_payload`, ~55 lines) into a new `fast_intercept.py`.
+main.py re-exports both under their original names so the /mcp dispatcher
+and the 12 tests in `test_mcp_fast_intercept.py` keep working unchanged.
+
+Both wrappers internally call helpers that still live in main.py
+(`_fast_status_payload` for SQL counts, `_read_kg_postgres_stats` for AGE
+backing-table counts). The unit tests patch those helpers via
+`patch.object(main, ...)` — to keep the tests untouched, the new module
+uses the function-local `import main` trick (same pattern as
+`daemon_tools.invalidate_rooms_cache` in #131): the helper is resolved
+at call time through main's namespace, so the patches still intercept.
+
+main.py is now 3955 lines, down from 3995. Cumulative #101 extraction
+across 2026-05-28: ~810 lines moved out via bench_lock.py (#126),
+canaries.py (#127), db_errors.py (#128), postgres.py (#129),
+daemon_tools.py (#131), fast_intercept.py (this PR).
+
 ### Refactored — *#101 fifth slice: extract daemon-native MCP tools to `daemon_tools.py`*
 
 Moved ~270 lines (`_normalize_room_name`, `_invalidate_rooms_cache`, the
