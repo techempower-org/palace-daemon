@@ -46,9 +46,24 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 
 # ---------------------------------------------------------------- config file
 # Source the first config file found. It can set any PALACE_* var below.
+# Special case: if PALACE_DEPLOY_CONF is set explicitly and the file is
+# missing/unreadable, fail loudly rather than silently falling back to the
+# default search path — the user expressed an intent that we shouldn't
+# discard. The implicit candidates fall through silently as before.
+# Matches the pattern in scripts/rsync-mempalace.sh (issue #100).
 _load_conf() {
+    if [ -n "${PALACE_DEPLOY_CONF:-}" ]; then
+        if [ ! -r "$PALACE_DEPLOY_CONF" ]; then
+            printf 'deploy.sh: PALACE_DEPLOY_CONF=%s is set but not readable\n' \
+                "$PALACE_DEPLOY_CONF" >&2
+            exit 1
+        fi
+        # shellcheck disable=SC1090
+        . "$PALACE_DEPLOY_CONF"
+        CONF_LOADED="$PALACE_DEPLOY_CONF"
+        return 0
+    fi
     local candidates=(
-        "${PALACE_DEPLOY_CONF:-}"
         "$SCRIPT_DIR/deploy.conf"
         "${XDG_CONFIG_HOME:-$HOME/.config}/palace-daemon/deploy.conf"
         "$HOME/.config/palace-daemon/deploy.conf"
