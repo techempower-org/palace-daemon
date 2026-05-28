@@ -991,9 +991,13 @@ def _log_kg_writethrough_stages(env, logger) -> None:
     which stages actually attached on this boot.
     """
     def _on(name: str) -> str:
-        # Use `or ""` rather than the dict default so an explicit `None` value
-        # (legal in arbitrary dicts, not in os.environ) doesn't crash .strip().
-        return "on" if (env.get(name) or "").strip().lower() in _TRUTHY_FLAG else "OFF"
+        # Defensive over arbitrary dict callers: `os.environ` only ever stores
+        # strings, but a hand-crafted mapping (tests, YAML/JSON config) might
+        # carry None, bools, or ints. Coerce to string before .strip() so the
+        # helper never raises AttributeError on the input type.
+        #   None  → '' (OFF), False → '' (OFF), True → 'True' (ON),
+        #   0     → '' (OFF), 1     → '1' (ON), '1'/'true'/'yes'/'on' → ON.
+        return "on" if str(env.get(name) or "").strip().lower() in _TRUTHY_FLAG else "OFF"
 
     logger.info(
         "KG write-through stages: MENTIONS=%s (MEMPALACE_KG_WRITETHROUGH); "

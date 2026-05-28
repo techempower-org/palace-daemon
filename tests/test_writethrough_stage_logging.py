@@ -93,6 +93,30 @@ class TestWritethroughStageLogging(unittest.TestCase):
         self.assertIn("MENTIONS=OFF", msg)
         self.assertIn("EXTRACTION_QUEUE=OFF", msg)
 
+    def test_handles_non_string_values_safely(self):
+        """Regression: arbitrary dict callers (e.g. parsed YAML/JSON config)
+        can pass bools or ints. Coerce to str before .strip() so the helper
+        never raises AttributeError on the input type.
+
+        Note that "truthy" here means the str() of the value is in
+        _TRUTHY_FLAG ('1'/'true'/'yes'/'on'). True→'True'→'true' (on).
+        1→'1' (on). 42→'42' (NOT in the set; off — intentional, we don't
+        want random ints to silently turn flags on).
+        """
+        # Values whose str() lands in _TRUTHY_FLAG → ON.
+        for val in (True, 1):
+            with self.subTest(on=val):
+                msg = self._capture({"MEMPALACE_KG_WRITETHROUGH": val})
+                self.assertIn("MENTIONS=on", msg, f"value {val!r} should be on")
+        # Falsy non-strings short-circuit through `or ""` to "" → OFF.
+        # Other non-string truthy values (42, 0.5, []) don't match the
+        # explicit truthy strings, so they're correctly OFF — no silent on.
+        for val in (False, 0, 42, "garbage"):
+            with self.subTest(off=val):
+                msg = self._capture({"MEMPALACE_KG_WRITETHROUGH": val})
+                self.assertIn("MENTIONS=OFF", msg, f"value {val!r} should be off")
+        # And the helper does not raise for any of the above.
+
     def test_log_level_is_info(self):
         logger = MagicMock()
         main._log_kg_writethrough_stages({}, logger)
