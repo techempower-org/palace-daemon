@@ -2217,10 +2217,16 @@ async def cypher_query(request: Request, x_api_key: str | None = Header(default=
         dsn = _mp._config.postgres_dsn
         if not dsn:
             return None, "MEMPALACE_POSTGRES_DSN not configured"
+        # KnowledgeGraphAGE uses psycopg v3 internally, so connect-time
+        # failures surface as psycopg.Error not psycopg2.Error. Catch both
+        # so the constructor failure doesn't escape as a generic 500.
+        _construct_excs = (psycopg2.Error,)
+        if psycopg is not None:
+            _construct_excs = _construct_excs + (psycopg.Error,)
         try:
             kg = KnowledgeGraphAGE(dsn=dsn)
-        except psycopg2.Error as e:
-            return None, f"postgres connect failed: {e}"
+        except _construct_excs as e:
+            return None, ("postgres-error", f"postgres connect failed: {e}")
         try:
             # Enforce read-only at the transaction layer. AGE writes go
             # through ``SELECT * FROM cypher(...)`` so the daemon can't

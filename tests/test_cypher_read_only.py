@@ -340,5 +340,68 @@ class TestCypherStructuredErrorsPsycopg3(unittest.TestCase):
         self.assertIn("read-only", err.detail.lower())
 
 
+class TestCypherConstructorErrors(unittest.TestCase):
+    """KnowledgeGraphAGE() construction can fail with either psycopg2
+    or psycopg (v3) errors depending on the driver mempalace uses.
+    Pre-fix the constructor catch was psycopg2-only — v3 connect
+    failures would escape as a generic 500 even though we map every
+    other v3 error to structured HTTP codes.
+    """
+
+    def _run_with_constructor_error(self, exc):
+        """Invoke /cypher where KnowledgeGraphAGE(...) itself raises."""
+
+        class _FailingConstructorKG:
+            def __init__(self, dsn=None):
+                raise exc
+
+        fake_mod = types.ModuleType("mempalace.knowledge_graph_age")
+        fake_mod.KnowledgeGraphAGE = _FailingConstructorKG
+        mempalace_pkg = types.ModuleType("mempalace")
+        mempalace_pkg.knowledge_graph_age = fake_mod
+
+        fake_config = types.SimpleNamespace(
+            backend="postgres", postgres_dsn="postgresql://fake/db"
+        )
+        fake_mp = types.SimpleNamespace(_config=fake_config)
+
+        with patch.dict(
+            sys.modules,
+            {"mempalace": mempalace_pkg, "mempalace.knowledge_graph_age": fake_mod},
+            clear=False,
+        ), patch.object(main, "_mp", fake_mp), patch.dict(
+            os.environ, {}, clear=True
+        ):
+            req = _fake_request({"cypher": "MATCH (n) RETURN n"})
+            try:
+                asyncio.run(main.cypher_query(req, x_api_key=None))
+            except HTTPException as e:
+                return e
+            self.fail("expected HTTPException")
+
+    def test_psycopg2_constructor_error_mapped(self):
+        """psycopg2.OperationalError at construct → 502 postgres-error."""
+        err = self._run_with_constructor_error(
+            psycopg2.OperationalError("connection refused")
+        )
+        self.assertEqual(err.status_code, 502)
+        self.assertEqual(err.detail["error"], "postgres-error")
+        self.assertIn("connection refused", err.detail["postgres"])
+
+    def test_psycopg3_constructor_error_mapped(self):
+        """psycopg.OperationalError at construct → 502 postgres-error
+        (previously escaped as generic 500 because only psycopg2 was caught)."""
+        try:
+            import psycopg
+        except ImportError:
+            self.skipTest("psycopg v3 not installed")
+        err = self._run_with_constructor_error(
+            psycopg.OperationalError("network unreachable")
+        )
+        self.assertEqual(err.status_code, 502)
+        self.assertEqual(err.detail["error"], "postgres-error")
+        self.assertIn("network unreachable", err.detail["postgres"])
+
+
 if __name__ == "__main__":
     unittest.main()
