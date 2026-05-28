@@ -1243,8 +1243,12 @@ async def health():
     try:
         col = await loop.run_in_executor(None, _mp._get_collection)
         palace_ok = col is not None
-    except Exception:
-        pass
+    except Exception as e:
+        # /health degrades to "degraded" (503) when the collection can't
+        # open. Log the specific cause so operators don't have to guess
+        # whether it's postgres down, AGE init failure, or a mempalace bug.
+        # Lesson from #157: silent except: pass hides bugs for weeks.
+        _log.warning("/health: collection open failed → status=degraded: %s", e)
     cl = _crash_loop_state()
     # #143: crash_loop is informational, NOT a service-down signal.
     # Returning 503 for crash_loop caused monitoring tools to interpret
