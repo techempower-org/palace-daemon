@@ -2057,6 +2057,32 @@ def _require_postgres():
     return dsn
 
 
+def _connect_postgres(connect_timeout: int = 3):
+    """Connect with proper BACKEND_DOWN error mapping for daemon-native tools.
+
+    Without this helper, a connection-failed-to-establish error
+    (postgres OOM-killed, network down, wrong DSN) raises
+    psycopg2.OperationalError, which the /mcp dispatch's generic
+    except-clause maps to -32000 INTERNAL. The CLI consumer then can't
+    distinguish backend-down from an actual daemon bug.
+
+    Catching here lets us surface every flavour of "can't reach
+    postgres" as -32004 BACKEND_DOWN — same code as missing DSN, so the
+    CLI handles them uniformly (typically: surface clear error, no retry
+    storm). Gemini-flagged on #96; informed by today's morning OOM
+    cluster (palace-daemon#97).
+    """
+    dsn = _require_postgres()
+    import psycopg2
+    try:
+        return psycopg2.connect(dsn, connect_timeout=connect_timeout)
+    except psycopg2.OperationalError as e:
+        raise _DaemonToolError(
+            _RPC_BACKEND_DOWN,
+            f"postgres connection failed: {e}",
+        )
+
+
 def _normalize_room_name(raw):
     """Match the CLI's normalization: stripped, lowercased, non-empty str."""
     if not isinstance(raw, str):
@@ -2083,10 +2109,8 @@ def _fast_mcp_rooms_list(arguments: dict) -> list[dict]:
     Schema-not-deployed (UndefinedTable) returns [] rather than erroring,
     matching `cmd_rooms list`'s "(no canonical rooms registered)" UX.
     """
-    dsn = _require_postgres()
-    import psycopg2
     from psycopg2 import errors as pg_errors
-    conn = psycopg2.connect(dsn, connect_timeout=3)
+    conn = _connect_postgres()
     try:
         with conn:
             with conn.cursor() as cur:
@@ -2118,9 +2142,7 @@ def _fast_mcp_rooms_add(arguments: dict) -> dict:
         raise _DaemonToolError(
             _RPC_INVALID_PARAMS, "description must be a string or omitted"
         )
-    dsn = _require_postgres()
-    import psycopg2
-    conn = psycopg2.connect(dsn, connect_timeout=3)
+    conn = _connect_postgres()
     try:
         with conn:
             with conn.cursor() as cur:
@@ -2155,10 +2177,8 @@ def _fast_mcp_rooms_rename(arguments: dict) -> dict:
         raise _DaemonToolError(
             _RPC_INVALID_PARAMS, "old and new room names are identical"
         )
-    dsn = _require_postgres()
-    import psycopg2
     from psycopg2 import errors as pg_errors
-    conn = psycopg2.connect(dsn, connect_timeout=3)
+    conn = _connect_postgres()
     try:
         with conn:
             with conn.cursor() as cur:
@@ -2200,9 +2220,7 @@ def _fast_mcp_rooms_remove(arguments: dict) -> dict:
     first. The count makes the refusal actionable rather than blunt.
     """
     name = _normalize_room_name(arguments.get("name"))
-    dsn = _require_postgres()
-    import psycopg2
-    conn = psycopg2.connect(dsn, connect_timeout=3)
+    conn = _connect_postgres()
     try:
         with conn:
             with conn.cursor() as cur:
@@ -2253,9 +2271,7 @@ def _fast_mcp_mined(arguments: dict) -> dict:
             raise _DaemonToolError(
                 _RPC_INVALID_PARAMS, "limit must be positive"
             )
-    dsn = _require_postgres()
-    import psycopg2
-    conn = psycopg2.connect(dsn, connect_timeout=3)
+    conn = _connect_postgres()
     try:
         with conn:
             with conn.cursor() as cur:
