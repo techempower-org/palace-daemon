@@ -1133,6 +1133,11 @@ async def lifespan(app: FastAPI):
     # Configured via PALACE_WATCH_DIRS (comma-separated path[=wing]).
     # Mirrors the pattern used by the /mine endpoint above.
     app.state.watcher = None
+    # Active auto-mine subprocesses (#136 problem B). Tracked here so the
+    # lifespan shutdown can terminate them cleanly before systemd has to
+    # SIGKILL the cgroup. _internal_mine adds the proc on spawn and removes
+    # it on completion via try/finally.
+    app.state.active_mines = set()
     try:
         from watcher import WatcherService, make_async_mine_fn, parse_watch_dirs
 
@@ -1171,7 +1176,14 @@ async def lifespan(app: FastAPI):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                stdout, stderr = await proc.communicate()
+                # Track the proc so the lifespan shutdown can terminate it
+                # cleanly (#136 problem B). discard() in finally is
+                # idempotent and tolerant of the proc already being gone.
+                app.state.active_mines.add(proc)
+                try:
+                    stdout, stderr = await proc.communicate()
+                finally:
+                    app.state.active_mines.discard(proc)
             if proc.returncode != 0:
                 # Surface the actual subprocess output — the rc alone hides
                 # 'No mempalace.yaml found' / 'directory not readable' /
@@ -1206,6 +1218,43 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(wdog_task, timeout=3.0)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
+    # Terminate any active auto-mine subprocesses before stopping the watcher
+    # (#136 problem B). Without this, systemd has to SIGKILL the cgroup at
+    # TimeoutStopSec, leaving the child process to be reaped at the cgroup
+    # boundary rather than via the daemon's own teardown.
+    #
+    # Order: SIGTERM all, then wait briefly for each, then SIGKILL stragglers.
+    # The total cleanup budget is configurable via
+    # PALACE_MINE_SHUTDOWN_TIMEOUT_S (default 3) — must stay well under
+    # systemd's TimeoutStopSec (30s) given everything else in shutdown.
+    active_mines = list(getattr(app.state, "active_mines", set()) or ())
+    if active_mines:
+        mine_shutdown_s = float(os.environ.get("PALACE_MINE_SHUTDOWN_TIMEOUT_S", "3"))
+        logger.info(
+            "Lifespan: terminating %d active mine subprocess(es) (budget=%.1fs)",
+            len(active_mines), mine_shutdown_s,
+        )
+        for proc in active_mines:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+            except Exception as e:
+                logger.warning("mine terminate failed (pid=%s): %s", getattr(proc, "pid", "?"), e)
+        for proc in active_mines:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=mine_shutdown_s)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "mine pid=%s did not exit within %.1fs after SIGTERM; sending SIGKILL",
+                    getattr(proc, "pid", "?"), mine_shutdown_s,
+                )
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                except Exception as e:
+                    logger.warning("mine kill failed (pid=%s): %s", getattr(proc, "pid", "?"), e)
     try:
         watcher = getattr(app.state, "watcher", None)
         if watcher is not None:
