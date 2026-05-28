@@ -993,6 +993,7 @@ def _log_mempalace_canary(logger, env=None) -> None:
     PALACE_CANARY_WARN_HOURS.
     """
     import datetime as _dt
+    import time as _time
     env = env if env is not None else os.environ
     try:
         warn_hours = float(env.get("PALACE_CANARY_WARN_HOURS") or "24")
@@ -1011,7 +1012,8 @@ def _log_mempalace_canary(logger, env=None) -> None:
         logger.info("mempalace canary: probe failed (%s) — skipping", e)
         return
     mtime_iso = _dt.datetime.fromtimestamp(mtime).isoformat(timespec="seconds")
-    age_secs = max(0.0, _dt.datetime.now().timestamp() - mtime)
+    # Use _time.time() — direct epoch read, no tz round-trip via datetime.now()
+    age_secs = max(0.0, _time.time() - mtime)
     if age_secs < 3600:
         age_h = f"{int(age_secs / 60)}m"
     elif age_secs < 86400:
