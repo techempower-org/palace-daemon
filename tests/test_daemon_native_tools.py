@@ -113,6 +113,47 @@ class TestRequirePostgres(_BaseTool):
         self.assertEqual(cm.exception.code, main._RPC_BACKEND_DOWN)
 
 
+class TestConnectPostgres(_BaseTool):
+    """`_connect_postgres()` maps OperationalError → BACKEND_DOWN.
+
+    Gemini-flagged on #96: without this, postgres OOM / unreachable
+    surfaces to the CLI as -32000 INTERNAL, indistinguishable from a
+    real daemon bug. The helper catches OperationalError specifically
+    and re-raises as -32004 BACKEND_DOWN. Today's morning OOM cluster
+    (palace-daemon#97) is exactly this failure mode.
+    """
+
+    def test_dsn_missing_raises_backend_down(self):
+        with patch.object(main, "_postgres_dsn", return_value=None):
+            with self.assertRaises(main._DaemonToolError) as cm:
+                main._connect_postgres()
+        self.assertEqual(cm.exception.code, main._RPC_BACKEND_DOWN)
+
+    def test_connect_operational_error_maps_to_backend_down(self):
+        import psycopg2
+        with patch.object(main, "_postgres_dsn", return_value="postgres://x"), \
+             patch("psycopg2.connect",
+                   side_effect=psycopg2.OperationalError("connection refused")):
+            with self.assertRaises(main._DaemonToolError) as cm:
+                main._connect_postgres()
+        self.assertEqual(cm.exception.code, main._RPC_BACKEND_DOWN)
+        self.assertIn("connection refused", str(cm.exception))
+
+    def test_successful_connect_returns_conn(self):
+        fake_conn = MagicMock()
+        with patch.object(main, "_postgres_dsn", return_value="postgres://x"), \
+             patch("psycopg2.connect", return_value=fake_conn):
+            result = main._connect_postgres()
+        self.assertIs(result, fake_conn)
+
+    def test_passes_through_non_operational_errors(self):
+        """Non-OperationalError exceptions (programming bugs) pass through unchanged."""
+        with patch.object(main, "_postgres_dsn", return_value="postgres://x"), \
+             patch("psycopg2.connect", side_effect=TypeError("bad config")):
+            with self.assertRaises(TypeError):
+                main._connect_postgres()
+
+
 class TestRoomsList(_BaseTool):
     def test_returns_rows(self):
         rows = [("planning", "Planning room", "2026-01-01")]
