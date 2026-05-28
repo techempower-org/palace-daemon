@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Fixed — *#157: fix `/search/age-fused` AGE Cypher syntax that returned n_graph=0*
+
+While validating #150's hydration fix, found that the graph half of
+RRF fusion has been completely silent — `n_graph=0` for every query,
+even ones with obvious entity overlap (e.g. "MemPalace", "ChromaDB").
+
+Root cause: the daemon's Cypher used
+``RETURN d.id AS id, r.count AS count`` which AGE rejects with
+``syntax error at or near "AS"`` (multi-AS RETURN with a relationship
+property is unsupported in AGE 1.5). The per-entity try/except in
+``_age_lookup`` silently swallowed every SyntaxError, leaving
+``graph_hits_by_drawer`` empty.
+
+Fix: use ``RETURN d.id AS drawer_id, properties(r) AS edge_props``
+which returns the full edge property map as a single column. Python
+extracts ``count`` from that map; missing/null falls back to 1.
+
+Also: the inner try/except now ``logging.warning`` the swallowed
+error so future Cypher-syntax regressions don't hide for weeks.
+
+Validation note: AGE has 5 case variants of `mempalace` (`mempalace`,
+`MemPalace`, `Mempalace`, `MEMPALACE`, `memPalace`) but only the
+lowercased variant has any MENTIONS edges — the extractor's lowercase
+output IS the correct match. The case-mismatch hypothesis in #157's
+original filing was incorrect; the real bug was the Cypher syntax.
+
 ### Fixed — *#150: hydrate graph-only hits in `/search/age-fused` + restore vector ranking*
 
 JP filed this after a LongMemEval rerun showed `/search/age-fused`

@@ -96,9 +96,10 @@ class TestAgeFusedHydration(unittest.IsolatedAsyncioTestCase):
         cur = _FakeCursor([self._fake_drawer_row("graph-1", "the full drawer body text")])
         conn = _FakeConn(cur)
         fake_kg = MagicMock()
-        # _run_cypher returns a list of (drawer_id, count) tuples for each query entity.
+        # _run_cypher returns a list of (drawer_id, edge_props) tuples
+        # (post-#157 — was (drawer_id, count) before the AGE syntax fix).
         # Wrap them in MagicMocks that the daemon's _unwrap_agtype handles.
-        fake_kg._run_cypher.return_value = [("graph-1", 3)]
+        fake_kg._run_cypher.return_value = [("graph-1", {"count": 3})]
         fake_kg._unwrap_agtype.side_effect = lambda x: x
 
         # Pretend the extractor returns one entity per query.
@@ -135,7 +136,7 @@ class TestAgeFusedHydration(unittest.IsolatedAsyncioTestCase):
             }}
 
         fake_kg = MagicMock()
-        fake_kg._run_cypher.return_value = [("graph-1", 1)]
+        fake_kg._run_cypher.return_value = [("graph-1", {"count": 1})]
         fake_kg._unwrap_agtype.side_effect = lambda x: x
 
         class _E:
