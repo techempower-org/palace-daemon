@@ -2164,68 +2164,14 @@ async def status_fast(x_api_key: str | None = Header(default=None)):
 
 
 # ── /mcp fast-intercept payloads (issue #49) ──────────────────────────────────
-# When /mcp proxies mempalace_status or mempalace_kg_stats, the upstream
-# implementations sweep the full chroma metadata and run three Cypher scans —
-# 29s and 9s respectively at our production size, which exceeds client
-# timeouts. These helpers produce the same envelope shape from direct-SQL
-# fast paths so the response stays sub-second under load.
-
-
-def _fast_mcp_status_payload() -> dict:
-    """``tool_status`` shape via the direct-SQL fast path.
-
-    Adds ``protocol`` and ``aaak_dialect`` (imported lazily because they live
-    in the mempalace.mcp_server module the daemon proxies into) so the
-    response is byte-compatible with the slow tool. Falling back to the empty
-    strings on import failure keeps the intercept usable even if mempalace
-    ever drops those constants.
-    """
-    payload = _fast_status_payload()
-    try:
-        from mempalace.mcp_server import PALACE_PROTOCOL, AAAK_SPEC
-
-        payload["protocol"] = PALACE_PROTOCOL
-        payload["aaak_dialect"] = AAAK_SPEC
-    except Exception:
-        payload.setdefault("protocol", "")
-        payload.setdefault("aaak_dialect", "")
-    return payload
-
-
-def _fast_mcp_kg_stats_payload() -> dict:
-    """``tool_kg_stats`` shape from the AGE backing-table fast path.
-
-    The upstream tool runs three Cypher scans — ``MATCH (n:Entity)``,
-    ``MATCH ()-[r:RELATION]->()`` (with a CASE for current/expired), and
-    ``DISTINCT r.relation_type``. Each is a full graph walk through agtype
-    and exhausts shared memory under the production-scale palace, which is
-    exactly what blocks /mcp (#49).
-
-    The fast path uses ``_read_kg_postgres_stats`` which counts the AGE
-    backing label tables directly — sub-millisecond. Trade-off: it can't
-    cheaply split current vs expired (needs property access on edges) and
-    can't enumerate distinct ``r.relation_type`` values (same), so:
-
-      * ``current_facts`` defaults to ``triples`` (we have no semantic
-        triples yet; once extraction lands, set
-        ``PALACE_MCP_FAST_INTERCEPT=0`` to get the precise split).
-      * ``relationship_types`` is the AGE edge labels present
-        (``["RELATION", "MENTIONS"]``-style, filtered to non-empty), not
-        the ``r.relation_type`` predicate values the slow path returns.
-
-    Raises if AGE isn't reachable — the caller falls back to the slow path.
-    """
-    stats = _read_kg_postgres_stats()
-    if not stats:
-        raise RuntimeError("AGE knowledge graph unreachable")
-    triples = int(stats.get("triples", 0))
-    return {
-        "entities": int(stats.get("entities", 0)),
-        "triples": triples,
-        "current_facts": triples,
-        "expired_facts": 0,
-        "relationship_types": list(stats.get("relationship_types", [])),
-    }
+# The two payload wrappers live in `fast_intercept.py` now (#101 sixth slice).
+# They reach back here for `_fast_status_payload` / `_read_kg_postgres_stats`
+# via lazy `import main`, which preserves `patch.object(main, ...)` in the
+# unit tests (test_mcp_fast_intercept.py) without test edits.
+from fast_intercept import (  # noqa: E402
+    fast_mcp_kg_stats_payload as _fast_mcp_kg_stats_payload,
+    fast_mcp_status_payload as _fast_mcp_status_payload,
+)
 
 
 @app.get("/search/fast")
