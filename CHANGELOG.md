@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.9.1 — 2026-05-28
+
+Three interlocking arcs landed this afternoon, all closing internal-quality issues without changing the public HTTP/MCP surface:
+
+1. **#101 main.py decomposition continued** — 7 more slices (kg_reader from JP's #134, daemon_tools, fast_intercept, crash_loop, auth, rebuild_progress, path_map) brought main.py from 3995 at session start (post-1.9.0 release) to **3428 lines (-14%)**. Cumulative across all 11 slices: 4751 → 3428 (-28%). The pattern is now well-documented across 11 sister modules. Re-exports under `_`-prefixed names keep every call site and test working without edits. The wing/room canonical-rooms cluster is intentionally deferred — its mutable-state pattern across 18 test sites would require an invasive test rewrite for marginal gain.
+2. **#136 shutdown fixes (full chain)** — Every deploy this morning SIGKILL-escalated at systemd's TimeoutStopSec because the lifespan flush had no inner timeout, child `mempalace` subprocesses were leaked across restart, and uvicorn's pre-lifespan wait was unbounded. PR #137 wraps the flush with `asyncio.wait_for(timeout=10s)`. PRs #138/#139 track every spawned mine subprocess in `app.state.active_mines` so the lifespan handler can SIGTERM/SIGKILL them cleanly. PR #141 caps uvicorn's `timeout_graceful_shutdown=15s`. Production: 30s SIGKILL escalations → 2-5s clean shutdowns.
+3. **/health + tools/list semantic fixes** — PR #145 augments `/mcp` `tools/list` with descriptors for the 6 daemon-native tools added by #96, so MCP clients can discover them via the standard handshake (40 tools now vs 34). PR #146 stops returning HTTP 503 for `crash_loop=True` when the daemon is actually serving fine — the signal stays in the response body for observability but no longer triggers monitoring auto-restart cascades during rapid-deploy days.
+
+Test count: 495 → 504 (+9 across 2 new test files).
+
 ### Refactored — *#101 eleventh slice: extract path-map translation to `path_map.py`*
 
 Moved `_PATH_MAP_USE_ENV`, `_parse_path_map`, `_translate_client_path`
