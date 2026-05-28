@@ -1162,6 +1162,7 @@ async def lifespan(app: FastAPI):
         logger.warning("Warmup collection open failed (non-fatal): %s", e)
     _log_kg_writethrough_stages(os.environ, logger)
     _log_mempalace_canary(logger)
+    _log_postgres_memcg_canary(logger)
     await _warn_if_hnsw_threads_unset()
 
     # Signal systemd that startup is complete (Type=notify in service file).
@@ -1365,6 +1366,17 @@ async def mcp_proxy(request: Request, x_api_key: str | None = Header(default=Non
             return JSONResponse(content=envelope)
         except Exception as e:
             _log.exception("daemon-native %s failed", tool)
+            # If the underlying cause is a DB OperationalError (postgres
+            # bouncing mid-query, not at connect time — _connect_postgres
+            # already records connect-time errors), capture it for the
+            # /health observability hook so the silent-failure pattern
+            # from #97 stays visible.
+            try:
+                import psycopg2 as _ps2
+                if isinstance(e, _ps2.OperationalError):
+                    _record_db_error(e)
+            except Exception:
+                pass
             envelope = {
                 "jsonrpc": "2.0",
                 "id": body.get("id"),
@@ -1397,7 +1409,19 @@ async def health():
         status = "crash_loop"
     else:
         status = "ok"
-    payload = {"status": status, "daemon": "palace-daemon", "version": VERSION, "palace": result, **cl}
+    # #97 observability hooks: db_errors counter + postgres memcg pressure.
+    # Both are cheap (deque scan + one docker-stats fork bounded at 2s).
+    # If the memcg probe fails (docker down, container missing) we omit
+    # the field rather than degrading /health's status.
+    db_errors = _db_errors_summary(window_s=300.0)
+    memcg = await loop.run_in_executor(None, _postgres_memcg_status)
+    payload = {
+        "status": status, "daemon": "palace-daemon", "version": VERSION,
+        "palace": result, **cl,
+        "db_errors": db_errors,
+    }
+    if memcg is not None:
+        payload["postgres_memcg"] = memcg
     if status != "ok":
         return JSONResponse(content=payload, status_code=503)
     return payload
@@ -2135,10 +2159,214 @@ def _connect_postgres(connect_timeout: int = 3):
     try:
         return psycopg2.connect(dsn, connect_timeout=connect_timeout)
     except psycopg2.OperationalError as e:
+        _record_db_error(e)
         raise _DaemonToolError(
             _RPC_BACKEND_DOWN,
             f"postgres connection failed: {e}",
         )
+
+
+# ── DB-error observability (#97) ──────────────────────────────────────────────
+# Today's morning OOM cluster (postgres killed twice inside its docker memcg
+# at 08:57 + 09:19) surfaced 26+ `OperationalError: connection is closed`
+# events that were invisible to /health — the daemon process stayed up the
+# whole time, but in-flight queries returned errors. Same silent-failure-
+# under-healthy-surface shape #92 was filed to close, just for the postgres
+# dependency. Three hooks land here so the next time it happens the operator
+# sees it in /health, in journal, and in the startup canary line.
+
+import collections as _collections
+import threading as _threading
+
+# Bounded ring buffer of recent (timestamp, pattern, preview) tuples. 1000
+# entries × ~100 bytes = ~100 KB ceiling; the 5-minute window we summarize
+# over is usually <100 entries even during a postgres flap.
+_DB_ERROR_LOG: "_collections.deque[tuple[float, str, str]]" = _collections.deque(maxlen=1000)
+# Lock guarding both append and iteration. deque.append is thread-safe in
+# CPython, but iterating (e.g. ``list(deque)``) under concurrent mutation
+# can produce duplicated or skipped entries; the lock gives us a clean
+# snapshot for /health responses. Cost is negligible — observability code
+# runs at most a few hundred times per /health probe.
+_DB_ERROR_LOG_LOCK = _threading.Lock()
+
+
+def _classify_db_error(exc: BaseException) -> str:
+    """Bucket a psycopg2/psycopg OperationalError by its surface message.
+
+    Categories match what the journal grep cataloged on 2026-05-28 plus
+    a catch-all so the bucket vocabulary stays bounded:
+
+      * ``in_recovery``       — server in recovery mode (post-OOM restart)
+      * ``connection_closed`` — the connection is closed (post-mortem)
+      * ``server_closed``     — server closed connection unexpectedly
+      * ``connection_lost``   — connection lost mid-query
+      * ``connect_failed``    — initial connect could not reach server
+      * ``timeout``           — statement_timeout fired
+      * ``other``             — anything not above
+    """
+    msg = str(exc).lower()
+    if "in recovery mode" in msg:
+        return "in_recovery"
+    if "consuming input failed" in msg or "server closed the connection" in msg:
+        return "server_closed"
+    if "connection is lost" in msg or "connection lost" in msg:
+        return "connection_lost"
+    if "connection is closed" in msg:
+        return "connection_closed"
+    if (
+        "connection failed" in msg
+        or "could not connect" in msg
+        or "connection refused" in msg
+    ):
+        return "connect_failed"
+    if "statement timeout" in msg or "canceling statement" in msg:
+        return "timeout"
+    return "other"
+
+
+def _record_db_error(exc: BaseException) -> None:
+    """Append a classified DB error to the ring buffer with a preview.
+
+    Lock-guarded against concurrent ``_db_errors_summary`` iteration so
+    snapshots stay consistent under load. Preview is truncated to 200
+    chars so a runaway error message can't bloat the ring buffer beyond
+    its rough memory ceiling.
+    """
+    import time as _time
+    pattern = _classify_db_error(exc)
+    preview = str(exc)[:200]
+    with _DB_ERROR_LOG_LOCK:
+        _DB_ERROR_LOG.append((_time.time(), pattern, preview))
+
+
+def _db_errors_summary(window_s: float = 300.0) -> dict:
+    """Aggregate the ring buffer over the last ``window_s`` seconds.
+
+    Returns counts overall and per-pattern, plus the timestamp of the
+    newest error. Lock-guarded snapshot so concurrent ``_record_db_error``
+    appends from executor threads can't yield skipped/duplicated entries.
+    """
+    import time as _time
+    cutoff = _time.time() - window_s
+    by_pattern: dict[str, int] = {}
+    total = 0
+    newest_ts = 0.0
+    # Acquire the lock just long enough to snapshot — iteration over the
+    # snapshot then happens lock-free, so /health probing won't block
+    # concurrent error recording.
+    with _DB_ERROR_LOG_LOCK:
+        snapshot = list(_DB_ERROR_LOG)
+    for ts, pattern, _preview in snapshot:
+        if ts < cutoff:
+            continue
+        total += 1
+        by_pattern[pattern] = by_pattern.get(pattern, 0) + 1
+        if ts > newest_ts:
+            newest_ts = ts
+    import datetime as _dt
+    return {
+        "total_last_window": total,
+        "window_seconds": int(window_s),
+        "by_pattern": by_pattern,
+        # tz-aware UTC iso — naive local-time strings confuse consumers
+        # running in other timezones (especially monitoring tools that
+        # diff against UTC `now`).
+        "newest_ts": (
+            _dt.datetime.fromtimestamp(newest_ts, tz=_dt.timezone.utc)
+                .isoformat(timespec="seconds")
+            if newest_ts > 0 else None
+        ),
+    }
+
+
+def _postgres_memcg_status(
+    container: str | None = None, timeout_s: float = 2.0
+) -> "dict | None":
+    """Read docker stats for the postgres container to surface memcg pressure.
+
+    Returns ``None`` when docker isn't reachable, the container isn't
+    running, or the call exceeds ``timeout_s`` — every failure mode is
+    non-fatal because /health must keep responding even when docker is
+    grumpy. The 2s timeout is the ceiling; in practice ``docker stats
+    --no-stream`` returns in ~50ms on a healthy daemon.
+
+    Today's two postgres OOM kills happened at 81% sustained usage with
+    a 3 GB cgroup limit. This canary lets operators see pressure
+    approaching the limit before the kill, not just react to it after.
+
+    Container is configurable via ``PALACE_POSTGRES_CONTAINER`` (default
+    ``mempalace-db``).
+    """
+    import subprocess
+    import time as _time
+    container = container or os.environ.get("PALACE_POSTGRES_CONTAINER", "mempalace-db")
+    try:
+        proc = subprocess.run(
+            ["docker", "stats", "--no-stream", "--format", "{{json .}}", container],
+            capture_output=True, text=True, timeout=timeout_s, check=True,
+        )
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+    try:
+        data = json.loads(proc.stdout.strip())
+        # MemUsage shape: "2.43GiB / 3GiB" — keep as-is for display;
+        # MemPerc shape: "81.00%" — strip the % and parse to float.
+        # Coerce-via-`or` defends against `null` values in the JSON
+        # (transient docker daemon state during container startup /
+        # shutdown can produce `{"MemPerc": null, "MemUsage": null}`),
+        # which `.rstrip` / `.partition` would otherwise blow up on.
+        usage = data.get("MemUsage") or ""
+        perc_raw = data.get("MemPerc") or "0%"
+        perc_str = perc_raw.rstrip("%") if isinstance(perc_raw, str) else "0"
+        percent = float(perc_str) / 100.0 if perc_str else 0.0
+        usage_str, _, limit_str = usage.partition(" / ") if isinstance(usage, str) else ("", "", "")
+        return {
+            "container": container,
+            "usage": usage_str.strip(),
+            "limit": limit_str.strip(),
+            "percent": round(percent, 4),
+            "probed_at": int(_time.time()),
+        }
+    except (json.JSONDecodeError, ValueError, KeyError, AttributeError, TypeError):
+        return None
+
+
+def _log_postgres_memcg_canary(logger, env=None) -> None:
+    """Startup canary: log postgres-memcg pressure with INFO/WARN by threshold.
+
+    Same pattern as ``_log_mempalace_canary`` — passive observability via
+    journalctl. INFO when usage is below the threshold (default 75%);
+    WARNING when above. Skipped silently when docker isn't reachable so
+    the daemon still starts cleanly on a non-docker host.
+
+    Threshold tunable via ``PALACE_POSTGRES_MEMCG_WARN_PERCENT`` (default
+    75.0 — i.e. warn at 75% of cgroup limit; the prod OOMs this morning
+    happened at 81% sustained, so 75% gives ~5-15min lead time at typical
+    growth rates).
+    """
+    env = env if env is not None else os.environ
+    try:
+        warn_pct = float(env.get("PALACE_POSTGRES_MEMCG_WARN_PERCENT") or "75")
+    except (TypeError, ValueError):
+        warn_pct = 75.0
+    # Thread the env's container override through to the probe — a caller
+    # passing env={"PALACE_POSTGRES_CONTAINER": "x"} expects "x" to be
+    # probed, not whatever os.environ holds.
+    container = env.get("PALACE_POSTGRES_CONTAINER")
+    status = _postgres_memcg_status(container=container)
+    if status is None:
+        logger.info("postgres memcg canary: probe failed (docker unreachable or container down) — skipping")
+        return
+    pct = status["percent"] * 100.0
+    msg = "postgres memcg canary: %s usage=%s limit=%s percent=%.1f%% (warn-threshold %.1f%%)"
+    args = (status["container"], status["usage"], status["limit"], pct, warn_pct)
+    if pct > warn_pct:
+        logger.warning(
+            msg + " — postgres container approaching OOM; consider raising the cgroup limit",
+            *args,
+        )
+    else:
+        logger.info(msg, *args)
 
 
 def _normalize_room_name(raw):
