@@ -42,11 +42,14 @@ class TestBenchLockPath(unittest.TestCase):
             )
 
     def test_falls_back_when_config_unavailable(self):
-        """If _mp._config.palace_path access throws, we still return a path."""
+        """If the config provider throws, we still return a (fallback) path."""
         os.environ.pop("PALACE_BENCH_LOCK_PATH", None)
-        with patch.object(main, "_mp") as mock_mp:
-            del mock_mp._config
-            path = main._bench_lock_path()
+        # Use the _config_provider injection point that the refactored
+        # bench_lock_path() exposes — simpler than patching the lazy import.
+        def _broken_provider():
+            raise RuntimeError("config not initialized")
+        import bench_lock
+        path = bench_lock.bench_lock_path(_config_provider=_broken_provider)
         self.assertTrue(path)
         self.assertIn(".palace-bench-active.lock", path)
 
