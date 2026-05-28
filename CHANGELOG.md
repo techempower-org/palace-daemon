@@ -339,6 +339,15 @@ clause a no-op) by switching to symmetric `+1` arithmetic matching the
 existing `PRE_RESTART_HOOK` conditional. Resolves the workaround
 side of [#79](https://github.com/techempower-org/palace-daemon/issues/79).
 
+### Removed — 2026-05-28 — *canonical-mapping shim modules (kg_canonical_writepass / kg_canonical_vocab / kg_predicate_norm)*
+
+Closes [#89](https://github.com/techempower-org/palace-daemon/issues/89). The three thin re-export shims from #87 (`from mempalace.kg_canonical_writepass import *`, etc.) are now retired. The bare top-level imports they preserved had no remaining callers in palace-daemon's tree or in mempalace itself (audited 2026-05-28); the shim's "slated for removal once all callers migrate" comment was the last gate.
+
+- Six callers rewritten to package-qualified imports: `tests/test_kg_canonical_vocab.py`, `tests/test_kg_canonical_writepass.py`, `tests/test_kg_predicate_norm.py`, `scripts/canonical_migration.py`, `scripts/canonical_vocab_report.py`, `scripts/predicate_norm_report.py`.
+- The tests' `sys.path` hack (`sys.path.insert(0, _ROOT)`) is no longer needed and is removed alongside the imports.
+- Shim files deleted: `kg_canonical_writepass.py`, `kg_canonical_vocab.py`, `kg_predicate_norm.py`.
+- Behaviour verified by re-running the 56 affected tests against the new imports — pass-rate identical, since the shims were already a no-op `*` re-export.
+
 ### Milestone — 2026-05-25 — *AGE knowledge-graph backfill complete (629k nodes / 5.95M edges)*
 
 The `/backfill-age` endpoint (added in commit `b4016c6`) finished its first

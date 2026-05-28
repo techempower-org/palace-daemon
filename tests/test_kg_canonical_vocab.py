@@ -10,16 +10,9 @@ Run with::
     cd /home/jp/Projects/palace-daemon
     venv/bin/python -m pytest tests/test_kg_canonical_vocab.py -q
 """
-import os
-import sys
 import unittest
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.dirname(_HERE)
-if _ROOT not in sys.path:
-    sys.path.insert(0, _ROOT)
-
-from kg_canonical_vocab import (  # noqa: E402
+from mempalace.kg_canonical_vocab import (
     CANONICAL_RELATIONS,
     Canonical,
     CanonicalMapper,

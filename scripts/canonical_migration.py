@@ -86,15 +86,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 from collections import defaultdict
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.dirname(_HERE)
-if _ROOT not in sys.path:
-    sys.path.insert(0, _ROOT)
-
-from kg_canonical_vocab import CanonicalMapper  # noqa: E402
+from mempalace.kg_canonical_vocab import CanonicalMapper
 
 _FREQ_CYPHER = (
     "MATCH ()-[r:RELATION]->() RETURN r.relation_type AS rt, count(*) AS n"
