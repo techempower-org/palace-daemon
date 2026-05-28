@@ -1541,6 +1541,19 @@ async def search_hybrid(request: Request, x_api_key: str | None = Header(default
     room = body.get("room") or None
     limit = int(body.get("limit") or 10)
     include_trace = bool(body.get("include_trace") or False)
+    # fusion_mode (#105): pass-through to mempalace's search_memories so
+    # callers can A/B convex vs RRF at production scale. Mempalace's MCP
+    # schema-whitelist currently drops unknown keys, so this needs the
+    # companion mempalace#298 to land before it has end-to-end effect.
+    # We accept + validate the value here so the daemon's input surface
+    # is forward-compatible.
+    fusion_mode = body.get("fusion_mode")
+    if fusion_mode is not None:
+        if not isinstance(fusion_mode, str) or fusion_mode not in ("convex", "rrf"):
+            raise HTTPException(
+                status_code=400,
+                detail="'fusion_mode' must be 'convex' or 'rrf'",
+            )
     if limit < 1 or limit > 100:
         raise HTTPException(status_code=400, detail="'limit' must be 1..100")
     if room is not None and room not in _canonical_rooms():
@@ -1560,6 +1573,8 @@ async def search_hybrid(request: Request, x_api_key: str | None = Header(default
     if room:
         args["room"] = room
     args["include_trace"] = include_trace
+    if fusion_mode is not None:
+        args["fusion_mode"] = fusion_mode
 
     result = await _call({
         "jsonrpc": "2.0", "id": 1,
