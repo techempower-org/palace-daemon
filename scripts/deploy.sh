@@ -123,6 +123,8 @@ fail() { printf '  \033[31m✗\033[0m %s\n' "$1" >&2; exit 1; }
 TOTAL=4
 [ "$RUN_VERIFY" = "1" ] && TOTAL=$((TOTAL + 1))
 [ -n "$PRE_RESTART_HOOK" ] && TOTAL=$((TOTAL + 1))
+# #122: optional mempalace-db config-drift check (fires when docker-compose.yml exists)
+[ -f "$(git rev-parse --show-toplevel 2>/dev/null)/mempalace-db/docker-compose.yml" ] && TOTAL=$((TOTAL + 1))
 n=0
 nstep() { n=$((n + 1)); step "$n/$TOTAL  $1"; }
 
@@ -186,6 +188,48 @@ if [ -n "$PRE_RESTART_HOOK" ]; then
     else
         warn "pre-restart hook reported non-zero (non-fatal)"
     fi
+fi
+
+# #122: Check whether mempalace-db's running container reflects the
+# committed config. Today's 1.9.0 + #117 deploy showed the gap — postgres
+# config (shared_buffers, mem_limit) sat in mempalace-db/ files for hours
+# while the running container kept the old limits. Cgroup is hot-fixable
+# via `docker update`; postgresql.conf needs a container recreate
+# (maintenance window — see mempalace-db/README.md).
+if [ -f "$(git rev-parse --show-toplevel 2>/dev/null)/mempalace-db/docker-compose.yml" ]; then
+    nstep "check mempalace-db config drift"
+    expected_mem=$(grep -oE '^\s*mem_limit:\s*[0-9]+[gG]' \
+        "$(git rev-parse --show-toplevel)/mempalace-db/docker-compose.yml" 2>/dev/null \
+        | head -1 | grep -oE '[0-9]+[gG]' || echo "")
+    if [ -n "$expected_mem" ]; then
+        # Read the running container's cgroup limit (bytes) and compare.
+        actual_bytes=$(ssh "$SSH_TARGET" "docker inspect mempalace-db --format '{{.HostConfig.Memory}}' 2>/dev/null" || echo "0")
+        # Compute expected bytes from the "Ng" suffix.
+        expected_gb=$(printf '%s' "$expected_mem" | tr -dc '0-9')
+        expected_bytes=$((expected_gb * 1024 * 1024 * 1024))
+        if [ "$actual_bytes" != "$expected_bytes" ]; then
+            warn "mempalace-db cgroup drift: container has $actual_bytes bytes, docker-compose.yml says $expected_mem"
+            warn "Hot-fix:    ssh $HOST 'docker update --memory=$expected_mem --memory-swap=$expected_mem mempalace-db'"
+            warn "Full apply: see mempalace-db/README.md (recreate during maintenance window)"
+        else
+            ok "cgroup matches docker-compose.yml ($expected_mem)"
+        fi
+    fi
+    # Check whether the live postgresql.conf settings match the committed file
+    # for the canary fields (shared_buffers + effective_cache_size — the ones
+    # that motivated #117). A precise check would diff the whole file; this
+    # catches the high-impact drifts without full-file comparison overhead.
+    for setting in shared_buffers effective_cache_size; do
+        expected=$(grep -E "^${setting}\s*=" \
+            "$(git rev-parse --show-toplevel)/mempalace-db/postgresql.conf" 2>/dev/null \
+            | head -1 | sed -E "s/^${setting}\s*=\s*([^ #]+).*/\1/")
+        [ -z "$expected" ] && continue
+        actual=$(ssh "$SSH_TARGET" "docker exec mempalace-db psql -U palace mempalace_2026_05_13 -tA -c \"SHOW $setting\"" 2>/dev/null | tr -d ' ')
+        if [ -n "$actual" ] && [ "$actual" != "$expected" ]; then
+            warn "postgresql.conf $setting drift: container=$actual, committed=$expected"
+            warn "Apply: ssh $HOST 'cd ~/Projects/palace-daemon/mempalace-db && docker compose down && docker compose up -d' (maintenance window)"
+        fi
+    done
 fi
 
 nstep "restart daemon on $HOST"
