@@ -245,7 +245,6 @@ consumers were getting the wrong picture.
 
 ## [Unreleased]
 
-<<<<<<< HEAD
 ### Added — 2026-05-28 — *deploy-resilience: rsync backup + drift canary + Syncthing keepalive (#92)*
 
 The 2026-05-28 Syncthing outage (clean exit at 07:55 PDT, no auto-restart, ~1.5 h of mempalace work undeployed before anyone noticed) exposed three gaps in the deploy story. This change closes all three.
@@ -260,7 +259,7 @@ The 2026-05-28 Syncthing outage (clean exit at 07:55 PDT, no auto-restart, ~1.5 
 - **`scripts/syncthing-keepalive/`** — templated systemd unit + timer that probes `syncthing@<user>.service` every 5 minutes and starts it if clean-exited. `Restart=on-failure` on the Syncthing unit wouldn't have caught today's exit (status=0); the keepalive overlay does without modifying the upstream Syncthing unit. README in the directory walks through installation on familiar.
 
 The three together convert silent staleness into a journal-grep-able signal (canary) backed by a working recovery path (rsync) and proactive watchdog (keepalive). See [#92](https://github.com/techempower-org/palace-daemon/issues/92) for the original gap analysis.
-=======
+
 ### Added — 2026-05-28 — *daemon-native MCP tools for rooms / wakeup / mined (#93)*
 
 Six new daemon-native tools that close the gap mempalace's CLI hit under daemon-strict mode. The CLI commands `mempalace rooms list/add/rename/remove`, `mempalace wake-up`, and `mempalace mined` all opened a local ChromaDB client and silently broke once the local palace was retired. They now route through `/mcp` to the daemon, which is the single writer to the postgres backend.
@@ -282,7 +281,6 @@ Six new daemon-native tools that close the gap mempalace's CLI hit under daemon-
 - 29 tests in `tests/test_daemon_native_tools.py` covering happy/sad paths for every handler.
 
 Companion mempalace work: [mempalace#285](https://github.com/techempower-org/mempalace/issues/285). Once that ships, the CLI commands will pick these up automatically through `_call_daemon_mcp()`.
->>>>>>> f219730 (docs(changelog): cover the #93 landing)
 
 ### Added — 2026-05-28 — *canonical predicate vocabulary mapping for the RELATION edge type*
 
