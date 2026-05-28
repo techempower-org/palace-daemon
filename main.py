@@ -1213,14 +1213,33 @@ async def lifespan(app: FastAPI):
             logger.info("WatcherService stopped.")
     except Exception:
         logger.exception("WatcherService stop failed (non-fatal)")
+    # Shutdown flush — bounded so it can't exceed systemd's TimeoutStopSec
+    # and force the SIGKILL escalation path (#136). The MCP `_call` wrapper
+    # has its own PALACE_MCP_TOOL_TIMEOUT_SECONDS guard (default 60s), which
+    # is longer than the 30s systemd budget — so we wrap the call with an
+    # outer wait_for that's safely below TimeoutStopSec. If the flush
+    # exceeds the deadline we log and continue teardown rather than letting
+    # systemd hammer the daemon with SIGKILL mid-checkpoint.
+    SHUTDOWN_FLUSH_TIMEOUT_S = float(os.environ.get("PALACE_SHUTDOWN_FLUSH_TIMEOUT_S", "10"))
     try:
-        # We call mempalace_memories_filed_away which triggers a checkpoint in recent mempalace versions
-        await _call({
-            "jsonrpc": "2.0", "id": "shutdown",
-            "method": "tools/call",
-            "params": {"name": "mempalace_memories_filed_away", "arguments": {}}
-        }, retry_on_hnsw=False)
+        await asyncio.wait_for(
+            _call(
+                {
+                    "jsonrpc": "2.0", "id": "shutdown",
+                    "method": "tools/call",
+                    "params": {"name": "mempalace_memories_filed_away", "arguments": {}},
+                },
+                retry_on_hnsw=False,
+            ),
+            timeout=SHUTDOWN_FLUSH_TIMEOUT_S,
+        )
         logger.info("Flush complete.")
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Shutdown flush exceeded %.1fs (PALACE_SHUTDOWN_FLUSH_TIMEOUT_S); "
+            "continuing teardown to stay under systemd TimeoutStopSec.",
+            SHUTDOWN_FLUSH_TIMEOUT_S,
+        )
     except Exception as e:
         logger.error("Error during shutdown flush: %s", e)
 

@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Fixed — *#136: bound shutdown flush so the daemon doesn't blow past systemd's TimeoutStopSec*
+
+The lifespan shutdown handler called `mempalace_memories_filed_away` via
+the internal `_call` wrapper, which has its own 60s timeout via
+`PALACE_MCP_TOOL_TIMEOUT_SECONDS`. systemd's `TimeoutStopSec` for the
+service is **30s**, so a hung flush could exceed the systemd budget and
+force `SIGKILL` escalation — we saw exactly this pattern 3× today
+during the #101 refactor deploys.
+
+Fix: wrap the shutdown flush in an outer `asyncio.wait_for(timeout=10s)`
+that's safely below `TimeoutStopSec`. New env var
+`PALACE_SHUTDOWN_FLUSH_TIMEOUT_S` (default 10) for operator override.
+On timeout we log and continue teardown rather than letting systemd
+hammer the daemon mid-checkpoint.
+
+This addresses problem (A) from #136. Problem (B) — auto-mine
+subprocess cleanup — is a larger change deferred to a follow-up.
+
 ### Refactored — *#101 sixth slice: extract /mcp fast-intercept payloads to `fast_intercept.py`*
 
 Moved the two /mcp fast-intercept payload wrappers (`_fast_mcp_status_payload`
