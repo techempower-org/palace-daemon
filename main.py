@@ -1404,12 +1404,13 @@ async def health():
     except Exception:
         pass
     cl = _crash_loop_state()
-    if not palace_ok:
-        status = "degraded"
-    elif cl["crash_loop"]:
-        status = "crash_loop"
-    else:
-        status = "ok"
+    # #143: crash_loop is informational, NOT a service-down signal.
+    # Returning 503 for crash_loop caused monitoring tools to interpret
+    # "had a few deploys recently" as "service is failing" — exactly
+    # backwards. status now reflects whether the palace can actually
+    # serve traffic; the crash_loop fields stay in the body as
+    # observability data but don't drive the HTTP code.
+    status = "ok" if palace_ok else "degraded"
     # #97 observability hooks: db_errors counter + postgres memcg pressure.
     # Both are cheap (deque scan + one docker-stats fork bounded at 2s).
     # If the memcg probe fails (docker down, container missing) we omit
@@ -1423,6 +1424,10 @@ async def health():
     }
     if memcg is not None:
         payload["postgres_memcg"] = memcg
+    # 503 only when palace_ok=False (the daemon truly can't serve). A
+    # crash_loop=True reading with palace_ok=True returns 200 with the
+    # informational fields populated, so monitoring tools can read
+    # restart_count without auto-restarting the service.
     if status != "ok":
         return JSONResponse(content=payload, status_code=503)
     return payload
