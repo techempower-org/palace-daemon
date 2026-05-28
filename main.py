@@ -792,7 +792,18 @@ async def _drain_pending_mines() -> int:
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
-                    stdout, stderr = await proc.communicate()
+                    # Track for lifespan shutdown cleanup (#136 problem B).
+                    # active_mines may be None during the at-startup drain
+                    # call (before lifespan startup completes); the post-
+                    # rebuild /repair drain has it populated.
+                    active_mines = getattr(app.state, "active_mines", None)
+                    if active_mines is not None:
+                        active_mines.add(proc)
+                    try:
+                        stdout, stderr = await proc.communicate()
+                    finally:
+                        if active_mines is not None:
+                            active_mines.discard(proc)
                 if proc.returncode == 0:
                     count += 1
                 else:
@@ -3336,7 +3347,17 @@ async def mine(request: Request, x_api_key: str | None = Header(default=None)):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        # Track the proc so lifespan shutdown can terminate it cleanly
+        # (#136 problem B). The watcher's auto-mine path tracks via the
+        # same set in app.state.active_mines.
+        active_mines = getattr(request.app.state, "active_mines", None)
+        if active_mines is not None:
+            active_mines.add(proc)
+        try:
+            stdout, stderr = await proc.communicate()
+        finally:
+            if active_mines is not None:
+                active_mines.discard(proc)
         return proc, stdout, stderr
 
     backend = getattr(_mp._config, "backend", "chroma")
@@ -3459,12 +3480,18 @@ async def backfill_age(request: Request, x_api_key: str | None = Header(default=
         _backfill_state["output_lines"] = []
 
     async def _run_backfill():
+        proc = None
+        active_mines = getattr(request.app.state, "active_mines", None)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
+            # Track for lifespan shutdown cleanup (#136 problem B). Same set
+            # the auto-mine + /mine paths use.
+            if active_mines is not None:
+                active_mines.add(proc)
             async for line in proc.stdout:
                 decoded = line.decode().rstrip()
                 _backfill_state.setdefault("output_lines", []).append(decoded)
@@ -3475,6 +3502,8 @@ async def backfill_age(request: Request, x_api_key: str | None = Header(default=
         except Exception as e:
             _backfill_state["error"] = str(e)
         finally:
+            if proc is not None and active_mines is not None:
+                active_mines.discard(proc)
             _backfill_state["in_progress"] = False
             _backfill_state["finished_at"] = _time.monotonic()
 
