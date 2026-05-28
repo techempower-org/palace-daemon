@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Refactored — *#101 fifth slice: extract daemon-native MCP tools to `daemon_tools.py`*
+
+Moved ~270 lines (`_normalize_room_name`, `_invalidate_rooms_cache`, the
+six `_fast_mcp_*` tool handlers, and the `_DAEMON_NATIVE_TOOLS` registry)
+out of main.py into a new `daemon_tools.py` module. main.py keeps the
+old `_`-prefixed names alive via re-exports so the /mcp fast-intercept
+dispatcher and the 33 tests in `test_daemon_native_tools.py` keep working
+without edits.
+
+The tricky bit was `invalidate_rooms_cache()` — it mutates
+`main._canonical_rooms_cache` (a module-level cache held in main.py
+because the populator helper still lives there). A top-level
+`from main import ...` would form an import cycle (main imports
+daemon_tools at module-load time). The fix is a function-local
+`import main` inside `invalidate_rooms_cache`: Python resolves the
+name at call time, by which point both modules are fully loaded, so
+the cycle is harmless.
+
+main.py is now 3995 lines, down from 4263. Combined with the four
+earlier slices (`bench_lock.py` #126, `canaries.py` #127,
+`db_errors.py` #128, `postgres.py` #129) this brings the total
+extracted from main.py to ~755 lines across 2026-05-28. All 495 tests
++ 20 subtests pass; 1 skipped (longstanding).
+
 ### Fixed — *raise mempalace-db cgroup memory limit, codify the container's config (#102, familiar.realm.watch#50)*
 
 The `mempalace-db` postgres container was running with a 3 GiB cgroup
