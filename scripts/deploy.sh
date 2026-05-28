@@ -105,8 +105,8 @@ fail() { printf '  \033[31m✗\033[0m %s\n' "$1" >&2; exit 1; }
 [ -n "$URL" ] || fail "no daemon URL — set PALACE_DAEMON_URL or PALACE_HOST"
 [ -n "$CONF_LOADED" ] && warn "loaded config: $CONF_LOADED"
 
-TOTAL=6
-[ "$RUN_VERIFY" = "1" ] && TOTAL=6
+TOTAL=4
+[ "$RUN_VERIFY" = "1" ] && TOTAL=$((TOTAL + 1))
 [ -n "$PRE_RESTART_HOOK" ] && TOTAL=$((TOTAL + 1))
 n=0
 nstep() { n=$((n + 1)); step "$n/$TOTAL  $1"; }
@@ -172,15 +172,6 @@ if [ -n "$PRE_RESTART_HOOK" ]; then
         warn "pre-restart hook reported non-zero (non-fatal)"
     fi
 fi
-
-nstep "install canonical-mapping .pth (idempotent; survives venv rebuild)"
-# Race with kg-extract@.service restart — write the .pth BEFORE palace-daemon
-# restarts (and thus before the kg-extract worker any restart of palace-daemon
-# kicks off) so the canonical_writepass import resolves on first load. See
-# palace-daemon issue #79.
-ssh "$SSH_TARGET" "bash -s" < "$(dirname "$0")/install-canonical-pth.sh" \
-    || warn "install-canonical-pth.sh exited non-zero (canonical mapping may fall to identity-fallback)"
-ok ".pth installed"
 
 nstep "restart daemon on $HOST"
 ssh "$SSH_TARGET" "$RESTART_CMD" || fail "restart failed"
