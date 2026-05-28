@@ -1,0 +1,18 @@
+[Unit]
+Description=Restart syncthing@%i if it has clean-exited
+Documentation=https://github.com/techempower-org/palace-daemon/issues/92
+After=network-online.target
+
+[Service]
+Type=oneshot
+# `systemctl start` is idempotent — if the target service is already active
+# it returns 0 immediately without re-starting. So a bare `start` call is
+# both correct *and* simpler than the previous `is-active && start` shell
+# pipeline (which spawned an extra bash process per probe).
+ExecStart=/usr/bin/systemctl start syncthing@%i.service
+
+# We intentionally do NOT set Restart= — a oneshot that succeeds is the
+# whole point; the timer is what schedules the next probe.
+
+[Install]
+WantedBy=multi-user.target

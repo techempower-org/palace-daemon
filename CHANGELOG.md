@@ -245,6 +245,21 @@ consumers were getting the wrong picture.
 
 ## [Unreleased]
 
+### Added — 2026-05-28 — *deploy-resilience: rsync backup + drift canary + Syncthing keepalive (#92)*
+
+The 2026-05-28 Syncthing outage (clean exit at 07:55 PDT, no auto-restart, ~1.5 h of mempalace work undeployed before anyone noticed) exposed three gaps in the deploy story. This change closes all three.
+
+- **`scripts/rsync-mempalace.sh`** — backup deploy path mirroring `scripts/deploy.sh`'s shape. Pushes the local mempalace tree to the deploy host via rsync (`--delete`, `--exclude __pycache__/`, etc.), restarts the daemon, polls `/health`, optionally runs `scripts/verify-routes.sh`. Same env-var + config-file knobs (`PALACE_HOST`, `PALACE_API_KEY`, `MEMPALACE_LOCAL_DIR`, `MEMPALACE_REMOTE_DIR`, etc.) so the existing `scripts/deploy.conf` works unchanged.
+- **Daemon-startup drift canary** — `main.py` now logs the deployed `mempalace/__init__.py`'s mtime + age on every restart:
+  - INFO when fresh (`mempalace canary: /path (mtime YYYY-MM-DDTHH:MM:SS, age 5.0h, warn-threshold 24.0h)`)
+  - **WARNING** when stale beyond the threshold, with a pointer to `scripts/rsync-mempalace.sh`
+  - Threshold tunable via `PALACE_CANARY_WARN_HOURS` (default 24)
+  - Defensive: missing `__file__` / `getmtime` failure / non-numeric env → log skip, never crash startup
+  - 10 tests in `tests/test_mempalace_canary.py` covering fresh / stale / threshold / fallback / failure modes
+- **`scripts/syncthing-keepalive/`** — templated systemd unit + timer that probes `syncthing@<user>.service` every 5 minutes and starts it if clean-exited. `Restart=on-failure` on the Syncthing unit wouldn't have caught today's exit (status=0); the keepalive overlay does without modifying the upstream Syncthing unit. README in the directory walks through installation on familiar.
+
+The three together convert silent staleness into a journal-grep-able signal (canary) backed by a working recovery path (rsync) and proactive watchdog (keepalive). See [#92](https://github.com/techempower-org/palace-daemon/issues/92) for the original gap analysis.
+
 ### Added — 2026-05-28 — *canonical predicate vocabulary mapping for the RELATION edge type*
 
 Collapses the production graph's predicate vocabulary from ~64k freeform

@@ -976,6 +976,63 @@ async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
 _TRUTHY_FLAG = frozenset({"1", "true", "yes", "on"})
 
 
+def _log_mempalace_canary(logger, env=None) -> None:
+    """Log the deployed mempalace state for drift detection (#92).
+
+    Today's Syncthing outage demonstrated the silent-drift failure mode: the
+    daemon ran healthy on 2-day-old mempalace code while the actual upstream
+    fix sat undeployed. Three things looked fine — gh PR merged, daemon
+    /health green, systemctl active — and the only signal that lied was the
+    `stat -c %y` mtime on the deployed file. This helper hoists that signal
+    into journalctl on every restart so drift is one grep away.
+
+    Reports the path + mtime + age of mempalace/__init__.py (the package
+    entry point, which gets touched by ~any meaningful mempalace change).
+    If the canary's age exceeds the warn threshold, the log level is
+    WARNING; otherwise INFO. Defaults to 24h; override via env var
+    PALACE_CANARY_WARN_HOURS.
+    """
+    import datetime as _dt
+    import time as _time
+    env = env if env is not None else os.environ
+    try:
+        warn_hours = float(env.get("PALACE_CANARY_WARN_HOURS") or "24")
+    except (TypeError, ValueError):
+        warn_hours = 24.0
+    try:
+        import mempalace as _mp_pkg
+        canary = _mp_pkg.__file__
+        if not canary:
+            logger.info("mempalace canary: no __file__ on package (skipping)")
+            return
+        mtime = os.path.getmtime(canary)
+    except Exception as e:
+        # Defensive — if the import fails we have bigger problems than drift,
+        # but the helper itself must not crash startup.
+        logger.info("mempalace canary: probe failed (%s) — skipping", e)
+        return
+    mtime_iso = _dt.datetime.fromtimestamp(mtime).isoformat(timespec="seconds")
+    # Use _time.time() — direct epoch read, no tz round-trip via datetime.now()
+    age_secs = max(0.0, _time.time() - mtime)
+    if age_secs < 3600:
+        age_h = f"{int(age_secs / 60)}m"
+    elif age_secs < 86400:
+        age_h = f"{age_secs / 3600:.1f}h"
+    else:
+        age_h = f"{age_secs / 86400:.1f}d"
+    msg = (
+        "mempalace canary: %s (mtime %s, age %s, warn-threshold %.1fh)"
+    )
+    if age_secs > warn_hours * 3600:
+        logger.warning(
+            msg + " — stale; run scripts/rsync-mempalace.sh "
+            "to push from your workstation",
+            canary, mtime_iso, age_h, warn_hours,
+        )
+    else:
+        logger.info(msg, canary, mtime_iso, age_h, warn_hours)
+
+
 def _log_kg_writethrough_stages(env, logger) -> None:
     """Log each KG write-through stage's on/off state by env flag (issue #76).
 
@@ -1104,6 +1161,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Warmup collection open failed (non-fatal): %s", e)
     _log_kg_writethrough_stages(os.environ, logger)
+    _log_mempalace_canary(logger)
     await _warn_if_hnsw_threads_unset()
 
     # Signal systemd that startup is complete (Type=notify in service file).

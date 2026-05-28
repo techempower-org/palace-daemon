@@ -1,0 +1,17 @@
+[Unit]
+Description=Probe syncthing@%i every 5 minutes, restart if down
+Documentation=https://github.com/techempower-org/palace-daemon/issues/92
+
+[Timer]
+# First probe 2 minutes after boot — gives the user-installed
+# syncthing@%i unit time to come up on its own.
+OnBootSec=2min
+OnUnitActiveSec=5min
+# AccuracySec=10s gives us tight scheduling without burning power; the
+# default is 1min which is fine for a 5-minute cadence, but 10s makes
+# the timer feel responsive when manually restarting.
+AccuracySec=10s
+Unit=syncthing-keepalive@%i.service
+
+[Install]
+WantedBy=timers.target
