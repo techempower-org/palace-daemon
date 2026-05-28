@@ -51,16 +51,6 @@ KEY="${PALACE_API_KEY:-}"
 HEADERS=()
 [ -n "$KEY" ] && HEADERS=(-H "x-api-key: $KEY")
 
-# Ensure the canonical-mapping .pth file is in place before any downstream
-# import touches kg_canonical_writepass (issue #79). Idempotent — no-op if
-# the .pth is already correct. Failure here doesn't block self-heal; the
-# script logs and continues.
-_pth_installer="$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "$0")")/install-canonical-pth.sh"
-if [ -x "$_pth_installer" ]; then
-  "$_pth_installer" 2>&1 | while IFS= read -r line; do log "$line"; done || \
-    log "install-canonical-pth.sh exited non-zero (non-fatal)"
-fi
-
 # Wait up to WAIT_SECS for the daemon to start responding to /health.
 WAIT_SECS="${PALACE_AUTO_REPAIR_WAIT_SECS:-240}"
 log "waiting up to ${WAIT_SECS}s for daemon on ${HOST}:${PORT}..."

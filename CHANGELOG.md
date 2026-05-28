@@ -245,6 +245,100 @@ consumers were getting the wrong picture.
 
 ## [Unreleased]
 
+### Added — 2026-05-28 — *canonical predicate vocabulary mapping for the RELATION edge type*
+
+Collapses the production graph's predicate vocabulary from ~64k freeform
+LLM-derived strings to **40 canonicals + ~195 retained code-token raws**.
+Until this landed, the graph leg of `mempalace_search?candidate_strategy=hybrid`
+was effectively a no-op — most edges' `relation_type` appeared once,
+so traversal couldn't find paths.
+
+Migration applied to the production palace on 2026-05-28 covered
+**1,761,790 RELATION edges**, mapping **755,034 (42.9%)** to a canonical
+and binning **997,519** as `'other'`. The remaining edges already carried
+acceptable code-token raws and were left intact.
+
+**The arc, by PR:**
+
+- **#75** — write seam: new `kg_canonical_writepass` module, guarded by
+  the default-OFF `MEMPALACE_KG_CANONICAL_WRITETHROUGH` env knob. Every
+  new KG triple now goes through the canonicalizer at write time, so the
+  vocabulary stops growing freeform. Includes a dry-run migration tool
+  (`scripts/canonical_migration.py`) that emits a remap plan from the
+  current edges' `relation_type` distribution.
+- **#77** — migration `--apply`: replaces the SystemExit stub with a
+  real direct-SQL UPDATE on the AGE backing table. Set-based remap with
+  a TEMP `predicate_mapping` table joined into a single
+  `UPDATE mempalace_kg."RELATION" ... FROM predicate_mapping` —
+  **~63k edges/sec** on the production palace. Per-cypher remap (the
+  obvious-but-wrong shape) was previously degrading exponentially due to
+  MVCC dead-tuple accumulation; we hit AdminShutdown at batch 8 before
+  pivoting. Preserves the original `relation_type` under
+  `raw_relation_type` so the migration is idempotent and reversible.
+- **#85** — batched `CanonicalMapper.map_predicates(list)` for bulk
+  callers — the migration tool was the immediate beneficiary, but any
+  future code that needs to map many predicates at once now has a
+  proper interface rather than a Python loop over single-string maps.
+
+**Embedding-based mapping path** (used during the production migration):
+GPU-accelerated MiniLM-L6 ONNX via `onnxruntime-gpu` on a 2080 Ti gave
+~65× faster batched embedding than CPU. Threshold 0.45 cosine. A 30/30
+A/B test against the CanonicalMapper short-circuit confirmed batched
+output matched single-call output exactly.
+
+### Added — 2026-05-28 — *stage-distinguished KG write-through logging*
+
+Closes [#76](https://github.com/techempower-org/palace-daemon/issues/76).
+The single `MEMPALACE_KG_WRITETHROUGH` log line conflated two
+independent stages — inline `MENTIONS` extraction and the
+extraction-queue path. Operators couldn't tell which was on/off from
+the startup log.
+
+- **#78** — startup logs each stage distinctly:
+  `KG write-through stages: MENTIONS=on (MEMPALACE_KG_WRITETHROUGH); EXTRACTION_QUEUE=off (MEMPALACE_KG_EXTRACTION_QUEUE)`.
+  Truthy spellings (`1`/`true`/`yes`/`on` case-insensitive) accepted;
+  everything else (including blank/None) reads as `OFF`. 9 tests + 20
+  subtests covering both-on, silent-OFF, all truthy variants, blank/None
+  safety.
+- **#83** — env-value safety: defends against non-string values (`True`,
+  `42`) flowing through `os.environ`-shaped overrides by coercing to
+  `str(...)` before `.strip()`. Gemini-flagged on #78; fixed without
+  changing observable behaviour.
+
+### Changed — 2026-05-28 — *canonical-mapping modules ship from mempalace*
+
+Closes the loop on the PYTHONPATH-strip footgun. Until 2026-05-28, the
+KG write-through worker's bare `from kg_canonical_writepass import ...`
+silently fell to an identity-fallback because mempalace's
+`_strip_leaked_pythonpath_from_sys_path()` (a defensive ABI-hygiene
+measure against multi-Python compiled-extension contamination) removed
+palace-daemon's source dir from `sys.path` whenever it had been added
+via PYTHONPATH. The workaround was a `.pth` file in the venv's
+`site-packages` (since `.pth` entries are added through site-init, not
+PYTHONPATH).
+
+- **mempalace#290** ports `kg_canonical_writepass`, `kg_canonical_vocab`,
+  and `kg_predicate_norm` into the mempalace package itself — they
+  resolve via the editable install, not by sys.path discovery, so the
+  strip doesn't touch them.
+- **#87** reduces the in-repo files to thin re-export shims
+  (`from mempalace.kg_canonical_writepass import *`) so historical bare
+  imports keep working. New code is expected to import
+  package-qualified directly.
+
+### Removed — 2026-05-28 — *`.pth` installer workaround for the PYTHONPATH-strip*
+
+With the canonical-mapping modules now shipping from mempalace
+(see above), the `.pth`-into-venv workaround is no longer needed.
+**#88** deletes `scripts/install-canonical-pth.sh` and the call from
+both `scripts/deploy.sh` and `scripts/auto-repair-if-empty.sh`. Net 201
+deletions, 2 insertions. Also fixes a latent
+`[ "$RUN_VERIFY" = "1" ] && TOTAL=6` no-op in `deploy.sh` (the .pth
+step had silently bumped base `TOTAL` to 6, making the verify-bumps
+clause a no-op) by switching to symmetric `+1` arithmetic matching the
+existing `PRE_RESTART_HOOK` conditional. Resolves the workaround
+side of [#79](https://github.com/techempower-org/palace-daemon/issues/79).
+
 ### Milestone — 2026-05-25 — *AGE knowledge-graph backfill complete (629k nodes / 5.95M edges)*
 
 The `/backfill-age` endpoint (added in commit `b4016c6`) finished its first
