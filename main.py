@@ -1563,7 +1563,19 @@ async def search_age_fused(request: Request, x_api_key: str | None = Header(defa
 
     def _age_lookup() -> tuple[list, dict[str, float]]:
         """Sync AGE entity-overlap lookup. Called via ``asyncio.to_thread``
-        so the daemon's event loop isn't blocked on Postgres I/O."""
+        so the daemon's event loop isn't blocked on Postgres I/O.
+
+        #157: AGE's Cypher parser rejected the original ``RETURN d.id AS id,
+        r.count AS count`` form with a SyntaxError ("syntax error at or near
+        AS") — multi-AS RETURN with a relationship property is unsupported
+        in this AGE version. Every call raised, the per-entity try/except
+        silently swallowed it, and graph_hits_by_drawer stayed empty
+        (n_graph=0 in /search/age-fused's trace).
+
+        Workaround: use ``properties(r) AS edge_props`` which returns the
+        full edge property map (verified against AGE 1.5 on familiar). The
+        Python code below extracts ``count`` from that map; missing/null
+        falls back to 1, matching the previous default."""
         from mempalace.knowledge_graph_age import KnowledgeGraphAGE
         kg = KnowledgeGraphAGE(dsn)
         hits: dict[str, float] = {}
@@ -1575,16 +1587,24 @@ async def search_age_fused(request: Request, x_api_key: str | None = Header(defa
                     rows = kg._run_cypher(
                         """
                         MATCH (d:Drawer)-[r:MENTIONS]->(e:Entity {name: $ename})
-                        RETURN d.id AS id, r.count AS count
+                        RETURN d.id AS drawer_id, properties(r) AS edge_props
                         """,
                         {"ename": qe.name},
                         fetch=True,
                     )
-                except Exception:
+                except Exception as e:
+                    # Don't swallow silently — log so future Cypher-syntax
+                    # regressions are visible. The original per-entity try/
+                    # except was hiding #157 for weeks.
+                    logging.warning(
+                        "/search/age-fused: AGE Cypher failed for entity %r: %s",
+                        getattr(qe, "name", qe), e,
+                    )
                     continue
                 for r in rows:
                     drawer_id = kg._unwrap_agtype(r[0])
-                    cnt = kg._unwrap_agtype(r[1]) or 1
+                    edge_props = kg._unwrap_agtype(r[1]) or {}
+                    cnt = (edge_props.get("count") if isinstance(edge_props, dict) else None) or 1
                     if drawer_id:
                         hits[str(drawer_id)] = hits.get(str(drawer_id), 0) + int(cnt)
         finally:
