@@ -38,9 +38,9 @@ The exact rewrite is::
     UPDATE mempalace_kg."RELATION" e
     SET properties = (
         ((e.properties::text::jsonb)
-         || jsonb_build_object('raw_relation_type',
-                                (e.properties::text::jsonb)->>'relation_type')
-         || jsonb_build_object('relation_type', m.canonical)
+         || jsonb_build_object(
+              'raw_relation_type', (e.properties::text::jsonb)->>'relation_type',
+              'relation_type', m.canonical)
         )::text::ag_catalog.agtype
     )
     FROM predicate_mapping m
@@ -299,8 +299,8 @@ def _apply(plan: dict, args: argparse.Namespace) -> None:
                     ((e.properties::text::jsonb)
                      || jsonb_build_object(
                           'raw_relation_type',
-                          (e.properties::text::jsonb)->>'relation_type')
-                     || jsonb_build_object('relation_type', m.canonical)
+                          (e.properties::text::jsonb)->>'relation_type',
+                          'relation_type', m.canonical)
                     )::text::ag_catalog.agtype
                 )
                 FROM predicate_mapping m

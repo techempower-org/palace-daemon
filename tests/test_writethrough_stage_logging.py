@@ -84,6 +84,15 @@ class TestWritethroughStageLogging(unittest.TestCase):
                 msg = self._capture({"MEMPALACE_KG_WRITETHROUGH": val})
                 self.assertIn("MENTIONS=OFF", msg, f"value {val!r} should not be truthy")
 
+    def test_handles_none_value_safely(self):
+        """Regression: an explicit None value in the env dict must not crash
+        on .strip(). Possible with arbitrary dict callers (not os.environ);
+        the helper is generic enough that it shouldn't constrain the caller."""
+        msg = self._capture({"MEMPALACE_KG_WRITETHROUGH": None,
+                             "MEMPALACE_KG_EXTRACTION_QUEUE": None})
+        self.assertIn("MENTIONS=OFF", msg)
+        self.assertIn("EXTRACTION_QUEUE=OFF", msg)
+
     def test_log_level_is_info(self):
         logger = MagicMock()
         main._log_kg_writethrough_stages({}, logger)
