@@ -299,17 +299,16 @@ consumers were getting the wrong picture.
 
 ## [Unreleased]
 
-### Refactored — 2026-05-28 — *extract bench-lock helpers to `bench_lock.py` (first slice of #101)*
+### Refactored — 2026-05-28 — *extract startup canaries to `canaries.py` (second slice of #101)*
 
-First small slice of #101's "split 3800-line main.py by concern" plan. The bench-lock helpers (`_bench_lock_path`, `_bench_lock_active`) added in #106 are now in `bench_lock.py` (top-level module, top-level imports work) — single-purpose, self-contained, 85 lines. `main.py` re-exports the names so existing tests that mock `main._bench_lock_*` keep working unchanged.
+Second slice of the main.py → multi-module refactor (#101). The mempalace freshness canary (#92/#116) and postgres-memcg pressure canary (#97) are now in `canaries.py` — 4 functions, ~165 lines, single concern (passive startup observability via journalctl).
 
-- `bench_lock.py` — extracted module with `bench_lock_path()` + `bench_lock_active()`. Adds an optional `_config_provider` injection point so tests can substitute the mempalace config lookup without monkey-patching the lazy import.
-- `main.py` — replaces the inline definitions with a 2-line re-export (`from bench_lock import bench_lock_path as _bench_lock_path`).
-- `tests/test_bench_lock.py` — 1 test updated to use the new `_config_provider` injection (cleaner than the old `del mock_mp._config` pattern); 8 tests pass unchanged through the re-export.
+- `canaries.py` exports `newest_mempalace_mtime()`, `log_mempalace_canary()`, `postgres_memcg_status()`, `log_postgres_memcg_canary()`.
+- `main.py` re-exports under the `_`-prefixed names existing call sites use (`from canaries import log_mempalace_canary as _log_mempalace_canary` etc.).
+- 2 test files (`test_mempalace_canary.py`, `test_observability_hooks.py`) updated: `patch.object(main, "_postgres_memcg_status", …)` → `patch.object(canaries, "postgres_memcg_status", …)` and similar for `_newest_mempalace_mtime`. The intra-module call from `log_*_canary` to the helper doesn't go through `main`'s namespace, so the patch must target the new module directly.
+- 495 tests pass, no regressions.
 
-No behavioural change. 9 bench-lock tests still pass; full pytest run 495 passed / 1 skipped (no regressions).
-
-The pattern (extract → re-export) lets future #101 slices peel off single-concern modules without forcing churn across the test suite. Next slice candidates: `_postgres_dsn` + `_connect_postgres` → `postgres.py`, the daemon-native MCP tools → `daemon_tools.py`.
+Cumulative #101 progress: ~250 lines extracted from `main.py` across two PRs (#126 bench-lock, this slice). Next slices remain: postgres helpers (`_postgres_dsn` / `_connect_postgres`) + DB-error ring buffer (`_record_db_error`) — these are coupled via the OperationalError-recording pattern and want a coordinated extract.
 
 ### Added — 2026-05-28 — *`scripts/deploy.sh` detects mempalace-db config drift (#122)*
 

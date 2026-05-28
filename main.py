@@ -976,99 +976,13 @@ async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
 _TRUTHY_FLAG = frozenset({"1", "true", "yes", "on"})
 
 
-def _newest_mempalace_mtime() -> "tuple[float, str] | None":
-    """Walk the mempalace package directory and return ``(newest_mtime, filename)``.
-
-    #116: the canary previously read mempalace/__init__.py's mtime, but
-    __init__.py is a stable file that rarely changes — every release with a
-    code change but no __init__.py edit produced a false-positive WARN.
-    Walking the tree and reporting the newest .py file's mtime tracks
-    whole-tree freshness, which is what operators actually care about.
-
-    Returns ``None`` if mempalace can't be imported or the directory walk
-    finds no .py files (defensive — startup must not crash on this probe).
-    """
-    try:
-        import mempalace as _mp_pkg
-        path = _mp_pkg.__file__
-        if not path:
-            return None
-        pkg_dir = os.path.dirname(path)
-    except Exception:
-        return None
-    newest_mtime = 0.0
-    newest_file = ""
-    try:
-        for root, _, files in os.walk(pkg_dir):
-            for f in files:
-                if not f.endswith(".py"):
-                    continue
-                full = os.path.join(root, f)
-                try:
-                    m = os.path.getmtime(full)
-                except OSError:
-                    continue
-                if m > newest_mtime:
-                    newest_mtime = m
-                    newest_file = full
-    except OSError:
-        return None
-    if newest_mtime == 0.0:
-        return None
-    return (newest_mtime, newest_file)
-
-
-def _log_mempalace_canary(logger, env=None) -> None:
-    """Log the deployed mempalace state for drift detection (#92, #116).
-
-    Today's Syncthing outage demonstrated the silent-drift failure mode: the
-    daemon ran healthy on 2-day-old mempalace code while the actual upstream
-    fix sat undeployed. Three things looked fine — gh PR merged, daemon
-    /health green, systemctl active — and the only signal that lied was the
-    `stat -c %y` mtime on the deployed file. This helper hoists that signal
-    into journalctl on every restart so drift is one grep away.
-
-    Reports the newest .py mtime across the whole mempalace/ tree (#116
-    fix — __init__.py was a stable file that produced false-positive WARNs
-    on releases that touched other modules but not __init__.py). If the
-    age exceeds the warn threshold, log level is WARNING; otherwise INFO.
-    Defaults to 24h; override via env var PALACE_CANARY_WARN_HOURS.
-    """
-    import datetime as _dt
-    import time as _time
-    env = env if env is not None else os.environ
-    try:
-        warn_hours = float(env.get("PALACE_CANARY_WARN_HOURS") or "24")
-    except (TypeError, ValueError):
-        warn_hours = 24.0
-    result = _newest_mempalace_mtime()
-    if result is None:
-        logger.info("mempalace canary: probe failed (package walk produced no .py files) — skipping")
-        return
-    mtime, canary = result
-    mtime_iso = _dt.datetime.fromtimestamp(mtime).isoformat(timespec="seconds")
-    # Use _time.time() — direct epoch read, no tz round-trip via datetime.now()
-    age_secs = max(0.0, _time.time() - mtime)
-    if age_secs < 3600:
-        age_h = f"{int(age_secs / 60)}m"
-    elif age_secs < 86400:
-        age_h = f"{age_secs / 3600:.1f}h"
-    else:
-        age_h = f"{age_secs / 86400:.1f}d"
-    # Report the newest file's basename so the operator can confirm
-    # which module triggered the freshness signal.
-    canary_basename = os.path.basename(canary) if canary else "(unknown)"
-    msg = (
-        "mempalace canary: newest .py = %s (mtime %s, age %s, warn-threshold %.1fh)"
-    )
-    if age_secs > warn_hours * 3600:
-        logger.warning(
-            msg + " — stale; run scripts/rsync-mempalace.sh "
-            "to push from your workstation",
-            canary_basename, mtime_iso, age_h, warn_hours,
-        )
-    else:
-        logger.info(msg, canary_basename, mtime_iso, age_h, warn_hours)
+# Canary helpers extracted to canaries.py per #101 refactor (continued slice).
+# main.py keeps the private _-prefixed names via re-export so existing tests
+# that patch `main._log_mempalace_canary` etc. keep working unchanged.
+from canaries import newest_mempalace_mtime as _newest_mempalace_mtime  # noqa: E402
+from canaries import log_mempalace_canary as _log_mempalace_canary  # noqa: E402
+from canaries import postgres_memcg_status as _postgres_memcg_status  # noqa: E402
+from canaries import log_postgres_memcg_canary as _log_postgres_memcg_canary  # noqa: E402
 
 
 def _log_kg_writethrough_stages(env, logger) -> None:
@@ -2370,96 +2284,6 @@ def _db_errors_summary(window_s: float = 300.0) -> dict:
             if newest_ts > 0 else None
         ),
     }
-
-
-def _postgres_memcg_status(
-    container: str | None = None, timeout_s: float = 2.0
-) -> "dict | None":
-    """Read docker stats for the postgres container to surface memcg pressure.
-
-    Returns ``None`` when docker isn't reachable, the container isn't
-    running, or the call exceeds ``timeout_s`` — every failure mode is
-    non-fatal because /health must keep responding even when docker is
-    grumpy. The 2s timeout is the ceiling; in practice ``docker stats
-    --no-stream`` returns in ~50ms on a healthy daemon.
-
-    Today's two postgres OOM kills happened at 81% sustained usage with
-    a 3 GB cgroup limit. This canary lets operators see pressure
-    approaching the limit before the kill, not just react to it after.
-
-    Container is configurable via ``PALACE_POSTGRES_CONTAINER`` (default
-    ``mempalace-db``).
-    """
-    import subprocess
-    import time as _time
-    container = container or os.environ.get("PALACE_POSTGRES_CONTAINER", "mempalace-db")
-    try:
-        proc = subprocess.run(
-            ["docker", "stats", "--no-stream", "--format", "{{json .}}", container],
-            capture_output=True, text=True, timeout=timeout_s, check=True,
-        )
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError, OSError):
-        return None
-    try:
-        data = json.loads(proc.stdout.strip())
-        # MemUsage shape: "2.43GiB / 3GiB" — keep as-is for display;
-        # MemPerc shape: "81.00%" — strip the % and parse to float.
-        # Coerce-via-`or` defends against `null` values in the JSON
-        # (transient docker daemon state during container startup /
-        # shutdown can produce `{"MemPerc": null, "MemUsage": null}`),
-        # which `.rstrip` / `.partition` would otherwise blow up on.
-        usage = data.get("MemUsage") or ""
-        perc_raw = data.get("MemPerc") or "0%"
-        perc_str = perc_raw.rstrip("%") if isinstance(perc_raw, str) else "0"
-        percent = float(perc_str) / 100.0 if perc_str else 0.0
-        usage_str, _, limit_str = usage.partition(" / ") if isinstance(usage, str) else ("", "", "")
-        return {
-            "container": container,
-            "usage": usage_str.strip(),
-            "limit": limit_str.strip(),
-            "percent": round(percent, 4),
-            "probed_at": int(_time.time()),
-        }
-    except (json.JSONDecodeError, ValueError, KeyError, AttributeError, TypeError):
-        return None
-
-
-def _log_postgres_memcg_canary(logger, env=None) -> None:
-    """Startup canary: log postgres-memcg pressure with INFO/WARN by threshold.
-
-    Same pattern as ``_log_mempalace_canary`` — passive observability via
-    journalctl. INFO when usage is below the threshold (default 75%);
-    WARNING when above. Skipped silently when docker isn't reachable so
-    the daemon still starts cleanly on a non-docker host.
-
-    Threshold tunable via ``PALACE_POSTGRES_MEMCG_WARN_PERCENT`` (default
-    75.0 — i.e. warn at 75% of cgroup limit; the prod OOMs this morning
-    happened at 81% sustained, so 75% gives ~5-15min lead time at typical
-    growth rates).
-    """
-    env = env if env is not None else os.environ
-    try:
-        warn_pct = float(env.get("PALACE_POSTGRES_MEMCG_WARN_PERCENT") or "75")
-    except (TypeError, ValueError):
-        warn_pct = 75.0
-    # Thread the env's container override through to the probe — a caller
-    # passing env={"PALACE_POSTGRES_CONTAINER": "x"} expects "x" to be
-    # probed, not whatever os.environ holds.
-    container = env.get("PALACE_POSTGRES_CONTAINER")
-    status = _postgres_memcg_status(container=container)
-    if status is None:
-        logger.info("postgres memcg canary: probe failed (docker unreachable or container down) — skipping")
-        return
-    pct = status["percent"] * 100.0
-    msg = "postgres memcg canary: %s usage=%s limit=%s percent=%.1f%% (warn-threshold %.1f%%)"
-    args = (status["container"], status["usage"], status["limit"], pct, warn_pct)
-    if pct > warn_pct:
-        logger.warning(
-            msg + " — postgres container approaching OOM; consider raising the cgroup limit",
-            *args,
-        )
-    else:
-        logger.info(msg, *args)
 
 
 def _normalize_room_name(raw):
