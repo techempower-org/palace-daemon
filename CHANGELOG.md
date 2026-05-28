@@ -299,6 +299,21 @@ consumers were getting the wrong picture.
 
 ## [Unreleased]
 
+### Added — 2026-05-28 — *`scripts/deploy.sh` detects mempalace-db config drift (#122)*
+
+After #117 merged postgres tuning + a 6 GiB cgroup ceiling, the running container kept its old 3 GiB limit + 4 GB `shared_buffers` until manually applied. The deploy script reported "✓ deploy complete" all the while, masking the persistent OOM risk.
+
+`deploy.sh` now adds an optional step (fires when `mempalace-db/docker-compose.yml` exists) that:
+
+- Reads `mem_limit:` from `docker-compose.yml` and compares to the container's actual `HostConfig.Memory`. Mismatch → loud warning with the exact `docker update --memory=... mempalace-db` command (zero-downtime fix).
+- Compares the committed `postgresql.conf`'s `shared_buffers` + `effective_cache_size` against the running settings (`SHOW <name>`). Mismatch → warning with the recreate command for the next maintenance window.
+
+Both checks are observational — the script doesn't auto-recreate (per `mempalace-db/README.md`'s "schedule alongside a maintenance window" policy). The warnings make the drift visible so operators don't deploy code that depends on tuning that hasn't actually taken effect.
+
+This closes the gap that #117's deploy hit: postgres config files merged but unapplied, with continued OOMs invisible to the deploy script's smoke test.
+
+Closes [#122](https://github.com/techempower-org/palace-daemon/issues/122). The legacy-container detection question (#123) remains open for follow-up.
+
 ### Fixed — 2026-05-28 — *`scripts/deploy.sh` verifies deployed VERSION matches local main.py (#119)*
 
 Today's 1.9.0 deploy reported "✓ deploy complete" with the daemon still on `VERSION = 1.8.4`. Cause: Syncthing on familiar was idle, so the restart happened on stale code; the script's `/health` check only verified availability, not which code answered.
