@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Refactored — *#101 ninth slice: extract auth helpers to `auth.py`*
+
+Moved the four auth helpers (`_check_auth`, `_mint_viz_token`,
+`_valid_viz_token`, `_check_viz_auth`) plus the three /viz cookie
+constants (`_VIZ_COOKIE_NAME`, `PALACE_VIZ_SESSION_TTL_SECONDS`,
+`PALACE_VIZ_COOKIE_SECURE`) into a dedicated `auth.py`. main.py
+re-exports under the original `_`-prefixed names.
+
+One test edit: `tests/test_viz_session_auth.py::test_expired_token_rejected`
+patches the TTL constant to a negative value to verify expiry rejection.
+With the constant now living in `auth.py`, the test patches
+`auth.PALACE_VIZ_SESSION_TTL_SECONDS` instead of `main.*`. The other 15
+tests in the file work unchanged via the re-exports.
+
+main.py: 3600 → 3551 lines.
+
 ### Refactored — *#101 eighth slice: extract crash-loop detection to `crash_loop.py`*
 
 Moved the crash-loop detection (~60 lines: `_record_restart`,
