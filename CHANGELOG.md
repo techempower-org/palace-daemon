@@ -245,6 +245,14 @@ consumers were getting the wrong picture.
 
 ## [Unreleased]
 
+### Added — 2026-05-28 — *`scripts/rsync-palace-daemon.sh` — backup deploy for the daemon itself (#114)*
+
+Companion to `scripts/rsync-mempalace.sh` (#95). Today's 1.9.0 deploy exposed the gap: `scripts/deploy.sh` push + restart succeeded, but Syncthing on familiar was idle with a 6-day-old palace-daemon snapshot, so the daemon restarted on the old `VERSION = "1.8.4"` code. Manual `rsync -az --delete` from katana → familiar unblocked the deploy. This script automates that fallback path so the next Syncthing failure doesn't require ad-hoc shell.
+
+Mirrors `rsync-mempalace.sh`'s shape exactly: same `deploy.conf` env knobs, same step counter, same exclude list (plus `.claude/` for palace-daemon's local agent state). Auto-detects local dir via `git rev-parse --show-toplevel` so it works from any subdirectory.
+
+Closes [#114](https://github.com/techempower-org/palace-daemon/issues/114).
+
 ## 1.9.0 — 2026-05-28
 
 ### Release theme — *canonical predicate vocabulary collapse + the deploy/observability scaffolding around it*
