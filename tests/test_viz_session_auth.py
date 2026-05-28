@@ -24,6 +24,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import main  # noqa: E402
+import auth  # noqa: E402  — #101 ninth slice: TTL constant lives here
 from fastapi import HTTPException  # noqa: E402
 
 _KEY = "s3cret-key"
@@ -37,8 +38,9 @@ class TestVizToken(unittest.TestCase):
 
     def test_expired_token_rejected(self):
         with patch.dict(os.environ, {"PALACE_API_KEY": _KEY}):
-            # Mint with a TTL in the past.
-            with patch.object(main, "PALACE_VIZ_SESSION_TTL_SECONDS", -10):
+            # Mint with a TTL in the past. Patches auth.PALACE_VIZ_SESSION_TTL_SECONDS
+            # because that's where the constant lives now (#101 ninth slice).
+            with patch.object(auth, "PALACE_VIZ_SESSION_TTL_SECONDS", -10):
                 tok = main._mint_viz_token()
             self.assertFalse(main._valid_viz_token(tok))
 

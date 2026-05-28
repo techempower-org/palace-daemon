@@ -393,72 +393,23 @@ _MINE_VALID_MODES = {"convos", "projects", "session"}
 _MINE_VALID_EXTRACTS = {"exchange", "general"}
 
 
-def _check_auth(x_api_key: str | None):
-    key = os.getenv("PALACE_API_KEY", "")
-    if not key:
-        return
-    # hmac.compare_digest requires both arguments to be the same type and
-    # non-None. Treat a missing header as an empty string so we always run
-    # the constant-time path — short-circuiting on ``x_api_key is None``
-    # would reintroduce a timing distinction between "no header" and
-    # "wrong header".
-    provided = x_api_key or ""
-    if not hmac.compare_digest(provided, key):
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
-
-# ── /viz session cookie ───────────────────────────────────────────────────────
-# /viz is bookmarkable without putting the long-lived API key in the URL (where
-# it would leak into history, proxy logs, and referer headers). The page POSTs
-# the key once to /viz/session and receives a short-lived, HttpOnly, SameSite
-# cookie. The cookie token is HMAC-signed with PALACE_API_KEY itself, so no new
-# secret or server-side session store is needed; it carries only an expiry.
-_VIZ_COOKIE_NAME = "palace_viz_session"
-PALACE_VIZ_SESSION_TTL_SECONDS = int(os.getenv("PALACE_VIZ_SESSION_TTL_SECONDS", "28800"))  # 8h
-# Set when the daemon is reached over https (e.g. behind a TLS reverse proxy) so
-# the cookie carries the Secure attribute. Default off to not break local http.
-PALACE_VIZ_COOKIE_SECURE = os.getenv("PALACE_VIZ_COOKIE_SECURE", "").lower() in ("1", "true", "yes")
-
-
-def _mint_viz_token() -> str:
-    """Sign ``<expiry>.<hex_hmac>`` with PALACE_API_KEY. Caller guarantees the key is set."""
-    key = os.getenv("PALACE_API_KEY", "").encode()
-    exp = str(int(_time.time()) + PALACE_VIZ_SESSION_TTL_SECONDS)
-    sig = hmac.new(key, exp.encode(), hashlib.sha256).hexdigest()
-    return f"{exp}.{sig}"
-
-
-def _valid_viz_token(token: str | None) -> bool:
-    """True iff the token is well-formed, unexpired, and the HMAC verifies."""
-    key = os.getenv("PALACE_API_KEY", "")
-    if not key or not token or "." not in token:
-        return False
-    exp, _, sig = token.partition(".")
-    try:
-        if int(exp) < int(_time.time()):
-            return False
-    except ValueError:
-        return False
-    expected = hmac.new(key.encode(), exp.encode(), hashlib.sha256).hexdigest()
-    return hmac.compare_digest(sig, expected)
-
-
-def _check_viz_auth(x_api_key: str | None, session: str | None) -> None:
-    """Auth for the read-only /viz surface: accept the X-Api-Key header OR a
-    valid signed viz session cookie. No-op when PALACE_API_KEY is unset.
-
-    Only used by GET endpoints the dashboard reads (/viz, /graph,
-    /backfill-age/status). Write endpoints stay header-only so the cookie can
-    never be replayed cross-site against a state-changing route (SameSite=Lax
-    plus header-only writes = no CSRF surface)."""
-    key = os.getenv("PALACE_API_KEY", "")
-    if not key:
-        return
-    if x_api_key and hmac.compare_digest(x_api_key, key):
-        return
-    if _valid_viz_token(session):
-        return
-    raise HTTPException(status_code=401, detail="Invalid API key")
+# ── Auth helpers (#101 ninth slice) ────────────────────────────────────────
+# Strict header check + /viz session cookie helpers live in auth.py now.
+# main.py keeps the `_`-prefixed names alive via re-export so the route
+# handlers, lifespan, and existing tests keep working unchanged.
+#
+# The PALACE_VIZ_SESSION_TTL_SECONDS / PALACE_VIZ_COOKIE_SECURE constants
+# live in auth.py too — the one test that patches the TTL was updated to
+# patch `auth.PALACE_VIZ_SESSION_TTL_SECONDS` rather than `main.*`.
+from auth import (  # noqa: E402
+    PALACE_VIZ_COOKIE_SECURE,
+    PALACE_VIZ_SESSION_TTL_SECONDS,
+    VIZ_COOKIE_NAME as _VIZ_COOKIE_NAME,
+    check_auth as _check_auth,
+    check_viz_auth as _check_viz_auth,
+    mint_viz_token as _mint_viz_token,
+    valid_viz_token as _valid_viz_token,
+)
 
 
 # Sentinel for "no value passed" — distinguishes _parse_path_map() (read env)
