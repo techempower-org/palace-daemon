@@ -1,8 +1,10 @@
 """Tests for the canonical migration plan + apply guards (#72a).
 
 `build_plan` is pure given a mapper — tested with a deterministic fake mapper
-(no model load). The `_apply` guards are tested to confirm the migration
-REFUSES to mutate without a DSN and an explicit backup acknowledgement.
+(no model load). `_apply`'s guards (DSN, backup ack) are tested to confirm the
+migration REFUSES to mutate without both. The execution path itself is exercised
+with a mocked psycopg connection so we verify the SQL string and COPY contents
+without needing a real AGE database.
 
 Run with::
 
@@ -13,6 +15,7 @@ import argparse
 import importlib.util
 import os
 import unittest
+from unittest.mock import MagicMock, patch
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
@@ -109,12 +112,56 @@ class TestApplyGuards(unittest.TestCase):
                        self._args(dsn="postgresql://x", i_have_a_backup=False))
         self.assertIn("backup", str(cm.exception).lower())
 
-    def test_apply_with_backup_still_not_auto_executed(self):
-        # even fully acknowledged, this PR's apply path is intentionally inert
-        with self.assertRaises(SystemExit) as cm:
-            mig._apply({"remaps": []},
+    def test_apply_with_empty_remaps_returns_quietly(self):
+        # Both gates satisfied + nothing to do → no connection attempt, no SystemExit.
+        # (Real psycopg.connect would fail on the fake DSN; this confirms we don't reach it.)
+        with patch.object(mig, "_apply", wraps=mig._apply):
+            mig._apply({"remaps": [], "edges_would_change": 0,
+                        "edges_unchanged": 0, "dropped_edges": 0},
                        self._args(dsn="postgresql://x", i_have_a_backup=True))
-        self.assertIn("not auto-executed", str(cm.exception).lower())
+
+    def test_apply_executes_set_based_update_via_psycopg(self):
+        # Guarded apply with rules → COPY + single UPDATE on the AGE backing table.
+        # We mock psycopg entirely; the test asserts the SQL shape and the COPY rows.
+        plan = {
+            "remaps": [{"raw": "is", "canonical": "is_a", "edges": 100},
+                       {"raw": "has", "canonical": "contains", "edges": 50}],
+            "edges_would_change": 150,
+            "edges_unchanged": 5,
+            "dropped_edges": 7,
+        }
+
+        fake_cur = MagicMock()
+        fake_cur.rowcount = 150
+        fake_cur.fetchone.return_value = (12,)  # remaining without raw_relation_type
+        # cur.copy(...) is a context manager that yields a writer with write_row.
+        fake_copy_writer = MagicMock()
+        fake_cur.copy.return_value.__enter__.return_value = fake_copy_writer
+
+        fake_conn = MagicMock()
+        fake_conn.cursor.return_value.__enter__.return_value = fake_cur
+
+        fake_psycopg = MagicMock()
+        fake_psycopg.connect.return_value.__enter__.return_value = fake_conn
+
+        with patch.dict("sys.modules", {"psycopg": fake_psycopg}):
+            mig._apply(plan, self._args(dsn="postgresql://x", i_have_a_backup=True))
+
+        # Both rules COPY'd in order
+        rows = [c.args for c in fake_copy_writer.write_row.call_args_list]
+        self.assertEqual(rows, [(("is", "is_a"),), (("has", "contains"),)])
+
+        # An UPDATE statement actually ran with the documented shape
+        sql_statements = [str(c.args[0]) for c in fake_cur.execute.call_args_list]
+        update_sql = next((s for s in sql_statements if "UPDATE" in s and "RELATION" in s), "")
+        self.assertIn('mempalace_kg."RELATION"', update_sql)
+        self.assertIn("raw_relation_type", update_sql)
+        self.assertIn("ag_catalog.agtype", update_sql)  # fully-qualified cast
+        self.assertIn("predicate_mapping", update_sql)  # joins the TEMP mapping
+        self.assertIn("?", update_sql)  # the IS NULL-equivalent jsonb membership check
+
+        # Commit happened (set-based UPDATE in a single transaction)
+        fake_conn.commit.assert_called()
 
 
 class TestLoadVocabErrors(unittest.TestCase):
