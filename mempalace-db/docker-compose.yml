@@ -1,0 +1,54 @@
+services:
+  mempalace-db:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mempalace-db:0.1
+    container_name: mempalace-db
+    restart: unless-stopped
+    # cgroup memory ceiling.
+    #
+    # Pre-2026-05-28: 3g — caused repeated postgres OOM-kills (familiar.realm.watch#50,
+    # palace-daemon#102). Three problems compounded: (1) shared_buffers=4g was larger
+    # than the cgroup itself, so postgres could never page in its declared shared region;
+    # (2) per-backend RSS (~240 MiB × 10 idle connections) consumed ~2.4 GiB on its own;
+    # (3) AGE traversal + writethrough peaks pushed total demand past the ceiling under
+    # any concurrent load.
+    #
+    # 6g math: shared_buffers (2g, see postgresql.conf) + wal_buffers (64 MB) + per-backend
+    # work (~50 MB × ~10 active connections = 0.5 GiB) + maintenance_work_mem headroom
+    # (512 MB) + AGE/sort temporary buffers ≈ 4-4.5 GiB working set with ~25% headroom.
+    #
+    # Going to 8g would be safer but leaves <7 GiB on the 15 GiB familiar host for
+    # llama-server (3.1 GiB), palace-daemon (~1 GiB), familiar-api, kg-extract worker,
+    # and the OS — too tight. Revisit if host RAM grows or shared_buffers is raised again.
+    mem_limit: 6g
+    memswap_limit: 6g
+    ports:
+      # Bind on 0.0.0.0:5433 to allow palace-daemon (host network) and dev clients
+      # on the LAN. mempalace_test on a separate host port for CI fixtures.
+      - "5433:5432"
+    volumes:
+      # Postgres data dir on familiar's local SSD (post-migration from disks 2026-05-24).
+      # Do NOT NFS/Samba-mount this — postgres data corruption guaranteed.
+      - /var/lib/mempalace-db:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      # Tuned postgresql.conf overlay (mounted onto the default config inside the
+      # container). Values chosen to keep the working set inside the 6g cgroup.
+      - ./postgresql.conf:/etc/postgresql/postgresql.conf:ro
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=age
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+    environment:
+      POSTGRES_PASSWORD: ${MEMPALACE_DB_PASSWORD}
+      POSTGRES_USER: palace
+      POSTGRES_DB: mempalace_2026_05_13
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U palace -d mempalace_2026_05_13"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3

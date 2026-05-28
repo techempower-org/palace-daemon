@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — *raise mempalace-db cgroup memory limit, codify the container's config (#102, familiar.realm.watch#50)*
+
+The `mempalace-db` postgres container was running with a 3 GiB cgroup
+memory limit while postgres itself was configured with `shared_buffers=4GB`
+— mathematically impossible. Postgres OOMed 5+ times in one hour on
+2026-05-28 under writethrough load; kernel logs show `shmem-rss` climbing
+to 1854 MiB inside the cgroup before each kill.
+
+Three problems compounded:
+
+1. **shared_buffers (4 GiB) > cgroup ceiling (3 GiB).** Postgres maps
+   shared_buffers as shmem and can never page in its full declared region.
+2. **Per-backend RSS at ~240 MiB × 10 idle connections = ~2.4 GiB** sat on
+   top of any shared region postgres did manage to allocate.
+3. **AGE traversal + writethrough peaks** pushed total demand past the
+   ceiling under any concurrent load — and the kg_triple_worker holding
+   8 long-lived connections via `--db-pool-size=8` keeps this load
+   present whenever extraction is running.
+
+The container had no compose file or systemd unit in this repo — it was
+started ad-hoc via `docker run` during the 2026-05-24 disks → familiar
+migration, so the cgroup limit lived only in the running container's
+state and couldn't be reviewed or version-controlled.
+
+This PR adds `mempalace-db/` as a first-class directory in the repo:
+
+- `Dockerfile` + `init.sql` (verbatim from the previously-undocumented
+  `/opt/mempalace-db/` on familiar)
+- `docker-compose.yml` with `mem_limit: 6g` + `memswap_limit: 6g`, the
+  data bind mount on familiar's local SSD, and a healthcheck
+- `postgresql.conf` overlay sized for the 6 GiB cgroup:
+  `shared_buffers` 4 GB → 2 GB and `effective_cache_size` 12 GB → 6 GB
+  (the planner was being told to assume a 12 GiB page cache that the
+  15 GiB familiar host could never provide alongside llama-server and
+  the rest of the stack)
+- `README.md` documenting the zero-downtime `docker update --memory=6g`
+  one-liner for live application, and the maintenance-window sequence
+  for the postgresql.conf changes (which require a restart)
+
+The 6 GiB ceiling is chosen against familiar's 15 GiB host total: leaves
+~7 GiB for llama-server (3.1 GiB RSS for Phi-4-mini), palace-daemon
+(~1 GiB), familiar-api, mempalace-kg-extract, and the OS. Going to 8 GiB
+would be safer for postgres but starves the rest of the stack — revisit
+if host RAM grows or shared_buffers is raised again.
+
+JP applies the change (zero-downtime memory bump first, postgres restart
+for the conf changes scheduled into a maintenance window). The PR does
+not touch the live container.
+
+Closes [#102](https://github.com/techempower-org/palace-daemon/issues/102).
+Pairs with [techempower-org/familiar.realm.watch#50](https://github.com/techempower-org/familiar.realm.watch/issues/50).
+
 ## 1.8.4 — 2026-05-27
 
 ### Fixed — *watchdog no longer starves the systemd keepalive during a rebuild*
