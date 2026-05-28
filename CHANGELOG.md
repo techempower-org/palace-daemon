@@ -343,6 +343,19 @@ consumers were getting the wrong picture.
 
 ## [Unreleased]
 
+### Refactored — 2026-05-28 — *extract direct-SQL KG/wings readers to `kg_reader.py` (seventh slice of #101)*
+
+Seventh slice of the main.py refactor. The read-only direct-SQL helpers behind `/graph` and the `/mcp` `mempalace_kg_stats` fast-intercept — `_kg_path`, `_chroma_path`, `_read_wings_rooms_postgres`, `_read_wings_rooms_direct`, `_read_kg_postgres`, `_read_kg_postgres_stats`, `_read_kg_stats_direct`, `_read_kg_direct` — are now in `kg_reader.py`. **~435 lines extracted; main.py drops from 3955 to 3520.**
+
+- `kg_reader.py` (505 LOC) exports `kg_path()`, `chroma_path()`, `read_wings_rooms_postgres()`, `read_wings_rooms_direct()`, `read_kg_postgres()`, `read_kg_postgres_stats()`, `read_kg_stats_direct()`, `read_kg_direct()`, plus a private `_config()` accessor that lazy-imports `mempalace.mcp_server` to avoid the load-time cycle (same trick `postgres.py` uses for `db_errors`).
+- `main.py` re-exports under the `_`-prefixed names so existing call sites + tests that `main._read_kg_*` / `main._kg_path` / `main._chroma_path` keep working.
+- `tests/test_graph_wings_dispatch.py` updated: 13 patch sites rewritten from `patch.object(main, "_mp")` + `patch.object(main, "_read_*")` to `patch.object(kg_reader, "_config", return_value=_Cfg(...))` + `patch.object(kg_reader, "read_*", …)`. Required because the intra-module dispatchers (`read_wings_rooms_direct` → `read_wings_rooms_postgres`, `read_kg_direct` → `read_kg_postgres`, `read_kg_stats_direct` → `read_kg_postgres_stats`) call their helpers via `kg_reader`'s namespace, bypassing main's re-exports — same dynamic the postgres slice (4th) hit.
+- `tests/test_mcp_fast_intercept.py` and `tests/test_backfill_unprocessed.py` unchanged — the fast-intercept tests patch `main._read_kg_postgres_stats` which is consumed by `_fast_mcp_kg_stats_payload` (in the freshly-extracted `fast_intercept.py` per slice 6, which lazy-imports back into main), and the backfill test exercises `_backfill_unprocessed_breakdown` (deliberately kept in main.py, different concern — backfill state, not KG-read).
+- Issue #130 filed for a dead `total_sources = 0` assignment in `_fast_mcp_mined`, spotted while surveying the daemon-tools cluster pre-pivot — out of scope for this slice per "file issues, don't fix in refactor PRs".
+- 495 tests pass / 1 skipped — same baseline as the prior slices. No regressions.
+
+Cumulative #101 progress: ~1350 lines extracted from main.py across seven slices (bench_lock.py, canaries.py, db_errors.py, postgres.py, daemon_tools.py, fast_intercept.py, kg_reader.py). main.py at 3520 lines — closing in on the issue's 2000-line target. Largest remaining cohesive clusters: `/backfill-age` route + helpers (~250 LOC), `/repair` route (~160 LOC), `_call` retry-on-HNSW dispatch (~100 LOC), auth/viz-session helpers (~70 LOC).
+
 ### Refactored — 2026-05-28 — *extract postgres helpers to `postgres.py` (fourth slice of #101)*
 
 Fourth slice of the main.py refactor. The postgres-connection helpers (`_DaemonToolError`, `_RPC_*` codes, `_postgres_dsn`, `_require_postgres`, `_connect_postgres`) — used by every daemon-native MCP tool — are now in `postgres.py`. ~95 lines extracted.
