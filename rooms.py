@@ -82,6 +82,11 @@ def canonical_rooms() -> set[str]:
             _canonical_rooms_cache = {r[0] for r in rows}
         else:
             _canonical_rooms_cache = DEFAULTS
-    except Exception:
+    except Exception as e:
+        # Schema drift / postgres unavailable — fall back to spec defaults.
+        # Log so the underlying issue surfaces (lesson from #157: silent
+        # except: pass hides bugs for weeks).
+        import logging
+        logging.warning("canonical_rooms: lookup failed, falling back to spec defaults: %s", e)
         _canonical_rooms_cache = DEFAULTS
     return _canonical_rooms_cache

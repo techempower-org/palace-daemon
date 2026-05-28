@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Fixed — *log silent exception swallowers in kg_reader + rooms*
+
+Applies the lesson from #157 across the codebase: `try/except: pass`-style
+swallowers in data-query paths now `logging.warning` the swallowed
+exception. Same recovery behavior (empty/default fallback), but the
+underlying failure is now visible in `journalctl` rather than disappearing.
+
+Sites updated (kg_reader.py + rooms.py):
+
+- `read_wings_rooms_postgres` — wing/room count fallback
+- `read_kg_postgres` — KnowledgeGraphAGE init, Entity / RELATION / MENTIONS
+  Cypher queries (3 separate swallowers)
+- `read_kg_postgres_stats` — backing-table count fallback
+- `rooms.canonical_rooms` — postgres lookup fallback
+
+Discovered while validating #158: the `/graph` endpoint's `kg_triples`
+and `kg_mentions` arrays have been silently returning `[]` even though
+`kg_stats` reports 1.86M triples + 6.4M mentions exist. The underlying
+cause (postgres shared-memory exhaustion on unbounded AGE Cypher walks)
+is a separate scaling problem filed as a follow-up — but the logging
+fix means future similar regressions will be visible immediately.
+
+Safe-cleanup swallowers (e.g. `kg.close()` in `finally`) left alone —
+those are correct as-is.
+
 ### Fixed — *#157: fix `/search/age-fused` AGE Cypher syntax that returned n_graph=0*
 
 While validating #150's hydration fix, found that the graph half of
