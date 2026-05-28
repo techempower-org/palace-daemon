@@ -2173,117 +2173,17 @@ def _connect_postgres(connect_timeout: int = 3):
         )
 
 
-# ── DB-error observability (#97) ──────────────────────────────────────────────
-# Today's morning OOM cluster (postgres killed twice inside its docker memcg
-# at 08:57 + 09:19) surfaced 26+ `OperationalError: connection is closed`
-# events that were invisible to /health — the daemon process stayed up the
-# whole time, but in-flight queries returned errors. Same silent-failure-
-# under-healthy-surface shape #92 was filed to close, just for the postgres
-# dependency. Three hooks land here so the next time it happens the operator
-# sees it in /health, in journal, and in the startup canary line.
-
-import collections as _collections
-import threading as _threading
-
-# Bounded ring buffer of recent (timestamp, pattern, preview) tuples. 1000
-# entries × ~100 bytes = ~100 KB ceiling; the 5-minute window we summarize
-# over is usually <100 entries even during a postgres flap.
-_DB_ERROR_LOG: "_collections.deque[tuple[float, str, str]]" = _collections.deque(maxlen=1000)
-# Lock guarding both append and iteration. deque.append is thread-safe in
-# CPython, but iterating (e.g. ``list(deque)``) under concurrent mutation
-# can produce duplicated or skipped entries; the lock gives us a clean
-# snapshot for /health responses. Cost is negligible — observability code
-# runs at most a few hundred times per /health probe.
-_DB_ERROR_LOG_LOCK = _threading.Lock()
-
-
-def _classify_db_error(exc: BaseException) -> str:
-    """Bucket a psycopg2/psycopg OperationalError by its surface message.
-
-    Categories match what the journal grep cataloged on 2026-05-28 plus
-    a catch-all so the bucket vocabulary stays bounded:
-
-      * ``in_recovery``       — server in recovery mode (post-OOM restart)
-      * ``connection_closed`` — the connection is closed (post-mortem)
-      * ``server_closed``     — server closed connection unexpectedly
-      * ``connection_lost``   — connection lost mid-query
-      * ``connect_failed``    — initial connect could not reach server
-      * ``timeout``           — statement_timeout fired
-      * ``other``             — anything not above
-    """
-    msg = str(exc).lower()
-    if "in recovery mode" in msg:
-        return "in_recovery"
-    if "consuming input failed" in msg or "server closed the connection" in msg:
-        return "server_closed"
-    if "connection is lost" in msg or "connection lost" in msg:
-        return "connection_lost"
-    if "connection is closed" in msg:
-        return "connection_closed"
-    if (
-        "connection failed" in msg
-        or "could not connect" in msg
-        or "connection refused" in msg
-    ):
-        return "connect_failed"
-    if "statement timeout" in msg or "canceling statement" in msg:
-        return "timeout"
-    return "other"
-
-
-def _record_db_error(exc: BaseException) -> None:
-    """Append a classified DB error to the ring buffer with a preview.
-
-    Lock-guarded against concurrent ``_db_errors_summary`` iteration so
-    snapshots stay consistent under load. Preview is truncated to 200
-    chars so a runaway error message can't bloat the ring buffer beyond
-    its rough memory ceiling.
-    """
-    import time as _time
-    pattern = _classify_db_error(exc)
-    preview = str(exc)[:200]
-    with _DB_ERROR_LOG_LOCK:
-        _DB_ERROR_LOG.append((_time.time(), pattern, preview))
-
-
-def _db_errors_summary(window_s: float = 300.0) -> dict:
-    """Aggregate the ring buffer over the last ``window_s`` seconds.
-
-    Returns counts overall and per-pattern, plus the timestamp of the
-    newest error. Lock-guarded snapshot so concurrent ``_record_db_error``
-    appends from executor threads can't yield skipped/duplicated entries.
-    """
-    import time as _time
-    cutoff = _time.time() - window_s
-    by_pattern: dict[str, int] = {}
-    total = 0
-    newest_ts = 0.0
-    # Acquire the lock just long enough to snapshot — iteration over the
-    # snapshot then happens lock-free, so /health probing won't block
-    # concurrent error recording.
-    with _DB_ERROR_LOG_LOCK:
-        snapshot = list(_DB_ERROR_LOG)
-    for ts, pattern, _preview in snapshot:
-        if ts < cutoff:
-            continue
-        total += 1
-        by_pattern[pattern] = by_pattern.get(pattern, 0) + 1
-        if ts > newest_ts:
-            newest_ts = ts
-    import datetime as _dt
-    return {
-        "total_last_window": total,
-        "window_seconds": int(window_s),
-        "by_pattern": by_pattern,
-        # tz-aware UTC iso — naive local-time strings confuse consumers
-        # running in other timezones (especially monitoring tools that
-        # diff against UTC `now`).
-        "newest_ts": (
-            _dt.datetime.fromtimestamp(newest_ts, tz=_dt.timezone.utc)
-                .isoformat(timespec="seconds")
-            if newest_ts > 0 else None
-        ),
-    }
+# DB-error observability (#97) — extracted to db_errors.py per #101 refactor.
+# main.py re-exports the `_`-prefixed names so existing call sites + tests
+# that patch `main._record_db_error` / mutate `main._DB_ERROR_LOG` keep
+# working unchanged. The deque + lock are module-level objects shared by
+# reference across both namespaces; mutations through either reach the
+# same underlying state.
+from db_errors import DB_ERROR_LOG as _DB_ERROR_LOG  # noqa: E402
+from db_errors import DB_ERROR_LOG_LOCK as _DB_ERROR_LOG_LOCK  # noqa: E402
+from db_errors import classify_db_error as _classify_db_error  # noqa: E402
+from db_errors import record_db_error as _record_db_error  # noqa: E402
+from db_errors import db_errors_summary as _db_errors_summary  # noqa: E402
 
 
 def _normalize_room_name(raw):
