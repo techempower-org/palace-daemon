@@ -1,16 +1,24 @@
-"""Tests for the deployed-mempalace canary log line (issue #92).
+"""Tests for the deployed-mempalace canary log line (issues #92, #116).
 
 The daemon's `_log_mempalace_canary` helper reports the mtime + age of
-the deployed mempalace package at every restart so silent-deploy-drift
-becomes visible in journalctl. The 2026-05-28 Syncthing outage made
-that drift invisible for ~1.5 hours; this helper closes the gap.
+the newest .py file in the deployed mempalace package at every restart
+so silent-deploy-drift becomes visible in journalctl. The 2026-05-28
+Syncthing outage made that drift invisible for ~1.5 hours; this helper
+closes the gap.
+
+#116 update: previously the canary used mempalace/__init__.py, but that
+stable file produced false-positive WARNs on releases that touched
+other modules but not __init__.py. The helper now walks the package
+directory via `_newest_mempalace_mtime()` and reports whole-tree
+freshness.
 
 These tests verify:
   * fresh canary (age < threshold) logs INFO
   * stale canary (age > threshold) logs WARNING
   * env-tunable threshold via PALACE_CANARY_WARN_HOURS
-  * probe failure (missing __file__ / unreadable file) doesn't crash
+  * probe failure (missing package / empty walk) doesn't crash
   * non-numeric / blank threshold falls back to the 24h default
+  * the newest file's basename is in the log message
 
 Run with::
 
@@ -19,7 +27,6 @@ Run with::
 """
 from __future__ import annotations
 
-import logging
 import os
 import sys
 import time
@@ -37,34 +44,30 @@ import main  # noqa: E402
 class TestMempalaceCanary(unittest.TestCase):
     """The helper logs INFO when fresh, WARNING when stale, never crashes."""
 
-    def _fake_mempalace(self, mtime_offset_secs: float, file_path="/fake/mempalace/__init__.py"):
-        """Build a fake mempalace module and a mocked os.path.getmtime."""
-        fake_pkg = MagicMock()
-        fake_pkg.__file__ = file_path
-        fake_mtime = time.time() + mtime_offset_secs  # negative for "in the past"
-        return fake_pkg, fake_mtime
+    def _patch_newest(self, mtime_offset_secs: float, filename: str = "searcher.py"):
+        """Patch `_newest_mempalace_mtime` to return a controlled (mtime, path)."""
+        mtime = time.time() + mtime_offset_secs
+        return patch.object(
+            main, "_newest_mempalace_mtime",
+            return_value=(mtime, f"/fake/mempalace/{filename}"),
+        )
 
     def test_fresh_canary_logs_info(self):
         """Just-deployed mempalace (age ~0s) → INFO, no WARNING."""
         logger = MagicMock()
-        fake_pkg, fake_mtime = self._fake_mempalace(mtime_offset_secs=-60)  # 1 min old
-        with patch.dict(sys.modules, {"mempalace": fake_pkg}), \
-             patch("os.path.getmtime", return_value=fake_mtime):
+        with self._patch_newest(-60):  # 1 min old
             main._log_mempalace_canary(logger, env={})
         logger.info.assert_called_once()
         logger.warning.assert_not_called()
         msg = logger.info.call_args.args[0] % logger.info.call_args.args[1:]
         self.assertIn("mempalace canary", msg)
-        self.assertIn("/fake/mempalace/__init__.py", msg)
-        self.assertIn("1m", msg)  # age 1m
+        self.assertIn("searcher.py", msg)
+        self.assertIn("1m", msg)
 
     def test_stale_canary_logs_warning(self):
         """Two-day-old mempalace (default threshold 24h) → WARNING."""
         logger = MagicMock()
-        # 2 days old
-        fake_pkg, fake_mtime = self._fake_mempalace(mtime_offset_secs=-2 * 86400)
-        with patch.dict(sys.modules, {"mempalace": fake_pkg}), \
-             patch("os.path.getmtime", return_value=fake_mtime):
+        with self._patch_newest(-2 * 86400):
             main._log_mempalace_canary(logger, env={})
         logger.warning.assert_called_once()
         logger.info.assert_not_called()
@@ -76,63 +79,36 @@ class TestMempalaceCanary(unittest.TestCase):
     def test_custom_threshold_via_env(self):
         """PALACE_CANARY_WARN_HOURS overrides the 24h default."""
         logger = MagicMock()
-        # 3 hours old; default 24h would log INFO, but with threshold 1h → WARNING
-        fake_pkg, fake_mtime = self._fake_mempalace(mtime_offset_secs=-3 * 3600)
-        with patch.dict(sys.modules, {"mempalace": fake_pkg}), \
-             patch("os.path.getmtime", return_value=fake_mtime):
+        with self._patch_newest(-3 * 3600):
             main._log_mempalace_canary(logger, env={"PALACE_CANARY_WARN_HOURS": "1"})
         logger.warning.assert_called_once()
         logger.info.assert_not_called()
 
     def test_age_at_threshold_logs_info_not_warning(self):
-        """Exactly at threshold (24h) — strict > comparison, so logs INFO."""
+        """Just under threshold (24h) — strict > comparison, so logs INFO."""
         logger = MagicMock()
-        # Just under 24h (e.g., 23h59m)
-        fake_pkg, fake_mtime = self._fake_mempalace(mtime_offset_secs=-23.99 * 3600)
-        with patch.dict(sys.modules, {"mempalace": fake_pkg}), \
-             patch("os.path.getmtime", return_value=fake_mtime):
+        with self._patch_newest(-23.99 * 3600):
             main._log_mempalace_canary(logger, env={})
         logger.info.assert_called_once()
         logger.warning.assert_not_called()
 
     def test_non_numeric_threshold_falls_back_to_default(self):
-        """A garbage env value reverts to 24h, doesn't crash."""
         logger = MagicMock()
-        fake_pkg, fake_mtime = self._fake_mempalace(mtime_offset_secs=-3600)  # 1h
-        with patch.dict(sys.modules, {"mempalace": fake_pkg}), \
-             patch("os.path.getmtime", return_value=fake_mtime):
+        with self._patch_newest(-3600):
             main._log_mempalace_canary(logger, env={"PALACE_CANARY_WARN_HOURS": "not-a-number"})
-        # 1h is well under default 24h → INFO
         logger.info.assert_called_once()
         logger.warning.assert_not_called()
 
     def test_blank_threshold_falls_back_to_default(self):
-        """Empty string treated as unset — uses 24h."""
         logger = MagicMock()
-        fake_pkg, fake_mtime = self._fake_mempalace(mtime_offset_secs=-3600)
-        with patch.dict(sys.modules, {"mempalace": fake_pkg}), \
-             patch("os.path.getmtime", return_value=fake_mtime):
+        with self._patch_newest(-3600):
             main._log_mempalace_canary(logger, env={"PALACE_CANARY_WARN_HOURS": ""})
         logger.info.assert_called_once()
 
-    def test_missing_dunder_file_logs_skip(self):
-        """If mempalace.__file__ is None, log skip — don't crash."""
+    def test_probe_returns_none_logs_skip(self):
+        """If _newest_mempalace_mtime returns None, log skip — don't crash."""
         logger = MagicMock()
-        fake_pkg = MagicMock()
-        fake_pkg.__file__ = None
-        with patch.dict(sys.modules, {"mempalace": fake_pkg}):
-            main._log_mempalace_canary(logger, env={})
-        logger.info.assert_called_once()
-        msg = logger.info.call_args.args[0]
-        self.assertIn("no __file__", msg)
-        logger.warning.assert_not_called()
-
-    def test_getmtime_failure_logs_skip(self):
-        """If stat fails (file gone between import and stat), log skip — don't crash."""
-        logger = MagicMock()
-        fake_pkg, _ = self._fake_mempalace(mtime_offset_secs=0)
-        with patch.dict(sys.modules, {"mempalace": fake_pkg}), \
-             patch("os.path.getmtime", side_effect=FileNotFoundError("gone")):
+        with patch.object(main, "_newest_mempalace_mtime", return_value=None):
             main._log_mempalace_canary(logger, env={})
         logger.info.assert_called_once()
         msg = logger.info.call_args.args[0]
@@ -140,24 +116,100 @@ class TestMempalaceCanary(unittest.TestCase):
         logger.warning.assert_not_called()
 
     def test_age_seconds_renders_minutes(self):
-        """Sub-hour age renders as Nm (minutes)."""
         logger = MagicMock()
-        fake_pkg, fake_mtime = self._fake_mempalace(mtime_offset_secs=-90)  # 1.5min → 1m
-        with patch.dict(sys.modules, {"mempalace": fake_pkg}), \
-             patch("os.path.getmtime", return_value=fake_mtime):
+        with self._patch_newest(-90):
             main._log_mempalace_canary(logger, env={})
         msg = logger.info.call_args.args[0] % logger.info.call_args.args[1:]
         self.assertIn("age 1m", msg)
 
     def test_age_hours_renders_hours(self):
-        """Sub-day age renders as N.Nh (hours)."""
         logger = MagicMock()
-        fake_pkg, fake_mtime = self._fake_mempalace(mtime_offset_secs=-5 * 3600)  # 5h
-        with patch.dict(sys.modules, {"mempalace": fake_pkg}), \
-             patch("os.path.getmtime", return_value=fake_mtime):
+        with self._patch_newest(-5 * 3600):
             main._log_mempalace_canary(logger, env={})
         msg = logger.info.call_args.args[0] % logger.info.call_args.args[1:]
         self.assertIn("age 5.0h", msg)
+
+    def test_newest_file_basename_in_log(self):
+        """Log reports the newest file's basename so operator can confirm signal source."""
+        logger = MagicMock()
+        with self._patch_newest(-60, filename="cross_encoder_rerank.py"):
+            main._log_mempalace_canary(logger, env={})
+        msg = logger.info.call_args.args[0] % logger.info.call_args.args[1:]
+        self.assertIn("cross_encoder_rerank.py", msg)
+        # Should NOT report the directory prefix — just basename
+        self.assertNotIn("/fake/mempalace/cross", msg)
+
+
+class TestNewestMempalaceMtime(unittest.TestCase):
+    """`_newest_mempalace_mtime` walks the tree and picks the newest .py file."""
+
+    def test_returns_none_when_no_init_path(self):
+        fake_pkg = MagicMock()
+        fake_pkg.__file__ = None
+        with patch.dict(sys.modules, {"mempalace": fake_pkg}):
+            result = main._newest_mempalace_mtime()
+        self.assertIsNone(result)
+
+    def test_returns_none_when_no_py_files(self):
+        """Empty package dir or only non-.py files → None."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create some non-.py files
+            for name in ["README.md", "data.json"]:
+                with open(os.path.join(tmpdir, name), "w") as f:
+                    f.write("")
+            fake_pkg = MagicMock()
+            fake_pkg.__file__ = os.path.join(tmpdir, "__init__.py")  # doesn't exist
+            with patch.dict(sys.modules, {"mempalace": fake_pkg}):
+                result = main._newest_mempalace_mtime()
+        self.assertIsNone(result)
+
+    def test_picks_newest_py_in_tree(self):
+        """When several .py files exist with different mtimes, return the newest."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create three .py files with controlled mtimes
+            for name, age_secs in [
+                ("__init__.py", 1000),     # oldest
+                ("middle.py", 500),
+                ("newest.py", 10),         # most recent
+            ]:
+                path = os.path.join(tmpdir, name)
+                with open(path, "w") as f:
+                    f.write("")
+                ts = time.time() - age_secs
+                os.utime(path, (ts, ts))
+            fake_pkg = MagicMock()
+            fake_pkg.__file__ = os.path.join(tmpdir, "__init__.py")
+            with patch.dict(sys.modules, {"mempalace": fake_pkg}):
+                result = main._newest_mempalace_mtime()
+        self.assertIsNotNone(result)
+        mtime, path = result
+        self.assertTrue(path.endswith("newest.py"))
+
+    def test_walks_subdirectories(self):
+        """Newer .py file in a subdirectory wins over older top-level."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            init_path = os.path.join(tmpdir, "__init__.py")
+            with open(init_path, "w") as f:
+                f.write("")
+            os.utime(init_path, (time.time() - 1000, time.time() - 1000))
+
+            subdir = os.path.join(tmpdir, "sub")
+            os.makedirs(subdir)
+            new_file = os.path.join(subdir, "fresh.py")
+            with open(new_file, "w") as f:
+                f.write("")
+            # fresh.py is naturally newer (just created)
+
+            fake_pkg = MagicMock()
+            fake_pkg.__file__ = init_path
+            with patch.dict(sys.modules, {"mempalace": fake_pkg}):
+                result = main._newest_mempalace_mtime()
+        self.assertIsNotNone(result)
+        _, path = result
+        self.assertTrue(path.endswith("fresh.py"))
 
 
 if __name__ == "__main__":
