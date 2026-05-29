@@ -667,7 +667,14 @@ async def _do_silent_save_write(payload: dict) -> dict:
     Caller is expected to hold _write_sem. Returns mempalace's raw dict
     (typically {"success": True, "entry_id": ...} or {"success": False, "error": ...}).
     """
-    wing = payload.get("wing", "") or ""
+    raw_wing = payload.get("wing", "") or ""
+    # Normalize wing the same way /memory POST does so /silent-save's
+    # diary entries are reachable by the same wing filter post-#175.
+    # Pre-fix: hook sends wing="Palace_Daemon" → stored as "Palace_Daemon";
+    # /search?wing=Palace_Daemon normalizes to "palace_daemon" → misses.
+    # Empty wing stays empty — /silent-save's handler warns on empty
+    # rather than coercing to "unknown", so preserve that contract here.
+    wing = _normalize_wing_slug(raw_wing) if raw_wing else ""
     entry = payload.get("entry", "")
     topic = _canonical_topic(payload.get("topic", CHECKPOINT_TOPIC))
     agent_name = payload.get("agent_name", "session-hook")
