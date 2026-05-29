@@ -117,6 +117,71 @@ class SearchHybridBody(BaseModel):
         return v
 
 
+# /mine accepts these enum values (mirrors _MINE_VALID_MODES /
+# _MINE_VALID_EXTRACTS in main.py). Kept module-private here because
+# the pydantic validator needs them at parse time; main.py still owns
+# the canonical sets so `from main import _MINE_VALID_MODES` style
+# isn't necessary — these strings rarely change.
+_MINE_MODES = ("convos", "projects", "session")
+_MINE_EXTRACTS = ("exchange", "general")
+
+
+class MineBody(BaseModel):
+    """Body for POST /mine (kick off a mempalace mine subprocess).
+
+    Write-side wing semantics: default "general" (matching the pre-#178
+    inline behavior); empty input coerces to "general" then normalizes
+    via _normalize_wing_slug. Filesystem checks on ``dir`` (exists,
+    is_dir, no traversal) stay in the handler — pydantic can't probe
+    the filesystem at parse time, and we want consistent 400 messages
+    naming the offending path.
+    """
+
+    dir: str = Field(..., min_length=1, description="Absolute path to mine (required).")
+    wing: str = Field("general", description="Wing slug — normalized; empty → 'general'.")
+    mode: str = Field("convos", description="Mine mode.")
+    extract: "str | None" = Field(None, description="Optional extract policy.")
+    limit: "int | None" = Field(None, ge=1, description="Optional drawer-count cap.")
+
+    @field_validator("dir")
+    @classmethod
+    def _require_dir(cls, v):
+        if not isinstance(v, str):
+            # pydantic enforces string via type hint, but this guards
+            # against JSON null / number / object that would have crashed
+            # _translate_client_path earlier.
+            raise ValueError("'dir' must be a string")
+        if not v.strip():
+            raise ValueError("'dir' is required and must be non-empty")
+        return v
+
+    @field_validator("wing")
+    @classmethod
+    def _normalize_wing(cls, v):
+        from rooms import normalize_wing_slug
+        # Empty input defaults to "general" (pre-#178 contract), then
+        # normalized as a write-side wing.
+        if not v or not v.strip():
+            v = "general"
+        return normalize_wing_slug(v)
+
+    @field_validator("mode")
+    @classmethod
+    def _validate_mode(cls, v):
+        if v not in _MINE_MODES:
+            raise ValueError(f"'mode' must be one of: {', '.join(sorted(_MINE_MODES))}")
+        return v
+
+    @field_validator("extract")
+    @classmethod
+    def _validate_extract(cls, v):
+        if v is None:
+            return v
+        if v not in _MINE_EXTRACTS:
+            raise ValueError(f"'extract' must be one of: {', '.join(sorted(_MINE_EXTRACTS))}")
+        return v
+
+
 class SilentSaveBody(BaseModel):
     """Body for POST /silent-save (Stop-hook diary checkpoint write).
 
