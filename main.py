@@ -944,6 +944,13 @@ async def lifespan(app: FastAPI):
                     reason, path, wing,
                 )
                 return
+            # Normalize wing so the auto-mine subprocess writes drawers
+            # under the canonical slug — same as /memory POST and /mine
+            # do post-#177. PALACE_WATCH_DIRS env may contain mixed-case
+            # entries (`path=Palace_Daemon`); normalize defensively so
+            # those entries don't produce drawers that post-#175 reads
+            # can't find.
+            wing = _normalize_wing_slug(wing) if wing else wing
             mempalace_bin = os.path.join(os.path.dirname(sys.executable), "mempalace")
             argv = [mempalace_bin, "mine", path, "--mode", "projects", "--wing", wing]
             # Same pattern as /mine endpoint: list-form argv, no shell.
@@ -2793,7 +2800,12 @@ async def mine(request: Request, x_api_key: str | None = Header(default=None)):
     if not dir_path.is_dir():
         raise HTTPException(status_code=400, detail=f"Path is not a directory: {directory}")
 
-    wing = body.get("wing", "general")
+    # Normalize wing so /mine subprocess writes drawers under the same
+    # canonical slug /memory POST uses — and so post-#175 read endpoints
+    # can find them with the same wing filter. Pre-fix: /mine with
+    # wing="Palace_Daemon" stored drawers under "Palace_Daemon" but
+    # /search?wing=Palace_Daemon normalizes to "palace_daemon" → miss.
+    wing = _normalize_wing_slug(body.get("wing", "general") or "general")
     mode = body.get("mode", "convos")
     extract = body.get("extract")
     limit = body.get("limit")
@@ -2966,8 +2978,13 @@ async def backfill_age(request: Request, x_api_key: str | None = Header(default=
 
         body = await request.json() if request.headers.get("content-type") == "application/json" else {}
         cmd = [sys.executable, "-m", "mempalace.backfill_age", "--dsn", dsn]
-        if body.get("wing"):
-            cmd += ["--wing", body["wing"]]
+        # Normalize wing so the backfill filter matches drawers stored
+        # under the canonical wing slug. Pre-fix: backfill-age with
+        # wing="Palace_Daemon" looked for drawers with that literal value
+        # and found nothing (they're stored as "palace_daemon").
+        wing_filter = _rooms.normalize_wing_filter(body.get("wing"))
+        if wing_filter:
+            cmd += ["--wing", wing_filter]
         if body.get("skip_palace"):
             cmd.append("--skip-palace")
         if body.get("skip_entities"):
