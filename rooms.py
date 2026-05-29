@@ -90,3 +90,28 @@ def canonical_rooms() -> set[str]:
         logging.warning("canonical_rooms: lookup failed, falling back to spec defaults: %s", e)
         _canonical_rooms_cache = DEFAULTS
     return _canonical_rooms_cache
+
+
+def validate_room_or_raise(room):
+    """Raise HTTP 400 if ``room`` is set and not canonical.
+
+    Used by /search/hybrid and /search/age-fused for fast-feedback room
+    validation (vs an empty-result silent surprise from a typo). Shared
+    helper consolidates two near-identical inline blocks that had drifted
+    apart on error-message text.
+
+    Pass-through (no exception) when ``room`` is None or matches a
+    canonical room name.
+    """
+    if room is None:
+        return
+    if room in canonical_rooms():
+        return
+    from fastapi import HTTPException
+    raise HTTPException(
+        status_code=400,
+        detail={
+            "error": f"room {room!r} is not in the canonical set",
+            "valid_rooms": sorted(canonical_rooms()),
+        },
+    )

@@ -1396,12 +1396,7 @@ async def search_hybrid(request: Request, x_api_key: str | None = Header(default
             )
     if limit < 1 or limit > 100:
         raise HTTPException(status_code=400, detail="'limit' must be 1..100")
-    if room is not None and room not in _canonical_rooms():
-        raise HTTPException(
-            status_code=400,
-            detail={"error": f"room {room!r} is not canonical",
-                    "valid_rooms": sorted(_canonical_rooms())},
-        )
+    _rooms.validate_room_or_raise(room)
 
     args = {
         "query": query,
@@ -1461,14 +1456,7 @@ async def search_keyword(request: Request, x_api_key: str | None = Header(defaul
 
     # Validate room if provided so callers get fast feedback (vs an
     # empty-result silent surprise from a typo).
-    if room is not None and room not in _canonical_rooms():
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": f"room {room!r} is not in the canonical set",
-                "valid_rooms": sorted(_canonical_rooms()),
-            },
-        )
+    _rooms.validate_room_or_raise(room)
 
     dsn = os.environ.get("MEMPALACE_POSTGRES_DSN")
     if not dsn:
