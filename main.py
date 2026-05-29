@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import Cookie, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 # Hard fail if hnswlib isn't importable. ChromaDB has no error path for
@@ -59,6 +59,13 @@ from mempalace.backends.chroma import quarantine_stale_hnsw
 
 import messages
 import rerank as _rerank
+# rooms is imported early because the FastAPI dependency factories
+# (rooms.wing_filter_dep, rooms.room_validator_dep) are referenced in
+# route signatures via Depends() — those signatures are evaluated at
+# module-load time, before the explicit #101-12th-slice re-export
+# block further down. The re-export block stays where it is to keep
+# its documentary intent.
+import rooms as _rooms
 
 # ── Config (env vars override CLI defaults) ───────────────────────────────────
 
@@ -1309,8 +1316,11 @@ def _search_args(query: str, limit: int) -> dict:
 async def search(
     q: str,
     limit: int = 5,
-    wing: str | None = None,
-    room: str | None = None,
+    # palace-daemon#179: wing/room canonicalization is enforced via
+    # FastAPI dependency injection rather than handler-body calls, so
+    # new query-param endpoints automatically inherit the contract.
+    wing: str | None = Depends(_rooms.wing_filter_dep),
+    room: str | None = Depends(_rooms.room_validator_dep),
     x_api_key: str | None = Header(default=None),
 ):
     """Semantic search over the main `mempalace_drawers` collection.
@@ -1325,14 +1335,9 @@ async def search(
     palace-wide results back instead.
     """
     _check_auth(x_api_key)
-    # Validate room so a typo gets a fast 400 (vs an empty-result surprise
-    # from a non-matching filter). Same contract as /search/hybrid,
-    # /search/keyword, /search/age-fused (all routed through this helper).
-    _rooms.validate_room_or_raise(room)
-    # Normalize wing so a caller's "Palace_Daemon" matches the stored
-    # "palace_daemon" written by POST /memory's normalization. Pre-fix
-    # asymmetric — writes normalized, reads didn't.
-    wing = _rooms.normalize_wing_filter(wing)
+    # `wing` and `room` already canonicalized by the FastAPI dependencies
+    # in the signature above (palace-daemon#179). Handler body just uses
+    # them as filters.
     args = _search_args(q, limit)
     if wing:
         args["wing"] = wing
@@ -1788,8 +1793,9 @@ async def context(
 
 @app.get("/list")
 async def list_drawers(
-    wing: str | None = None,
-    room: str | None = None,
+    # palace-daemon#179: wing/room canonicalization via dependency.
+    wing: str | None = Depends(_rooms.wing_filter_dep),
+    room: str | None = Depends(_rooms.room_validator_dep),
     limit: int = 20,
     offset: int = 0,
     x_api_key: str | None = Header(default=None),
@@ -1811,11 +1817,7 @@ async def list_drawers(
     returns the first ``limit`` drawers across the whole palace.
     """
     _check_auth(x_api_key)
-    # Validate room so a typo gets a fast 400 — same contract as the
-    # /search* endpoints.
-    _rooms.validate_room_or_raise(room)
-    # Normalize wing so callers get symmetric read/write behavior.
-    wing = _rooms.normalize_wing_filter(wing)
+    # wing/room already canonicalized by dependencies (palace-daemon#179).
     args: dict = {"limit": int(limit), "offset": int(offset)}
     if wing is not None:
         args["wing"] = wing
@@ -1889,7 +1891,9 @@ async def update_memory(drawer_id: str, request: Request, x_api_key: str | None 
 # to mutate `rooms._canonical_rooms_cache` — module-level attribute
 # writes don't propagate through re-exports, so the test needs to touch
 # the source-of-truth binding in rooms.py.
-import rooms as _rooms  # noqa: E402
+# _rooms is imported earlier (near top-of-file) so route-signature
+# Depends() references resolve. The from-imports below keep the
+# `_`-prefixed names available without re-importing the module.
 from rooms import (  # noqa: E402
     canonical_rooms as _canonical_rooms,
     normalize_wing_slug as _normalize_wing_slug,
@@ -2090,13 +2094,14 @@ from fast_intercept import (  # noqa: E402
 async def search_fast(
     q: str,
     limit: int = 5,
-    wing: str | None = None,
+    # palace-daemon#179: wing canonicalization via dependency. No room
+    # filter on this endpoint (BM25 only filters on wing).
+    wing: str | None = Depends(_rooms.wing_filter_dep),
     x_api_key: str | None = Header(default=None),
 ):
     """Fast BM25 text search via direct SQL — no vector, no AGE locks."""
     _check_auth(x_api_key)
-    # Normalize wing so callers get symmetric read/write behavior.
-    wing = _rooms.normalize_wing_filter(wing)
+    # wing already canonicalized by dependency (palace-daemon#179).
     dsn = os.environ.get("MEMPALACE_POSTGRES_DSN") or getattr(
         _mp._config, "postgres_dsn", None
     )

@@ -92,6 +92,37 @@ def canonical_rooms() -> set[str]:
     return _canonical_rooms_cache
 
 
+def wing_filter_dep(wing: "str | None" = None):
+    """FastAPI dependency wrapping ``normalize_wing_filter``.
+
+    Endpoints declare ``wing: str | None = Depends(rooms.wing_filter_dep)``
+    and get the canonicalized value at request-parse time. Saves the
+    one-line ``wing = rooms.normalize_wing_filter(wing)`` boilerplate
+    that PRs #175/#177/#178 had to add at 11 sites — and prevents the
+    next new wing-accepting endpoint from forgetting it (palace-daemon#179).
+
+    Implementation: FastAPI sees the ``wing`` query parameter via the
+    function signature, then runs this body to canonicalize before
+    binding to the endpoint's ``wing`` parameter.
+    """
+    return normalize_wing_filter(wing)
+
+
+def room_validator_dep(room: "str | None" = None):
+    """FastAPI dependency wrapping ``validate_room_or_raise``.
+
+    Endpoints declare ``room: str | None = Depends(rooms.room_validator_dep)``
+    and get either a validated room name or an HTTP 400 with valid_rooms
+    list — never an invalid room reaching the handler body.
+
+    Companion to ``wing_filter_dep``; together they replace the inline
+    validate/normalize calls at the 6 read endpoints and prevent future
+    regressions (palace-daemon#179).
+    """
+    validate_room_or_raise(room)
+    return room
+
+
 def normalize_wing_filter(wing):
     """Normalize a wing slug for use as a read filter.
 

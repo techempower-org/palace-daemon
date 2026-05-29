@@ -110,5 +110,43 @@ class TestNormalizeWingFilter(unittest.TestCase):
         self.assertEqual(rooms.normalize_wing_filter("!!!"), "___")
 
 
+class TestFastAPIDependencies(unittest.TestCase):
+    """rooms.wing_filter_dep and rooms.room_validator_dep are the
+    FastAPI-dependency form of the helpers — endpoints declare
+    ``wing: str | None = Depends(rooms.wing_filter_dep)`` so canonicalization
+    happens at request-parse time. Filed as palace-daemon#179.
+
+    These tests call the deps directly (the FastAPI machinery just passes
+    the raw query-param value as the first positional arg)."""
+
+    def setUp(self):
+        rooms._canonical_rooms_cache = None
+
+    def tearDown(self):
+        rooms._canonical_rooms_cache = None
+
+    def test_wing_filter_dep_canonicalizes(self):
+        """The dep returns the same value normalize_wing_filter would."""
+        self.assertEqual(rooms.wing_filter_dep("Palace_Daemon"), "palace_daemon")
+        self.assertIsNone(rooms.wing_filter_dep(None))
+        self.assertIsNone(rooms.wing_filter_dep(""))
+
+    def test_room_validator_dep_passes_canonical(self):
+        """The dep returns the canonical room name."""
+        rooms._canonical_rooms_cache = {"planning", "decisions"}
+        self.assertEqual(rooms.room_validator_dep("planning"), "planning")
+        self.assertIsNone(rooms.room_validator_dep(None))
+
+    def test_room_validator_dep_raises_400_on_invalid(self):
+        """The dep raises HTTPException 400 — FastAPI machinery converts
+        that to the response shape automatically. Same contract as the
+        previous inline validate_room_or_raise calls."""
+        rooms._canonical_rooms_cache = {"planning"}
+        with self.assertRaises(HTTPException) as ctx:
+            rooms.room_validator_dep("bogus")
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("bogus", ctx.exception.detail["error"])
+
+
 if __name__ == "__main__":
     unittest.main()
