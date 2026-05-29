@@ -1869,29 +1869,20 @@ from rooms import (  # noqa: E402
 )
 
 
-@app.post("/memory")
-async def store_memory(request: Request, x_api_key: str | None = Header(default=None)):
-    _check_auth(x_api_key)
-    body = await request.json()
-    content = body.get("content", "")
+from search_models import MemoryBody  # noqa: E402
 
-    # Taxonomy enforcement at the write boundary. Wing slug is normalized
-    # (idempotent) so the same project is always the same slug regardless
-    # of how the caller spelled it. Room is validated against the
-    # configurable canonical set; non-canonical writes are rejected with
-    # the valid set in the error payload so callers can adapt.
-    wing = _normalize_wing_slug(body.get("wing") or "unknown")
-    room = body.get("room") or "discoveries"  # spec's catch-all default
-    valid_rooms = _canonical_rooms()
-    if room not in valid_rooms:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": f"room {room!r} is not in the canonical set",
-                "valid_rooms": sorted(valid_rooms),
-                "hint": "Use one of the canonical rooms, or `mempalace rooms add` to register a new one.",
-            },
-        )
+
+@app.post("/memory")
+async def store_memory(body: MemoryBody, x_api_key: str | None = Header(default=None)):
+    _check_auth(x_api_key)
+    # palace-daemon#179: content/wing/room already validated +
+    # canonicalized by MemoryBody at parse time. Empty wing coerces to
+    # 'unknown' then normalizes; empty room coerces to 'discoveries'
+    # then validates against the canonical set (HTTP 400 with structured
+    # detail on typo, identical to pre-#179 behavior).
+    content = body.content
+    wing = body.wing
+    room = body.room
 
     # Novelty scoring runs in parallel with the write — the score is
     # informational metadata, not a gate.  Fire both concurrently so NCD
