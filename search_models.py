@@ -202,7 +202,19 @@ class MemoryBody(BaseModel):
     so this preserves behavior even though min_length=1 might feel safer.
     A future PR could tighten it after auditing for callers that intentionally
     write empty drawers (none known in-tree).
+
+    NOTE on ``validate_default=True`` (the model_config below): pydantic v2
+    skips field validators on default values unless this is enabled. The
+    pre-#179 handler used ``body.get("wing") or "unknown"`` / ``body.get(
+    "room") or "discoveries"`` to coerce both missing AND empty inputs to
+    the canonical default. Without validate_default, a request with no
+    ``wing`` / ``room`` keys would arrive in the handler as ``""`` instead
+    of being coerced to the canonical defaults — and mempalace would reject
+    it as "room is empty after sanitization". The first deploy of MemoryBody
+    actually shipped with this regression; this docstring is the receipt.
     """
+
+    model_config = {"validate_default": True}
 
     content: str = Field("", description="Drawer content body (empty allowed for back-compat).")
     wing: str = Field("", description="Wing slug — empty → 'unknown', then normalized.")
