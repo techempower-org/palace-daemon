@@ -2,6 +2,52 @@
 
 ## Unreleased
 
+### Added — *#190: hard auto-mine kill-switch + bench-mode that frees the mining model*
+
+`PALACE_DISABLE_AUTOMINE` (env, truthy) hard-disables all mining for the
+process lifetime — gating both the watcher's `_internal_mine` AND `POST
+/mine` (the hook-driven path that actually disrupted benches; the #104
+advisory lock only gated the watcher). `POST /mine` returns a 200
+skipped-response when disabled (or when `.bench-active.lock` is present),
+so conversation-mining hooks no-op instead of retrying.
+
+`scripts/bench-lock.sh` now toggles full **bench mode** in one command:
+`acquire` touches the lock (runtime mining-gate, no daemon restart) **and**
+stops `llama-server-extractor` (the ~3.3 GiB Phi-4-mini mining model);
+`release` reverses both. On the 15 GiB host the extractor + daemon +
+postgres + bench load tips earlyoom into a postgres kill-loop that
+silently zeroes the bench — and the model is dead weight while mining is
+paused anyway. Model management is best-effort + guarded
+(`PALACE_EXTRACTOR_SERVICE`, `PALACE_BENCH_MANAGE_EXTRACTOR=0`).
+
+### Added — *#189: per-request rerank toggle for ablation benches*
+
+Search endpoints (`/search`, `/search/hybrid`, `/search/keyword`,
+`/search/age-fused`) accept an optional `rerank` override — `?rerank=`
+query param on GET `/search`, a `rerank` body field on the POST models.
+`None` defers to `PALACE_RERANK_ENABLED` (unchanged); `true`/`false`
+forces the cross-encoder on/off for that request only, so SME's rerank-on
+vs rerank-off legs run in a single pass without mutating daemon-global env
+state concurrent callers share. The response `rerank` block now carries
+`enabled` + `enabled_source` (`"env"`|`"per-request"`) so callers confirm
+which path ran.
+
+### Changed — *#101 #3: search route handlers extracted to search_routes.py*
+
+The five MCP-backed search endpoints moved onto an `APIRouter` in
+`search_routes.py` (mounted via `app.include_router`). main.py: 3533 →
+3106 lines. Handlers resolve core symbols (`_call`, `_unwrap`,
+`_search_args`, `_mp`, `_rerank`, `_load_age_extractor`) via lazy `import
+main` so the test suite's patches stay effective with tests unmodified.
+
+### Fixed — *#193: deploy.sh config-drift check aborted the deploy on a transient psql failure*
+
+The #122 drift check ran `psql ... SHOW <setting>` without a `|| echo ""`
+guard, so under `set -euo pipefail` a transient query failure (e.g. "the
+database system is shutting down" during a DB bounce, exit 2) aborted the
+whole deploy *before the restart* while every earlier step reported
+success. Added the guard so a failed informational check degrades to skip.
+
 ### Added — *#179 complete: wing/room canonicalization enforced at every input boundary*
 
 The 11-call-site canonicalization *convention* is now a structural
