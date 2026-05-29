@@ -1363,8 +1363,14 @@ async def search(
 # candidate_strategy="union" on the existing /search endpoint.
 
 
+from search_models import SearchHybridBody  # noqa: E402
+
+
 @app.post("/search/hybrid")
-async def search_hybrid(request: Request, x_api_key: str | None = Header(default=None)):
+async def search_hybrid(
+    body: SearchHybridBody,
+    x_api_key: str | None = Header(default=None),
+):
     """Hybrid search: vector + BM25 + graph in a single ranked result set.
 
     Phase 4 of the hybrid-search-taxonomy initiative. Routes through
@@ -1399,55 +1405,38 @@ async def search_hybrid(request: Request, x_api_key: str | None = Header(default
             status_code=503,
             detail="/search/hybrid requires MEMPALACE_BACKEND=postgres; daemon is on chroma.",
         )
-
-    body = await request.json()
-    query = (body.get("query") or "").strip()
-    if not query:
-        raise HTTPException(status_code=400, detail="'query' is required and must be non-empty")
-    wing = _rooms.normalize_wing_filter(body.get("wing"))
-    room = body.get("room") or None
-    limit = int(body.get("limit") or 10)
-    include_trace = bool(body.get("include_trace") or False)
-    # fusion_mode (#105): pass-through to mempalace's search_memories so
-    # callers can A/B convex vs RRF at production scale. Mempalace's MCP
-    # schema-whitelist currently drops unknown keys, so this needs the
-    # companion mempalace#298 to land before it has end-to-end effect.
-    # We accept + validate the value here so the daemon's input surface
-    # is forward-compatible.
-    fusion_mode = body.get("fusion_mode")
-    if fusion_mode is not None:
-        if not isinstance(fusion_mode, str) or fusion_mode not in ("convex", "rrf"):
-            raise HTTPException(
-                status_code=400,
-                detail="'fusion_mode' must be 'convex' or 'rrf'",
-            )
-    if limit < 1 or limit > 100:
-        raise HTTPException(status_code=400, detail="'limit' must be 1..100")
-    _rooms.validate_room_or_raise(room)
-
+    # palace-daemon#179: body fields (query, wing, room, limit,
+    # include_trace, fusion_mode, candidate_strategy, search_endpoint)
+    # already validated + canonicalized by SearchHybridBody at parse time.
     args = {
-        "query": query,
-        "limit": limit,
-        "candidate_strategy": "hybrid",
+        "query": body.query,
+        "limit": body.limit,
+        "candidate_strategy": body.candidate_strategy or "hybrid",
     }
-    if wing:
-        args["wing"] = wing
-    if room:
-        args["room"] = room
-    args["include_trace"] = include_trace
-    if fusion_mode is not None:
-        args["fusion_mode"] = fusion_mode
+    if body.wing:
+        args["wing"] = body.wing
+    if body.room:
+        args["room"] = body.room
+    args["include_trace"] = body.include_trace
+    if body.fusion_mode is not None:
+        args["fusion_mode"] = body.fusion_mode
 
     result = await _call({
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
         "params": {"name": "mempalace_search", "arguments": args},
     })
-    return _rerank.rerank_response(query, _unwrap(result))
+    return _rerank.rerank_response(body.query, _unwrap(result))
+
+
+from search_models import SearchKeywordBody  # noqa: E402
 
 
 @app.post("/search/keyword")
-async def search_keyword(request: Request, x_api_key: str | None = Header(default=None)):
+async def search_keyword(
+    body: SearchKeywordBody,
+    x_api_key: str | None = Header(default=None),
+):
     """BM25 keyword search over mempalace_drawers.doc_tsv.
 
     Body::
@@ -1470,32 +1459,27 @@ async def search_keyword(request: Request, x_api_key: str | None = Header(defaul
             status_code=503,
             detail="/search/keyword requires MEMPALACE_BACKEND=postgres; daemon is on chroma.",
         )
-
-    body = await request.json()
-    query = (body.get("query") or "").strip()
-    if not query:
-        raise HTTPException(status_code=400, detail="'query' is required and must be non-empty")
-    wing = _rooms.normalize_wing_filter(body.get("wing"))
-    room = body.get("room") or None
-    limit = int(body.get("limit") or 20)
-    if limit < 1 or limit > 200:
-        raise HTTPException(status_code=400, detail="'limit' must be 1..200")
-
-    # Validate room if provided so callers get fast feedback (vs an
-    # empty-result silent surprise from a typo).
-    _rooms.validate_room_or_raise(room)
-
+    # palace-daemon#179: body fields (query, wing, room, limit) already
+    # validated + canonicalized by SearchKeywordBody at parse time.
     dsn = os.environ.get("MEMPALACE_POSTGRES_DSN")
     if not dsn:
         raise HTTPException(status_code=500, detail="MEMPALACE_POSTGRES_DSN not set in daemon environment")
 
     from mempalace.searcher import _bm25_only_via_postgres
-    result = _bm25_only_via_postgres(query, dsn, wing=wing, room=room, n_results=limit)
-    return _rerank.rerank_response(query, result)
+    result = _bm25_only_via_postgres(
+        body.query, dsn, wing=body.wing, room=body.room, n_results=body.limit,
+    )
+    return _rerank.rerank_response(body.query, result)
+
+
+from search_models import SearchAgeFusedBody  # noqa: E402
 
 
 @app.post("/search/age-fused")
-async def search_age_fused(request: Request, x_api_key: str | None = Header(default=None)):
+async def search_age_fused(
+    body: SearchAgeFusedBody,
+    x_api_key: str | None = Header(default=None),
+):
     """Vector + AGE graph fusion search (Phase 5 of the AGE-integration work).
 
     Combines mempalace's vector retrieval with AGE entity-overlap on the
@@ -1533,32 +1517,17 @@ async def search_age_fused(request: Request, x_api_key: str | None = Header(defa
             status_code=503,
             detail="/search/age-fused requires MEMPALACE_BACKEND=postgres; daemon is on chroma.",
         )
-
-    body = await request.json()
-    query = (body.get("query") or "").strip()
-    if not query:
-        raise HTTPException(status_code=400, detail="'query' is required and must be non-empty")
-    wing = _rooms.normalize_wing_filter(body.get("wing"))
-    room = body.get("room") or None
-    limit = int(body.get("limit") or 10)
-    graph_top_k = int(body.get("graph_top_k") or 50)
-    fusion_k = int(body.get("fusion_k") or 60)
-    include_trace = bool(body.get("include_trace") or False)
-
-    if limit < 1 or limit > 200:
-        raise HTTPException(status_code=400, detail="'limit' must be 1..200")
-    if graph_top_k < 1 or graph_top_k > 1000:
-        raise HTTPException(status_code=400, detail="'graph_top_k' must be 1..1000")
-    if fusion_k < 1 or fusion_k > 1000:
-        raise HTTPException(status_code=400, detail="'fusion_k' must be 1..1000")
-
-    # Validate room against the canonical set so a typo gets a fast 400
-    # (not an empty-result surprise from a non-matching filter). Same
-    # contract as /search/hybrid and /search/keyword. Pre-fix this
-    # endpoint accepted any room string and silently produced empty
-    # vector results when it didn't match — surfaced today during PR #172
-    # live validation.
-    _rooms.validate_room_or_raise(room)
+    # palace-daemon#179: body fields (query, wing, room, limit,
+    # graph_top_k, fusion_k, include_trace) already validated +
+    # canonicalized by SearchAgeFusedBody at parse time. Pull locals so
+    # the rest of the handler reads naturally.
+    query = body.query
+    wing = body.wing
+    room = body.room
+    limit = body.limit
+    graph_top_k = body.graph_top_k
+    fusion_k = body.fusion_k
+    include_trace = body.include_trace
 
     # Step 1: Vector retrieval via mempalace_search (existing MCP tool).
     vec_result = await _call({
