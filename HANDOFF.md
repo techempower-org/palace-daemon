@@ -1,3 +1,63 @@
+# Session Handoff — 2026-05-29 (bench-enablement + deploy-pipeline hardening)
+
+> ⚠️ **POST-BENCH RESTORE (do this when JP's bench finishes):** mining is
+> currently fully OFF for the bench. To restore normal mining on familiar:
+> 1. `ssh familiar 'sudo systemctl start llama-server-extractor'` (the ~3.3 GiB
+>    Phi-4-mini mining model — JP disabled the models to free RAM).
+> 2. Remove `PALACE_DISABLE_AUTOMINE=1` from `/home/jp/.config/palace-daemon/env`
+>    on familiar, then `sudo systemctl restart palace-daemon`.
+> 3. `ssh familiar 'bash ~/Projects/palace-daemon/scripts/bench-lock.sh release'`
+>    (removes `.bench-active.lock` AND restarts the extractor — idempotent with #1).
+> Going forward, prefer just `bench-lock.sh acquire`/`release` (lock + extractor,
+> no daemon restart) instead of the env switch.
+
+## What shipped 2026-05-29
+
+- **#190** — hard auto-mine kill-switch. `PALACE_DISABLE_AUTOMINE` (env) gates the
+  watcher AND `POST /mine` (the hook-driven path that actually disrupted benches;
+  the traceback in #190 was `mine → _run_mine_subprocess`, NOT the watcher).
+  `scripts/bench-lock.sh acquire/release` now also stops/starts
+  `llama-server-extractor` (the mining model) so bench-mode frees its RAM.
+- **#189** — per-request `rerank=true/false` on the search endpoints (query param on
+  GET /search; `rerank` body field on the POST models). Response `rerank` block
+  carries `enabled` + `enabled_source` (`env`|`per-request`).
+- **#101 #3** — search route handlers → `search_routes.py` (APIRouter). main.py
+  3533 → 3106. Lazy `import main` keeps test patches effective.
+- **#193** (fixed) — deploy.sh config-drift check aborted the deploy on a transient
+  psql failure (missing `|| echo ""` under `set -e`). Guarded.
+- **#192** (host fix applied + repo diagnosis) — `syncthing@jp` on familiar kept
+  dying: earlyoom SIGTERM'd it (clean exit 0) and `Restart=on-failure` didn't
+  revive it → stale-mirror deploys. Applied `Restart=always` drop-in at
+  `/etc/systemd/system/syncthing@.service.d/restart-always.conf`. deploy.sh now
+  names the cause (`_diagnose_mirror_lag`, `PALACE_REMOTE_SYNC_UNIT=syncthing@jp`
+  in deploy.conf).
+- **#185** (prior, validated live this session) — deploy.sh refuses to restart on a
+  stale mirror (sha256 digest of tracked `.py`). It fired correctly + caught the
+  #192 staleness. Also added behavior canaries to verify-routes.sh.
+
+### The 2026-05-29 memory-crisis incident (root cause for #190 + #192)
+
+familiar is 15 GiB. Two `llama-server` models (Phi-4-mini ~3.3 GiB extractor +
+gemma3-4b) + daemon + postgres over-committed it → earlyoom (`mem≤10% &&
+swap≤10%`) SIGTERM-looped **postgres** (the deploy-blocking kill-loop) AND
+**Syncthing** (the stale-mirror cause). Diagnosis order that worked: DB "shutting
+down" flood → `exitcode=0`/`oomkilled=false` (graceful, not OOM/crash) → earlyoom
+journal → top-RSS → llama-servers. Fix: JP disabled the models; bench-mode stops
+the extractor. **Lesson: on this host, the extractor model + a bench don't both fit
+— bench-mode must free the extractor (now wired into bench-lock.sh).**
+
+### Remaining #101 slices (post-bench — need deploy+restart to verify)
+
+- **#101 #4** — WatcherService loop + auto-mine. `_internal_mine` is a CLOSURE inside
+  `lifespan` (main.py ~935) capturing `loop` / `app.state.active_mines` / `_mine_sem`.
+  Extraction = move the watcher-setup into a `watcher_service.py` `setup_watcher(app, …)`
+  called from lifespan. Module-level `_enqueue_pending_mine`/`_drain_pending_mines`/
+  `_pending_mines_path` (main.py ~421-490) extract easily; the closure is the hard part.
+  Breaks daemon STARTUP if wrong → must deploy-verify, NOT safe mid-bench.
+- **#101 #5** — KG writethrough / triple-worker subprocess mgmt (~600 LOC, heavy state).
+
+---
+
 # Session Handoff — 2026-05-28
 
 ## What landed this session
