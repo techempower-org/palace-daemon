@@ -1525,6 +1525,14 @@ async def search_age_fused(request: Request, x_api_key: str | None = Header(defa
     if fusion_k < 1 or fusion_k > 1000:
         raise HTTPException(status_code=400, detail="'fusion_k' must be 1..1000")
 
+    # Validate room against the canonical set so a typo gets a fast 400
+    # (not an empty-result surprise from a non-matching filter). Same
+    # contract as /search/hybrid and /search/keyword. Pre-fix this
+    # endpoint accepted any room string and silently produced empty
+    # vector results when it didn't match — surfaced today during PR #172
+    # live validation.
+    _rooms.validate_room_or_raise(room)
+
     # Step 1: Vector retrieval via mempalace_search (existing MCP tool).
     vec_result = await _call({
         "jsonrpc": "2.0", "id": 1,
