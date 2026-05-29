@@ -179,6 +179,33 @@ remote_py_digest() {
     _tracked_py_list | ssh "$SSH_TARGET" "cd '$REMOTE_DIR' 2>/dev/null && xargs sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1"
 }
 
+# #192: a stale mirror's usual cause is the sync daemon being DOWN on the
+# host — earlyoom SIGTERMs it under memory pressure and its
+# Restart=on-failure doesn't revive a clean (exit 0) shutdown, so it stays
+# dead and silently serves stale code to every deploy. Name that cause so
+# the operator fixes the sync daemon instead of guessing. Set
+# PALACE_REMOTE_SYNC_UNIT (e.g. "syncthing@jp") for a precise probe + the
+# restart command; without it we emit a generic hint.
+_diagnose_mirror_lag() {
+    local unit="${PALACE_REMOTE_SYNC_UNIT:-}"
+    if [ -z "$unit" ]; then
+        warn "tip: set PALACE_REMOTE_SYNC_UNIT (e.g. syncthing@jp) to auto-diagnose mirror-down vs mirror-lag (#192)"
+        return 0
+    fi
+    local state
+    # `|| true` on the REMOTE side: systemctl is-active prints the state but
+    # exits non-zero for non-active units, which would otherwise leak a
+    # second word into $state. Swallow it remotely so $state is clean.
+    state=$(ssh "$SSH_TARGET" "systemctl is-active '$unit' 2>/dev/null || true" 2>/dev/null)
+    [ -n "$state" ] || state="unreachable"
+    if [ "$state" = "active" ]; then
+        warn "remote sync unit '$unit' is active — mirror is lagging (not down); raise PALACE_SYNC_GRACE and retry"
+    else
+        warn "remote sync unit '$unit' is '$state' on $HOST — the likely stale-mirror cause (#192)"
+        warn "remediation: ssh $HOST 'sudo systemctl start $unit' then re-run this deploy"
+    fi
+}
+
 nstep "confirm $HOST has the push"
 # If the host is a git checkout we can compare SHAs; otherwise (Syncthing /
 # rsync mirror) we compare a content digest of the python sources (#185).
@@ -201,9 +228,11 @@ elif [ -z "$remote_sha" ]; then
         if [ -n "$ldig" ] && [ "$ldig" = "$rdig" ]; then
             ok "remote mirror caught up (py digest ${ldig:0:12})"
         else
+            _diagnose_mirror_lag
             fail "mirror content lag persists (local ${ldig:0:12} != remote ${rdig:0:12}); aborting — a restart would run STALE code (see #185)"
         fi
     else
+        _diagnose_mirror_lag
         fail "mirror content mismatch and PALACE_SYNC_GRACE=0 (local ${ldig:0:12} != remote ${rdig:0:12}); aborting (see #185)"
     fi
 else
