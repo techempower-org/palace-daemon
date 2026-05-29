@@ -1311,6 +1311,10 @@ async def search(
     palace-wide results back instead.
     """
     _check_auth(x_api_key)
+    # Validate room so a typo gets a fast 400 (vs an empty-result surprise
+    # from a non-matching filter). Same contract as /search/hybrid,
+    # /search/keyword, /search/age-fused (all routed through this helper).
+    _rooms.validate_room_or_raise(room)
     args = _search_args(q, limit)
     if wing:
         args["wing"] = wing
@@ -1789,6 +1793,9 @@ async def list_drawers(
     returns the first ``limit`` drawers across the whole palace.
     """
     _check_auth(x_api_key)
+    # Validate room so a typo gets a fast 400 — same contract as the
+    # /search* endpoints.
+    _rooms.validate_room_or_raise(room)
     args: dict = {"limit": int(limit), "offset": int(offset)}
     if wing is not None:
         args["wing"] = wing
@@ -1839,6 +1846,12 @@ async def update_memory(drawer_id: str, request: Request, x_api_key: str | None 
             status_code=400,
             detail="PATCH /memory/{id} requires at least one of: content, wing, room.",
         )
+    # Validate room before forwarding to mempalace — without this a PATCH
+    # could let non-canonical room values into the DB even though POST
+    # /memory rejects them. Same contract as the other room-accepting
+    # endpoints.
+    if "room" in args:
+        _rooms.validate_room_or_raise(args["room"])
     result = await _call({
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
