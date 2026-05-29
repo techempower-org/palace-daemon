@@ -65,6 +65,23 @@ except Exception as e:
 
 Full decision tree + the bug cascade: palace-daemon#169.
 
+### Write/read symmetry on canonical values (palace-daemon#174, #175)
+
+Whenever a write endpoint normalizes or validates input into a canonical form, **every corresponding read surface must apply the same normalization or validation**. Writes turn input into a canonical form to make queries possible; reads need to turn queries INTO that canonical form to make them match.
+
+This session surfaced two cases:
+
+- **#174 (room validation):** `POST /memory` rejected non-canonical rooms but `PATCH /memory/{id}`, `GET /search`, `GET /list` silently accepted them. PATCH allowed bad data INTO the DB; the reads silently filtered to empty.
+- **#175 (wing normalization):** `POST /memory` normalized `Palace_Daemon` → `palace_daemon` on write, but `GET /search?wing=Palace_Daemon` passed the caller's string through unchanged → 0 results. Same data, different case at the boundary → empty.
+
+When you write or review code:
+
+- New endpoint accepting `room` or `wing` as a parameter → route through `rooms.validate_room_or_raise(room)` and/or `rooms.normalize_wing_filter(wing)` (the read-side wrappers).
+- New parameter that's canonicalized on write → check that every reader applies the inverse / equivalent canonicalization. If not, file a bug.
+- DRY violation between two similar endpoint blocks → consolidate AND sweep for missing applications. The same write may need its read partner at endpoints you haven't looked at yet.
+
+The discovery pattern: **when you find a write that canonicalizes a value, grep for every endpoint that reads that value and verify they share the canonicalization.**
+
 ### Library-version awareness (psycopg2 vs psycopg v3)
 
 The daemon's direct postgres connects use `psycopg2`. `mempalace.knowledge_graph_age` uses `psycopg` (v3) internally for Cypher execution.
