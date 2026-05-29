@@ -34,6 +34,27 @@ probe() {
   fi
 }
 
+# Behavior canary: assert the daemon returns a specific HTTP status for a
+# given request. Unlike probe()/probe_json_field() which check a route is
+# *shaped* right on the happy path, this checks that a *behavior* (here,
+# input validation) is live in the deployed code. Motivated by #185: a
+# stale-code deploy (or a #187-style validator regression) passes every
+# happy-path probe because those paths are unchanged — only an
+# invalid-input probe distinguishes current code from stale/broken code.
+probe_status() {
+  local label="$1"
+  local expected_code="$2"
+  shift 2
+  local code
+  code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 90 "${H_AUTH[@]}" "$@" 2>/dev/null) \
+    || fail "$label — curl error"
+  if [ "$code" = "$expected_code" ]; then
+    pass "$label (HTTP $code)"
+  else
+    fail "$label — expected HTTP $expected_code, got $code"
+  fi
+}
+
 probe_json_field() {
   local label="$1"
   local field="$2"
@@ -89,6 +110,29 @@ probe "GET /viz" 'palace-daemon' "$URL/viz"
 
 # /repair/status — query state, no actual repair.
 probe_json_field "GET /repair/status" "in_progress" "$URL/repair/status"
+
+# ── Behavior canaries (#185) ────────────────────────────────────────────
+# Happy-path probes above can't tell current code from stale or broken
+# code — those paths don't change. These send deliberately-INVALID input
+# and assert the validation layer rejects it, proving the wing/room
+# canonicalization contract (#174/#179) is live in the deployed binary.
+# Both are NON-MUTATING: a non-canonical room is rejected before any write
+# or dispatch, so they're safe to run against production on every deploy.
+
+# Read-side room validation (#174): GET /search with a bogus room → 400.
+# Stale pre-#174 code would 200 with palace-wide results instead.
+probe_status "canary: GET /search bad room → 400" "400" \
+  "$URL/search?q=canary&room=__not_a_canonical_room__&limit=1"
+
+# Write-side room validation (#179/#187): POST /memory with a bogus room
+# → 400, rejected at MemoryBody parse time before the mempalace_add_drawer
+# dispatch (verified non-mutating by tests/test_memory_endpoint_validation
+# ::test_bad_room_rejected_400_without_dispatch). A #187-style validator
+# regression would let this through (200) instead of rejecting it.
+probe_status "canary: POST /memory bad room → 400" "400" \
+  -X POST -H "content-type: application/json" \
+  -d '{"content":"canary","wing":"palace_daemon","room":"__not_a_canonical_room__"}' \
+  "$URL/memory"
 
 # limit= is honored end-to-end. Useful as a regression check, but
 # fail-shaped only when the daemon returns valid JSON with a result
