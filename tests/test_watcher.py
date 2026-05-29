@@ -89,6 +89,24 @@ class TestParseWatchDirs(unittest.TestCase):
         self.assertEqual(len(targets), 1)
         self.assertEqual(targets[0].wing, "env_wing")
 
+    def test_explicit_wing_canonicalized_at_parse_time(self):
+        """palace-daemon#179: wing canonicalization at the parse boundary
+        (was use-time in _internal_mine pre-#179). ``Palace_Daemon`` and
+        ``palace_daemon`` env entries must produce identical WatchTargets
+        so post-#175 reads can find the drawers they wrote.
+
+        normalize_wing_name lowercases + replaces spaces/dashes with
+        underscores; absent the dep (test environments without mempalace
+        installed) the fallback inside parse_watch_dirs still lowercases
+        and underscores. Either way, both inputs canonicalize equal.
+        """
+        d = os.path.join(self.tmp, "canon")
+        os.mkdir(d)
+        targets_a = _watcher.parse_watch_dirs(f"{d}=Palace_Daemon")
+        targets_b = _watcher.parse_watch_dirs(f"{d}=palace_daemon")
+        self.assertEqual(targets_a[0].wing, targets_b[0].wing)
+        self.assertEqual(targets_a[0].wing, "palace_daemon")
+
 
 class TestDebouncedMineHandler(unittest.TestCase):
     """Integration-ish: instantiate the real handler, feed events, watch

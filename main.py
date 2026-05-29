@@ -951,13 +951,13 @@ async def lifespan(app: FastAPI):
                     reason, path, wing,
                 )
                 return
-            # Normalize wing so the auto-mine subprocess writes drawers
-            # under the canonical slug — same as /memory POST and /mine
-            # do post-#177. PALACE_WATCH_DIRS env may contain mixed-case
-            # entries (`path=Palace_Daemon`); normalize defensively so
-            # those entries don't produce drawers that post-#175 reads
-            # can't find.
-            wing = _normalize_wing_slug(wing) if wing else wing
+            # Wing is already canonical here — parse_watch_dirs normalizes
+            # at the env-parse boundary post-#179 (was use-time normalize
+            # pre-#179). If a future caller invokes _internal_mine outside
+            # the watch-dirs path with an un-canonicalized wing, the
+            # mempalace subprocess will canonicalize again; the only
+            # consequence of skipping a defensive normalize here is a
+            # potentially-extra subprocess invocation in that edge case.
             mempalace_bin = os.path.join(os.path.dirname(sys.executable), "mempalace")
             argv = [mempalace_bin, "mine", path, "--mode", "projects", "--wing", wing]
             # Same pattern as /mine endpoint: list-form argv, no shell.
