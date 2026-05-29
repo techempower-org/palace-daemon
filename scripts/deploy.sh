@@ -153,9 +153,35 @@ remote_head() {
     printf '%s' "$sha"
 }
 
+# #185: content-freshness for non-git mirrors. A Syncthing/rsync mirror
+# gives no git SHA to compare, so the old code printed "assuming mirrored
+# deploy" and restarted with NO verification the mirror had actually
+# caught up. On 2026-05-28 a dead Syncthing daemon on the host let a
+# deploy restart on stale source while every downstream check (health,
+# verify-routes) reported success — the smoke test never exercises a
+# behavior-changing path. This digest compares the actual python sources
+# byte-for-byte so a lagging/dead mirror fails loudly instead.
+#
+# Scope = git-TRACKED .py files only. A naive `find` is unusably fragile:
+# the local tree carries .claude/worktrees/ copies and the host tree
+# carries a venv with 100k+ .py files. git ls-files gives exactly the
+# deployable sources (no worktrees, no venv, no untracked scratch). The
+# remote isn't a git checkout, so we generate the file LIST locally and
+# hash those same relative paths on both hosts — a file missing on the
+# mirror drops its hash line and the digests diverge → correct failure.
+_LOCAL_DIR="$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
+_tracked_py_list() { ( cd "$_LOCAL_DIR" && git ls-files '*.py' | LC_ALL=C sort ); }
+local_py_digest() {
+    ( cd "$_LOCAL_DIR" && _tracked_py_list | xargs sha256sum 2>/dev/null | sha256sum | cut -d" " -f1 )
+}
+remote_py_digest() {
+    # Feed the local file list to the host; hash those exact paths there.
+    _tracked_py_list | ssh "$SSH_TARGET" "cd '$REMOTE_DIR' 2>/dev/null && xargs sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1"
+}
+
 nstep "confirm $HOST has the push"
 # If the host is a git checkout we can compare SHAs; otherwise (Syncthing /
-# rsync mirror) we give it SYNC_GRACE seconds and trust the mirror.
+# rsync mirror) we compare a content digest of the python sources (#185).
 [ "$SYNC_GRACE" -gt 0 ] && sleep "$SYNC_GRACE"
 if ! remote_sha=$(remote_head); then
     fail "cannot reach $SSH_TARGET over ssh — host down, auth failed, or wrong target; aborting (deploy NOT applied)"
@@ -163,7 +189,23 @@ fi
 if [ "$remote_sha" = "$local_sha" ]; then
     ok "remote at $local_sha"
 elif [ -z "$remote_sha" ]; then
-    ok "remote is not a git checkout — assuming mirrored deploy"
+    # Non-git mirror: verify content rather than trusting it blindly (#185).
+    ldig=$(local_py_digest)
+    rdig=$(remote_py_digest)
+    if [ -n "$ldig" ] && [ "$ldig" = "$rdig" ]; then
+        ok "remote mirror sources match local (py digest ${ldig:0:12})"
+    elif [ "$SYNC_GRACE" -gt 0 ]; then
+        warn "mirror sources differ (local ${ldig:0:12} != remote ${rdig:0:12}); sleeping ${SYNC_GRACE}s and retrying"
+        sleep "$SYNC_GRACE"
+        rdig=$(remote_py_digest)
+        if [ -n "$ldig" ] && [ "$ldig" = "$rdig" ]; then
+            ok "remote mirror caught up (py digest ${ldig:0:12})"
+        else
+            fail "mirror content lag persists (local ${ldig:0:12} != remote ${rdig:0:12}); aborting — a restart would run STALE code (see #185)"
+        fi
+    else
+        fail "mirror content mismatch and PALACE_SYNC_GRACE=0 (local ${ldig:0:12} != remote ${rdig:0:12}); aborting (see #185)"
+    fi
 else
     warn "remote at $remote_sha (expected $local_sha)"
     if [ "$SYNC_GRACE" -gt 0 ]; then
