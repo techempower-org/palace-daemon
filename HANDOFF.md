@@ -28,10 +28,24 @@ Plus earlier this session:
 - **`#151`:** deploy.sh warms `/graph` before running smoke (cold-start race fix).
 - **`#154`:** `OOMScoreAdjust=-500` keeps userland `earlyoom` from killing the daemon during memory-heavy `/graph` calls.
 - **`#172`/`#173`/`#174`/`#175`/`#177`/`#178`:** Wing/room canonicalization sweep across 11 sites (6 reads + 5 writes). Each PR fixed an asymmetric write/read contract that produced empty results or data-integrity holes.
-- **`#179`/`#180`/`#181`/`#182`:** Architectural follow-up to the wing/room sweep. FastAPI dependencies (`rooms.wing_filter_dep`, `rooms.room_validator_dep`) for query-param endpoints; pydantic models (`SearchKeywordBody`, `SearchHybridBody`, `SearchAgeFusedBody`, `BackfillAgeBody`) for body endpoints. Canonicalization is now enforced at the request-parse layer for **7 of 11 wing/room-accepting endpoints** (6 reads + 1 write).
+- **`#179` — COMPLETE (#180→#188):** Architectural follow-up to the wing/room sweep, now fully closed. Canonicalization is enforced at the request-parse / input-parse layer for **all 11 wing/room-accepting surfaces**:
+  - Reads (#180): `GET /search`, `/list`, `/search/fast` via FastAPI `Depends()`.
+  - Write bodies (#181-#187): pydantic models in `search_models.py` — `SearchKeywordBody`, `SearchHybridBody`, `SearchAgeFusedBody`, `BackfillAgeBody`, `SilentSaveBody`, `MineBody`, `MemoryBody`.
+  - Internal env (#188): `watcher.parse_watch_dirs` normalizes both path-derived and explicit env wings.
+  - **Per-surface empty-wing semantics** (intentionally distinct, encoded per model): `/memory`→`"unknown"`, `/silent-save`→`""`+warning, `/mine`→`"general"`, `/backfill-age`→`None` (filter), watcher→path-basename.
+  - **#187 hotfix:** pydantic v2 skips field validators on default values. MemoryBody's first deploy (#186) shipped this regression — POST omitting `room` arrived as `""` instead of `"discoveries"` and mempalace rejected it. `model_config = {"validate_default": True}` fixes it. **Caught by live-curl probe, NOT by the test suite** (no test exercises POST /memory with a missing-room body).
 - **`v1.9.1`** tagged + deployed.
 
-Final counts: **39 PRs merged today**, **495 → 534 tests**, **9 issues closed**, **30+ clean production deploys**.
+Final counts (cumulative across both sessions): **44 PRs merged**, **495 → 535 tests**, **10 issues closed** (incl. #179), **35+ clean production deploys**.
+
+## Deploy-freshness incident (#185 filed)
+
+While verifying #184 (`/mine`), the live-curl probe returned the OLD inline error string despite `deploy.sh` reporting `✦ deploy complete`. Root cause: **Syncthing on `familiar` had silently died at 18:17 PDT**, so the daemon restarted on stale source. The deploy script's "remote is not a git checkout — assuming mirrored deploy" branch (line 164) has **no freshness check** — it prints `ok` and restarts regardless of whether the mirror caught up. `verify-routes.sh` smoke passed because it never exercises behavior-changing paths.
+
+- **Fix applied immediately:** `sudo systemctl start syncthing@jp` on familiar, waited for sync, restarted, re-verified.
+- **Issue filed (#185):** add an mtime/checksum freshness check to deploy.sh's mirrored-deploy branch. Task #57 tracks it.
+- **Operator detection signal:** `stat -c %y main.py` on the daemon host older than the local commit time = stale deploy.
+- **Methodology reinforced:** every behavior-changing PR needs a live-curl probe of the *specific* changed behavior. Green smoke + green tests are necessary, not sufficient.
 
 ## Production state at handoff
 
@@ -47,6 +61,12 @@ Final counts: **39 PRs merged today**, **495 → 534 tests**, **9 issues closed*
 ### Externally blocked
 - **`#80`** — hybrid candidate-strategy scorer-weight tuning. Blocked on SME bench re-run. Now that `/search/age-fused` actually fuses (was just vector-only before today), the bench can produce meaningful numbers. JP needs to kick off the SME run or grant fresh sister-fork scope to do it from this repo.
 
+### Actionable, unblocked
+- **`#185`** — deploy.sh mirrored-deploy freshness check. Filed this session after the stale-deploy incident above. Smallest unblocked item: add an mtime or sha256 comparison of `main.py` (local vs remote over ssh) before restarting, in the `[ -z "$remote_sha" ]` branch of deploy.sh. Optionally add a "recent-PR canary" curl probe to verify-routes.sh. Task #57.
+
+### Externally blocked
+- **`#80`** — hybrid candidate-strategy scorer-weight tuning. Blocked on SME bench re-run. Now that `/search/age-fused` actually fuses (was just vector-only before today), the bench can produce meaningful numbers. JP needs to kick off the SME run or grant fresh sister-fork scope to do it from this repo.
+
 ### Judgment-call deferred
 - **`#101`** — paused at 13 slices. Remaining candidates documented in `#135`:
   - Search route handlers (~400 lines, FastAPI decorator hoisting needed)
@@ -56,7 +76,7 @@ Final counts: **39 PRs merged today**, **495 → 534 tests**, **9 issues closed*
   None are blocking. main.py at 3545 lines is comfortable.
 - **`#135`** — status document, not actionable.
 - **`#169`** — convention documentation, informational.
-- **`#179`** — architectural follow-up partially implemented this session. Remaining work: pydantic models for the 4 other write surfaces (`POST /memory`, `POST /silent-save`, `POST /mine`, `WatcherService._internal_mine`). Each has different empty-wing semantics (`/memory` → `"unknown"`, `/silent-save` → `""`, `/mine` → `"general"`, watcher → pass-through) so they need per-endpoint models rather than one shared schema. Template established by `BackfillAgeBody` (PR #182). Estimated effort: ~30 LOC per endpoint + tests. Not blocking — current inline `_normalize_wing_slug` calls work correctly.
+- **`#179`** — ✅ **CLOSED this session.** All 5 write surfaces + 6 read surfaces now canonicalize at the input boundary (#180→#188). See "What landed" above for the full table. The codebase invariant is now structural, not conventional: a handler body cannot receive a non-canonical wing/room.
 
 ## Conventions established this session
 
