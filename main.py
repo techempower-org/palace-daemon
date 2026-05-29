@@ -3158,8 +3158,14 @@ async def watch_list(x_api_key: str | None = Header(default=None)):
 
 # ── Repair + silent-save ─────────────────────────────────────────────────────
 
+from search_models import SilentSaveBody  # noqa: E402
+
+
 @app.post("/silent-save")
-async def silent_save(request: Request, x_api_key: str | None = Header(default=None)):
+async def silent_save(
+    body: SilentSaveBody,
+    x_api_key: str | None = Header(default=None),
+):
     """
     Silent Stop-hook save path. Writes a diary checkpoint during normal ops;
     during /repair mode=rebuild, queues the payload to a jsonl file and
@@ -3173,40 +3179,26 @@ async def silent_save(request: Request, x_api_key: str | None = Header(default=N
     }
     """
     _check_auth(x_api_key)
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="invalid JSON")
-    if not body.get("entry"):
-        raise HTTPException(status_code=400, detail="'entry' is required")
-
-    # mempalace#86 surfaces wing/room validation as warnings on the write
-    # response, but a missing wing reaches tool_diary_write as "" and may
-    # not generate a warning at all depending on mempalace version. Detect
-    # it here so the systemMessage always flags the broken default.
-    # Don't reject — existing callers may rely on the empty-default — just
-    # warn so it shows up in the themed chain.
+    # palace-daemon#179: body fields (entry, wing, topic, agent_name,
+    # themes, message_count, session_id) already validated +
+    # wing-canonicalized by SilentSaveBody at parse time.
     daemon_warnings: list[str] = []
-    raw_wing = body.get("wing")
-    if not raw_wing or (isinstance(raw_wing, str) and not raw_wing.strip()):
+    if not body.wing:
+        # Empty wing is allowed (existing callers may rely on the default)
+        # but warned about in the themed systemMessage so the hook
+        # surfaces the broken default rather than silently filing under
+        # no wing.
         daemon_warnings.append(
             "wing is empty — diary entry will have no wing association"
         )
 
-    themes = body.get("themes") or []
-    raw_msg_count = body.get("message_count")
-    if raw_msg_count is None:
-        msg_count = 1
-    else:
-        try:
-            msg_count = int(raw_msg_count)
-        except (TypeError, ValueError):
-            raise HTTPException(
-                status_code=400,
-                detail="'message_count' must be an integer",
-            )
-        if msg_count <= 0:
-            msg_count = 1
+    themes = body.themes or []
+    msg_count = body.message_count if body.message_count and body.message_count > 0 else 1
+
+    # Build the payload dict for the existing helpers (_enqueue_pending_write,
+    # _do_silent_save_write) — they predate the model and serialize via
+    # json for the rebuild queue. body.model_dump() round-trips cleanly.
+    payload = body.model_dump()
 
     # Acquire write slot, check rebuild flag under lock, then write or queue.
     # Queue only when /repair is doing a rebuild — other modes (light/scan/
@@ -3216,7 +3208,7 @@ async def silent_save(request: Request, x_api_key: str | None = Header(default=N
             _repair_state["in_progress"]
             and _repair_state.get("mode") == "rebuild"
         ):
-            await _enqueue_pending_write(body)
+            await _enqueue_pending_write(payload)
             return _ensure_warnings_fields({
                 "count": msg_count,
                 "themes": themes,
@@ -3224,7 +3216,7 @@ async def silent_save(request: Request, x_api_key: str | None = Header(default=N
                 "warnings": daemon_warnings,
                 "systemMessage": messages.save_queued(msg_count, themes),
             })
-        result = await _do_silent_save_write(body)
+        result = await _do_silent_save_write(payload)
 
     # mempalace#86: tool_diary_write may return warnings/errors lists.
     # Forward them unchanged so clients/hook.py can surface them in the

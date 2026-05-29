@@ -117,6 +117,50 @@ class SearchHybridBody(BaseModel):
         return v
 
 
+class SilentSaveBody(BaseModel):
+    """Body for POST /silent-save (Stop-hook diary checkpoint write).
+
+    Differs from POST /memory's body model: empty wing stays as ``""``
+    rather than coercing to ``"unknown"`` — the handler warns on empty
+    in the themed systemMessage rather than synthesizing a default. This
+    preserves the existing behavioral contract that hook clients may
+    legitimately call /silent-save with no wing (e.g. before a workspace
+    is assigned).
+
+    Topic canonicalization stays in the handler via ``_canonical_topic``
+    — it's a synonym-rewrite (e.g. "checkpoint" → CHECKPOINT_TOPIC) with
+    a warning log on rewrite, semantically too involved for a pydantic
+    validator to handle cleanly.
+    """
+
+    entry: str = Field(..., min_length=1, description="Diary entry body (required).")
+    wing: str = Field("", description="Optional wing slug — normalized if set, empty allowed.")
+    topic: "str | None" = Field(None, description="Optional topic — canonicalized in handler.")
+    agent_name: str = Field("session-hook", description="Diary author name.")
+    themes: "list | None" = Field(None, description="Optional theme tags for the systemMessage.")
+    message_count: "int | None" = Field(None, ge=1, description="Conversation-turn count the hook displays.")
+    session_id: "str | None" = Field(None, description="Optional session identifier.")
+
+    @field_validator("entry")
+    @classmethod
+    def _require_entry(cls, v):
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("'entry' is required")
+        return v
+
+    @field_validator("wing")
+    @classmethod
+    def _normalize_wing(cls, v):
+        # /silent-save has WRITE-side wing semantics, not filter semantics —
+        # we normalize via the write helper (matching /memory POST and #177)
+        # rather than the filter helper that returns None on empty.
+        from rooms import normalize_wing_slug
+        if not v or not v.strip():
+            return ""  # preserve empty so handler can warn
+        return normalize_wing_slug(v)
+
+
 class BackfillAgeBody(BaseModel):
     """Body for POST /backfill-age.
 
