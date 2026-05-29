@@ -23,6 +23,32 @@ from __future__ import annotations
 import os
 
 
+def automine_disabled() -> tuple[bool, str]:
+    """Hard kill-switch for watcher auto-mine (palace-daemon#190).
+
+    Distinct from :func:`bench_lock_active`. The bench lock is an
+    *advisory*, time-limited file that gates *newly-spawned* mines — but a
+    mine already in flight when the lock appears runs to completion, and
+    there's a window between "mine finishes" and "the next tick sees the
+    lock" where a fresh mine can slip through. For heavy sustained-ingest
+    benches (SME #91 = ~24K /memory POSTs) that window is unacceptable:
+    #190 documents a daemon SIGTERM'd mid-mine despite the lock.
+
+    This is the absolute gate. When ``PALACE_DISABLE_AUTOMINE`` is truthy
+    (1/true/yes/on, case-insensitive) the watcher spawns NO auto-mine for
+    the lifetime of the process — set it in the daemon env, restart, run
+    the bench, revert. Explicit ``POST /mine`` is unaffected (user-driven;
+    a bench that wants zero mining simply doesn't call it).
+
+    Returns ``(is_disabled, reason_string)`` — same shape as
+    :func:`bench_lock_active` so the watcher can log either gate uniformly.
+    """
+    val = os.environ.get("PALACE_DISABLE_AUTOMINE", "").strip().lower()
+    if val in ("1", "true", "yes", "on"):
+        return (True, f"PALACE_DISABLE_AUTOMINE={val}")
+    return (False, "")
+
+
 def bench_lock_path(_config_provider=None) -> str:
     """Resolve the lock file path.
 

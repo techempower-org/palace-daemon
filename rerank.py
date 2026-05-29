@@ -102,7 +102,7 @@ def _passage_text(hit: dict) -> str:
     return ""
 
 
-def rerank_hits(query: str, hits: list[dict]) -> tuple[list[dict], dict]:
+def rerank_hits(query: str, hits: list[dict], enabled: bool | None = None) -> tuple[list[dict], dict]:
     """Reorder ``hits`` by FlashRank score against ``query``.
 
     Returns ``(reranked_hits, info)`` where ``info`` is a small dict with
@@ -116,17 +116,31 @@ def rerank_hits(query: str, hits: list[dict]) -> tuple[list[dict], dict]:
 
     On any failure the original list is returned unchanged and ``info``
     carries ``status=skipped|failed`` with the reason.
+
+    ``enabled`` (palace-daemon#189): per-request override of the cross-
+    encoder stage. ``None`` (default) falls back to the operator-global
+    ``PALACE_RERANK_ENABLED`` env (unchanged behavior). ``True``/``False``
+    forces the decision for this call only, so ablation benches can A/B
+    rerank-on vs rerank-off within a single pass without mutating daemon-
+    global state that concurrent callers share. ``info["enabled_source"]``
+    records which path decided ("env" vs "per-request") so the caller can
+    confirm the override took.
     """
+    effective = is_enabled() if enabled is None else bool(enabled)
     info: dict = {
-        "enabled": is_enabled(),
+        "enabled": effective,
+        "enabled_source": "env" if enabled is None else "per-request",
         "model": _RERANK_MODEL,
         "n_input": len(hits),
         "n_reranked": 0,
         "latency_ms": 0.0,
         "status": "skipped",
     }
-    if not info["enabled"]:
-        info["reason"] = "PALACE_RERANK_ENABLED=false"
+    if not effective:
+        info["reason"] = (
+            "PALACE_RERANK_ENABLED=false" if enabled is None
+            else "rerank=false (per-request)"
+        )
         return hits, info
     if not hits:
         info["status"] = "noop"
@@ -197,19 +211,23 @@ def rerank_hits(query: str, hits: list[dict]) -> tuple[list[dict], dict]:
         return hits, info
 
 
-def rerank_response(query: str, response: Any) -> Any:
+def rerank_response(query: str, response: Any, enabled: bool | None = None) -> Any:
     """Apply :func:`rerank_hits` to the ``results`` list of a search response.
 
     No-op when ``response`` isn't a dict or doesn't carry a ``results``
     list. Attaches a ``rerank`` block to the response with timing/status
     so callers (and tests) can observe what happened.
+
+    ``enabled`` (palace-daemon#189): per-request override forwarded to
+    :func:`rerank_hits` — ``None`` defers to ``PALACE_RERANK_ENABLED``,
+    ``True``/``False`` forces the decision for this response only.
     """
     if not isinstance(response, dict):
         return response
     results = response.get("results")
     if not isinstance(results, list):
         return response
-    reordered, info = rerank_hits(query, results)
+    reordered, info = rerank_hits(query, results, enabled=enabled)
     response["results"] = reordered
     response["rerank"] = info
     return response

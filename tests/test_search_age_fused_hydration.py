@@ -118,7 +118,7 @@ class TestAgeFusedHydration(unittest.IsolatedAsyncioTestCase):
              patch.object(main, "_load_age_extractor", return_value=lambda q: [_E("topic-x")]), \
              patch("mempalace.knowledge_graph_age.KnowledgeGraphAGE", return_value=fake_kg), \
              patch.object(main._mp, "_config", MagicMock(backend="postgres")), \
-             patch.object(main._rerank, "rerank_response", side_effect=lambda q, r: r):
+             patch.object(main._rerank, "rerank_response", side_effect=lambda q, r, enabled=None: r):
             response = await self._call_endpoint({"query": "test query", "limit": 3})
 
         results = response["results"]
@@ -156,7 +156,7 @@ class TestAgeFusedHydration(unittest.IsolatedAsyncioTestCase):
              patch.object(main, "_load_age_extractor", return_value=lambda q: [_E("topic-x")]), \
              patch("mempalace.knowledge_graph_age.KnowledgeGraphAGE", return_value=fake_kg), \
              patch.object(main._mp, "_config", MagicMock(backend="postgres")), \
-             patch.object(main._rerank, "rerank_response", side_effect=lambda q, r: r):
+             patch.object(main._rerank, "rerank_response", side_effect=lambda q, r, enabled=None: r):
             response = await self._call_endpoint({"query": "test query", "limit": 3})
 
         results = response["results"]
@@ -191,7 +191,7 @@ class TestAgeFusedHydration(unittest.IsolatedAsyncioTestCase):
              patch.object(main, "_load_age_extractor", return_value=lambda q: []), \
              patch("mempalace.knowledge_graph_age.KnowledgeGraphAGE", return_value=fake_kg), \
              patch.object(main._mp, "_config", MagicMock(backend="postgres")), \
-             patch.object(main._rerank, "rerank_response", side_effect=lambda q, r: r):
+             patch.object(main._rerank, "rerank_response", side_effect=lambda q, r, enabled=None: r):
             response = await self._call_endpoint({"query": "vector only", "limit": 3})
 
         results = response["results"]

@@ -54,7 +54,7 @@ class TestSearchHybridFusionMode(unittest.IsolatedAsyncioTestCase):
         self._rooms_patch.start()
         self._auth_patch = patch.object(main, "_check_auth")
         self._auth_patch.start()
-        self._rerank_patch = patch.object(main._rerank, "rerank_response", side_effect=lambda q, r: r)
+        self._rerank_patch = patch.object(main._rerank, "rerank_response", side_effect=lambda q, r, enabled=None: r)
         self._rerank_patch.start()
 
     def tearDown(self):

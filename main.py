@@ -939,6 +939,19 @@ async def lifespan(app: FastAPI):
             if not dir_path.is_dir():
                 logger.warning("watcher: skipping mine for non-dir path %s", path)
                 return
+            # Hard auto-mine kill-switch (#190). Absolute env gate, checked
+            # FIRST: unlike the advisory bench lock below (which gates only
+            # newly-spawned mines and has a finish→next-tick window a mine
+            # can slip through), PALACE_DISABLE_AUTOMINE means zero auto-mine
+            # for the process lifetime. Set it for heavy sustained-ingest
+            # benches (SME #91) where the advisory lock's window is unsafe.
+            disabled, why = _automine_disabled()
+            if disabled:
+                logger.info(
+                    "watcher: auto_mine_disabled (%s, path=%s, wing=%s)",
+                    why, path, wing,
+                )
+                return
             # Bench-active lock (#104) — pause auto-mine while an external
             # bench is driving the daemon hard. The lock file is touched by
             # the bench runner; daemon checks per-tick and skips spawning.
@@ -1555,6 +1568,7 @@ async def stats(x_api_key: str | None = Header(default=None)):
 
 from bench_lock import bench_lock_path as _bench_lock_path  # noqa: E402
 from bench_lock import bench_lock_active as _bench_lock_active  # noqa: E402
+from bench_lock import automine_disabled as _automine_disabled  # noqa: E402 (#190)
 
 
 # Postgres helpers (#93/#96/#108) — extracted to postgres.py per #101 (fourth slice).

@@ -49,6 +49,8 @@ class SearchKeywordBody(BaseModel):
     wing: "str | None" = Field(None, description="Optional wing filter (canonicalized).")
     room: "str | None" = Field(None, description="Optional room filter (must be canonical if set).")
     limit: int = Field(20, ge=1, le=200, description="Result count (1..200).")
+    # rerank (#189): per-request cross-encoder override; None → env default.
+    rerank: "bool | None" = Field(None, description="Per-request rerank toggle; None defers to PALACE_RERANK_ENABLED.")
 
     @field_validator("query")
     @classmethod
@@ -88,6 +90,10 @@ class SearchHybridBody(BaseModel):
     # search_endpoint: alternate routing mode for /search/age-fused.
     # Kept here for the SME adapter's bench tooling.
     search_endpoint: "str | None" = Field(None)
+    # rerank (#189): per-request cross-encoder override. None → fall back
+    # to PALACE_RERANK_ENABLED; True/False forces the stage on/off for this
+    # request only, so ablation benches can A/B rerank within one pass.
+    rerank: "bool | None" = Field(None)
 
     @field_validator("query")
     @classmethod
@@ -325,6 +331,8 @@ class SearchAgeFusedBody(BaseModel):
     graph_top_k: int = Field(50, ge=1, le=1000)
     fusion_k: int = Field(60, ge=1, le=1000)
     include_trace: bool = Field(False)
+    # rerank (#189): per-request cross-encoder override; None → env default.
+    rerank: "bool | None" = Field(None)
 
     @field_validator("query")
     @classmethod

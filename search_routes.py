@@ -51,6 +51,9 @@ async def search(
     # new query-param endpoints automatically inherit the contract.
     wing: str | None = Depends(rooms.wing_filter_dep),
     room: str | None = Depends(rooms.room_validator_dep),
+    # palace-daemon#189: per-request rerank override. ?rerank=false skips
+    # the cross-encoder for this request only; absent → PALACE_RERANK_ENABLED.
+    rerank: bool | None = None,
     x_api_key: str | None = Header(default=None),
 ):
     """Semantic search over the main `mempalace_drawers` collection.
@@ -79,7 +82,7 @@ async def search(
         "method": "tools/call",
         "params": {"name": "mempalace_search", "arguments": args},
     })
-    return main._rerank.rerank_response(q, main._unwrap(result))
+    return main._rerank.rerank_response(q, main._unwrap(result), enabled=rerank)
 
 
 # ── Postgres-native BM25 search ──────────────────────────────────────
@@ -155,7 +158,7 @@ async def search_hybrid(
         "method": "tools/call",
         "params": {"name": "mempalace_search", "arguments": args},
     })
-    return main._rerank.rerank_response(body.query, main._unwrap(result))
+    return main._rerank.rerank_response(body.query, main._unwrap(result), enabled=body.rerank)
 
 
 @router.post("/search/keyword")
@@ -196,7 +199,7 @@ async def search_keyword(
     result = _bm25_only_via_postgres(
         body.query, dsn, wing=body.wing, room=body.room, n_results=body.limit,
     )
-    return main._rerank.rerank_response(body.query, result)
+    return main._rerank.rerank_response(body.query, result, enabled=body.rerank)
 
 
 @router.post("/search/age-fused")
@@ -253,6 +256,7 @@ async def search_age_fused(
     graph_top_k = body.graph_top_k
     fusion_k = body.fusion_k
     include_trace = body.include_trace
+    rr = body.rerank  # palace-daemon#189 per-request rerank override
 
     # Step 1: Vector retrieval via mempalace_search (existing MCP tool).
     vec_result = await main._call({
@@ -274,8 +278,8 @@ async def search_age_fused(
             return main._rerank.rerank_response(query, {"results": vec_hits[:limit], "trace": {
                 "n_vector": len(vec_hits), "n_graph": 0, "n_after_fusion": min(limit, len(vec_hits)),
                 "warning": "MEMPALACE_POSTGRES_DSN not set; age-fused falls back to vector-only",
-            }})
-        return main._rerank.rerank_response(query, {"results": vec_hits[:limit]})
+            }}, enabled=rr)
+        return main._rerank.rerank_response(query, {"results": vec_hits[:limit]}, enabled=rr)
 
     # Initialize *before* the AGE lookup so the trace block can read it
     # even when the lookup raises before extraction happens.
@@ -445,7 +449,7 @@ async def search_age_fused(
             "n_after_fusion": len(out_hits),
             "query_entities": [e.name for e in query_entities],
         }
-    return main._rerank.rerank_response(query, response)
+    return main._rerank.rerank_response(query, response, enabled=rr)
 
 
 @router.get("/context")
