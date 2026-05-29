@@ -21,7 +21,7 @@ Cascade of findings + fixes:
 
 Plus earlier this session:
 
-- **`#101` decomposition:** 12 slices, `main.py` went 4751 → **3384 lines (-29%)**. Modules created: `bench_lock`, `canaries`, `db_errors`, `postgres`, `daemon_tools`, `fast_intercept`, `kg_reader` (JP's #134), `crash_loop`, `auth`, `rebuild_progress`, `path_map`, `rooms`.
+- **`#101` decomposition:** 13 slices, `main.py` went 4751 → **3545 lines (-25%)**. Modules created: `bench_lock`, `canaries`, `db_errors`, `postgres`, `daemon_tools`, `fast_intercept` (+ later expanded with `fast_status_payload` in 13th slice), `kg_reader` (JP's #134), `crash_loop`, `auth`, `rebuild_progress`, `path_map`, `rooms`.
 - **`#136` shutdown chain:** #137 flush timeout, #138/#139 mine subprocess tracking, #141 uvicorn graceful_shutdown bound. 30s SIGKILL escalation → 2-5s clean.
 - **`#140`:** `/mcp` `tools/list` augmented with 6 daemon-native tool descriptors.
 - **`#143`:** `/health` no longer false-positives 503 on `crash_loop=True`.
@@ -46,13 +46,13 @@ Final counts: **27 PRs merged today**, **495 → 520 tests**, **9 issues closed*
 - **`#80`** — hybrid candidate-strategy scorer-weight tuning. Blocked on SME bench re-run. Now that `/search/age-fused` actually fuses (was just vector-only before today), the bench can produce meaningful numbers. JP needs to kick off the SME run or grant fresh sister-fork scope to do it from this repo.
 
 ### Judgment-call deferred
-- **`#101`** — paused at 12 slices. Remaining candidates documented in `#135`:
+- **`#101`** — paused at 13 slices. Remaining candidates documented in `#135`:
   - Search route handlers (~400 lines, FastAPI decorator hoisting needed)
   - WatcherService loop (lifespan-entangled)
   - KG triple-worker subprocess management (heavy state)
-  - `_fast_status_payload` + `_read_kg_postgres_stats` (~150 lines, requires test updates to patch via new module rather than `main`)
+  - `_read_kg_postgres_stats` is already in kg_reader.py (#134 / JP's PR) — no further action needed there
   
-  None are blocking. main.py at 3384 lines is comfortable.
+  None are blocking. main.py at 3545 lines is comfortable.
 - **`#135`** — status document, not actionable.
 - **`#169`** — convention documentation, informational.
 
@@ -114,5 +114,5 @@ If you're picking this up:
 1. Production is healthy. No firefighting needed.
 2. The remaining open issues (`#80`, `#101`, `#135`, `#169`) are deferred-with-reasons, not blocked-by-mystery.
 3. If a new bug surfaces in journalctl, the silent-exception sweep means it'll appear as a `logging.warning(...)` line rather than as a silent fallback. Look in the journal first.
-4. If you want to keep slicing `#101`: the next slice should be `_fast_status_payload` + `_read_kg_postgres_stats` (~150 lines). Test patches need updating from `main` to the new module — mechanical but invasive enough to slow you down.
+4. If you want to keep slicing `#101`: the small candidates are gone. Remaining ones (search route handlers ~400 LOC, WatcherService ~600 LOC, KG triple-worker management ~600 LOC) all need either APIRouter rewiring or deep state untangling — focused-session work, not autonomous-loop work.
 5. If you want to revisit `#80`: needs the SME bench. Either get fresh scope to drive it from this repo, or hand off to JP to run.
