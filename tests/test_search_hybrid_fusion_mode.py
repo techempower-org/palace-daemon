@@ -64,10 +64,28 @@ class TestSearchHybridFusionMode(unittest.IsolatedAsyncioTestCase):
         self._rerank_patch.stop()
 
     async def _call(self, body: dict):
-        """Invoke search_hybrid with a fake Request, return either response or HTTPException."""
+        """Invoke search_hybrid with a pydantic body model, return either response or HTTPException/ValidationError.
+
+        Post-#179-Option-C the handler takes a SearchHybridBody instead
+        of a raw Request. ValidationErrors at body-construction time are
+        treated as the http_error path with status 422 (FastAPI's
+        default mapping for pydantic failures). HTTPException raised
+        from inside the handler (e.g. backend mismatch) stays at its
+        explicit status code.
+        """
         from fastapi import HTTPException
-        req = MagicMock()
-        req.json = AsyncMock(return_value=body)
+        from pydantic import ValidationError
+        from search_models import SearchHybridBody
+
+        try:
+            parsed = SearchHybridBody(**body)
+        except ValidationError as e:
+            # Mimic FastAPI's 422 + first-error message shape.
+            errors = e.errors()
+            msg = errors[0].get("msg", "") if errors else ""
+            field = errors[0].get("loc", [""])[-1] if errors else ""
+            return ("http_error", 422, f"{field}: {msg}")
+
         captured_args = {}
 
         async def fake_call(envelope):
@@ -78,7 +96,7 @@ class TestSearchHybridFusionMode(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(main, "_call", side_effect=fake_call):
             try:
-                result = await main.search_hybrid(req, x_api_key="test-key")
+                result = await main.search_hybrid(parsed, x_api_key="test-key")
                 return ("ok", result, captured_args.get("args"))
             except HTTPException as e:
                 return ("http_error", e.status_code, e.detail)
@@ -100,15 +118,18 @@ class TestSearchHybridFusionMode(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(args.get("fusion_mode"), "rrf")
 
     async def test_fusion_mode_invalid_string_rejected(self):
+        # Post-#179: pydantic ValidationError maps to FastAPI's 422 rather
+        # than the previous inline 400. detail still mentions the field.
         kind, status, detail = await self._call({"query": "test", "fusion_mode": "magic"})
         self.assertEqual(kind, "http_error")
-        self.assertEqual(status, 400)
+        self.assertEqual(status, 422)
         self.assertIn("fusion_mode", detail)
 
     async def test_fusion_mode_non_string_rejected(self):
+        # Post-#179: pydantic ValidationError → 422 (was 400 inline).
         kind, status, detail = await self._call({"query": "test", "fusion_mode": 42})
         self.assertEqual(kind, "http_error")
-        self.assertEqual(status, 400)
+        self.assertEqual(status, 422)
 
     async def test_fusion_mode_null_treated_as_omitted(self):
         """Explicit JSON null behaves the same as omitting the key."""

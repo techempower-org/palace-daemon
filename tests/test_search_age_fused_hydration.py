@@ -72,7 +72,12 @@ class TestAgeFusedHydration(unittest.IsolatedAsyncioTestCase):
         return _R()
 
     async def _call_endpoint(self, body):
-        resp = await main.search_age_fused(self._make_request(body), x_api_key=None)
+        # Post-#179 Option C: search_age_fused takes a SearchAgeFusedBody
+        # instead of a raw Request. Construct one from the dict; pydantic
+        # validators run wing-canonicalize + room-validate at this point.
+        from search_models import SearchAgeFusedBody
+        parsed = SearchAgeFusedBody(**body)
+        resp = await main.search_age_fused(parsed, x_api_key=None)
         # FastAPI handlers return dicts directly; JSONResponse only on errors.
         if isinstance(resp, dict):
             return resp
