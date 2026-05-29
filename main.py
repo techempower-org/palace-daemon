@@ -1987,47 +1987,12 @@ from postgres import require_postgres as _require_postgres  # noqa: E402,F401
 from postgres import connect_postgres as _connect_postgres  # noqa: E402,F401
 
 
-def _fast_status_payload() -> dict:
-    """Per-wing / per-room counts via direct SQL — no MCP, no AGE, no locks.
-
-    Shared between ``GET /status/fast`` and the ``/mcp`` fast-intercept
-    path (issue #49); the latter wraps this into the ``tool_status``
-    envelope shape, the former returns it as-is.
-    """
-    dsn = _postgres_dsn()
-    if not dsn:
-        raise RuntimeError("postgres backend not configured")
-    import psycopg2
-    # psycopg2's connection context manager commits/rolls-back the
-    # transaction but does NOT close the connection — leaving the close
-    # to garbage collection leaks file descriptors under load. Wrap in
-    # try/finally so the connection is always released on exit.
-    # #108: record OperationalError on connect so the /health observability
-    # ring buffer is populated even on the fast-status path (which doesn't
-    # go through _connect_postgres). Re-raise so existing callers (the
-    # fast-intercept fallback and /status/fast) keep their behaviour.
-    try:
-        conn = psycopg2.connect(dsn, connect_timeout=3)
-    except psycopg2.OperationalError as e:
-        _record_db_error(e)
-        raise
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SET LOCAL statement_timeout = '3s'")
-                cur.execute("SELECT count(*) FROM mempalace_drawers")
-                total = cur.fetchone()[0]
-                cur.execute(
-                    "SELECT wing, count(*) FROM mempalace_drawers GROUP BY wing ORDER BY count(*) DESC"
-                )
-                wings = {r[0]: r[1] for r in cur.fetchall()}
-                cur.execute(
-                    "SELECT room, count(*) FROM mempalace_drawers WHERE room IS NOT NULL GROUP BY room ORDER BY count(*) DESC"
-                )
-                rooms = {r[0]: r[1] for r in cur.fetchall()}
-    finally:
-        conn.close()
-    return {"total_drawers": total, "wings": wings, "rooms": rooms}
+# #101 thirteenth slice: _fast_status_payload moved to fast_intercept.py.
+# Re-exported under the old name so existing call sites (/status/fast
+# route, fast_intercept.fast_mcp_status_payload's lazy lookup) and tests
+# (test_db_error_integration's direct call + test_mcp_fast_intercept's
+# patch.object) keep working unchanged.
+from fast_intercept import fast_status_payload as _fast_status_payload  # noqa: E402,F401
 
 
 # ── Daemon-native MCP tools (#93) ─────────────────────────────────────────────

@@ -6,31 +6,80 @@ Cypher scans — 29s and 9s respectively at our production size, which
 exceeds client timeouts. These helpers produce the same envelope shape
 from direct-SQL fast paths so the response stays sub-second under load.
 
-**Why the lazy ``import main``**
+**Why the lazy ``import main`` in the wrappers**
 
-Both wrappers internally call helpers that still live in main.py:
-
-- ``fast_mcp_status_payload`` calls ``main._fast_status_payload``
-- ``fast_mcp_kg_stats_payload`` calls ``main._read_kg_postgres_stats``
-
-The unit tests in ``tests/test_mcp_fast_intercept.py`` patch those
-helpers via ``patch.object(main, "_fast_status_payload", ...)`` and
-``patch.object(main, "_read_kg_postgres_stats", ...)`` and then call
-the wrappers through ``main._fast_mcp_*_payload``. If the wrappers
-captured a direct module-level reference, the patch would not
-intercept (the wrapper would resolve in its own module's namespace).
+The fast-intercept wrappers call helpers that test code patches via
+``patch.object(main, ...)``. If the wrappers captured a direct
+module-level reference, the patch would not intercept — the wrapper
+would resolve in its own module's namespace.
 
 The function-local ``import main`` resolves the helper *at call time*
 via main's namespace, so patches work without test edits. Same
 pattern as ``daemon_tools.invalidate_rooms_cache`` (#131).
 
-A future slice could pull ``_fast_status_payload`` and
-``_read_kg_postgres_stats`` here too, but each move requires either
-updating the tests to patch this module, or adding another layer of
-indirection back to main. For now the wrappers live here and the
+This pattern enabled #101 thirteenth slice (this commit) to move
+``fast_status_payload`` here without touching tests: main.py re-exports
+the function under its old ``_fast_status_payload`` name, and the
+wrapper's lazy ``main._fast_status_payload()`` lookup sees both the
+patched value (when tests patch it) and the live function (when not).
+
+``_read_kg_postgres_stats`` still lives in ``kg_reader.py`` (extracted
+in JP's #134); the same lazy-import pattern applies to its wrapper.
 helpers stay where the tests expect them.
 """
 from __future__ import annotations
+
+
+def fast_status_payload() -> dict:
+    """Per-wing / per-room counts via direct SQL — no MCP, no AGE, no locks.
+
+    Shared between ``GET /status/fast`` and the ``/mcp`` fast-intercept
+    path (issue #49); the latter wraps this into the ``tool_status``
+    envelope shape, the former returns it as-is.
+
+    Extracted from main.py per #101 (thirteenth slice). main.py
+    re-exports under ``_fast_status_payload`` so existing test patches
+    (``patch.object(main, "_fast_status_payload", ...)``) and direct
+    callers (``main._fast_status_payload()`` in test_db_error_integration)
+    keep working.
+    """
+    from postgres import postgres_dsn
+    from db_errors import record_db_error
+
+    dsn = postgres_dsn()
+    if not dsn:
+        raise RuntimeError("postgres backend not configured")
+    import psycopg2
+    # psycopg2's connection context manager commits/rolls-back the
+    # transaction but does NOT close the connection — leaving the close
+    # to garbage collection leaks file descriptors under load. Wrap in
+    # try/finally so the connection is always released on exit.
+    # #108: record OperationalError on connect so the /health observability
+    # ring buffer is populated even on the fast-status path (which doesn't
+    # go through _connect_postgres). Re-raise so existing callers (the
+    # fast-intercept fallback and /status/fast) keep their behaviour.
+    try:
+        conn = psycopg2.connect(dsn, connect_timeout=3)
+    except psycopg2.OperationalError as e:
+        record_db_error(e)
+        raise
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = '3s'")
+                cur.execute("SELECT count(*) FROM mempalace_drawers")
+                total = cur.fetchone()[0]
+                cur.execute(
+                    "SELECT wing, count(*) FROM mempalace_drawers GROUP BY wing ORDER BY count(*) DESC"
+                )
+                wings = {r[0]: r[1] for r in cur.fetchall()}
+                cur.execute(
+                    "SELECT room, count(*) FROM mempalace_drawers WHERE room IS NOT NULL GROUP BY room ORDER BY count(*) DESC"
+                )
+                rooms = {r[0]: r[1] for r in cur.fetchall()}
+    finally:
+        conn.close()
+    return {"total_drawers": total, "wings": wings, "rooms": rooms}
 
 
 def fast_mcp_status_payload() -> dict:
