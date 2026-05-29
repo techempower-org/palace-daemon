@@ -92,6 +92,37 @@ def canonical_rooms() -> set[str]:
     return _canonical_rooms_cache
 
 
+def normalize_wing_filter(wing):
+    """Normalize a wing slug for use as a read filter.
+
+    The write-side ``normalize_wing_slug`` returns "unknown" for empty
+    input — correct because writes need a non-null wing. For *filters*,
+    empty input means "no filter" (read all wings), so None is correct.
+    This wrapper preserves that distinction:
+
+      normalize_wing_filter(None)              → None  (no filter)
+      normalize_wing_filter("")                → None
+      normalize_wing_filter("Palace_Daemon")   → "palace_daemon"
+      normalize_wing_filter("wing_palace")     → "palace"
+
+    Used by every read endpoint that accepts ``wing`` as a query filter
+    (/search, /list, /search/hybrid, /search/keyword, /search/age-fused,
+    /search/fast). Pre-fix these endpoints passed the caller's wing
+    string through unchanged, so a write that landed under
+    ``palace_daemon`` (normalized from "Palace_Daemon") couldn't be
+    retrieved by querying ``Palace_Daemon`` — same asymmetric contract
+    as the PATCH /memory{room} bug (#174).
+    """
+    if not wing:
+        return None
+    normalized = normalize_wing_slug(wing)
+    # normalize_wing_slug fall-back returns "unknown" for unparseable
+    # input — that's not a valid filter, treat as "no filter."
+    if normalized == "unknown":
+        return None
+    return normalized
+
+
 def validate_room_or_raise(room):
     """Raise HTTP 400 if ``room`` is set and not canonical.
 

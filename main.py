@@ -1315,6 +1315,10 @@ async def search(
     # from a non-matching filter). Same contract as /search/hybrid,
     # /search/keyword, /search/age-fused (all routed through this helper).
     _rooms.validate_room_or_raise(room)
+    # Normalize wing so a caller's "Palace_Daemon" matches the stored
+    # "palace_daemon" written by POST /memory's normalization. Pre-fix
+    # asymmetric — writes normalized, reads didn't.
+    wing = _rooms.normalize_wing_filter(wing)
     args = _search_args(q, limit)
     if wing:
         args["wing"] = wing
@@ -1381,7 +1385,7 @@ async def search_hybrid(request: Request, x_api_key: str | None = Header(default
     query = (body.get("query") or "").strip()
     if not query:
         raise HTTPException(status_code=400, detail="'query' is required and must be non-empty")
-    wing = body.get("wing") or None
+    wing = _rooms.normalize_wing_filter(body.get("wing"))
     room = body.get("room") or None
     limit = int(body.get("limit") or 10)
     include_trace = bool(body.get("include_trace") or False)
@@ -1452,7 +1456,7 @@ async def search_keyword(request: Request, x_api_key: str | None = Header(defaul
     query = (body.get("query") or "").strip()
     if not query:
         raise HTTPException(status_code=400, detail="'query' is required and must be non-empty")
-    wing = body.get("wing") or None
+    wing = _rooms.normalize_wing_filter(body.get("wing"))
     room = body.get("room") or None
     limit = int(body.get("limit") or 20)
     if limit < 1 or limit > 200:
@@ -1515,7 +1519,7 @@ async def search_age_fused(request: Request, x_api_key: str | None = Header(defa
     query = (body.get("query") or "").strip()
     if not query:
         raise HTTPException(status_code=400, detail="'query' is required and must be non-empty")
-    wing = body.get("wing") or None
+    wing = _rooms.normalize_wing_filter(body.get("wing"))
     room = body.get("room") or None
     limit = int(body.get("limit") or 10)
     graph_top_k = int(body.get("graph_top_k") or 50)
@@ -1796,6 +1800,8 @@ async def list_drawers(
     # Validate room so a typo gets a fast 400 — same contract as the
     # /search* endpoints.
     _rooms.validate_room_or_raise(room)
+    # Normalize wing so callers get symmetric read/write behavior.
+    wing = _rooms.normalize_wing_filter(wing)
     args: dict = {"limit": int(limit), "offset": int(offset)}
     if wing is not None:
         args["wing"] = wing
@@ -2075,6 +2081,8 @@ async def search_fast(
 ):
     """Fast BM25 text search via direct SQL — no vector, no AGE locks."""
     _check_auth(x_api_key)
+    # Normalize wing so callers get symmetric read/write behavior.
+    wing = _rooms.normalize_wing_filter(wing)
     dsn = os.environ.get("MEMPALACE_POSTGRES_DSN") or getattr(
         _mp._config, "postgres_dsn", None
     )
