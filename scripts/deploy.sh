@@ -266,7 +266,14 @@ if [ -f "$(git rev-parse --show-toplevel 2>/dev/null)/mempalace-db/docker-compos
             "$(git rev-parse --show-toplevel)/mempalace-db/postgresql.conf" 2>/dev/null \
             | head -1 | sed -E "s/^${setting}\s*=\s*([^ #]+).*/\1/")
         [ -z "$expected" ] && continue
-        actual=$(ssh "$SSH_TARGET" "docker exec mempalace-db psql -U palace mempalace_2026_05_13 -tA -c \"SHOW $setting\"" 2>/dev/null | tr -d ' ')
+        # ``|| echo ""`` guard (matches the actual_bytes lookup above): the
+        # config-drift check is INFORMATIONAL and must never abort the deploy.
+        # Without it, a transient psql failure (e.g. "database system is
+        # shutting down" during a DB bounce, exit 2) propagates under
+        # ``set -euo pipefail`` and kills the whole deploy *before the
+        # restart* — observed 2026-05-29 mid-bench. Empty ``actual`` → the
+        # check below skips, the deploy proceeds to the restart.
+        actual=$(ssh "$SSH_TARGET" "docker exec mempalace-db psql -U palace mempalace_2026_05_13 -tA -c \"SHOW $setting\"" 2>/dev/null | tr -d ' ' || echo "")
         if [ -n "$actual" ] && [ "$actual" != "$expected" ]; then
             warn "postgresql.conf $setting drift: container=$actual, committed=$expected"
             warn "Apply: ssh $HOST 'cd ~/Projects/palace-daemon/mempalace-db && docker compose down && docker compose up -d' (maintenance window)"
