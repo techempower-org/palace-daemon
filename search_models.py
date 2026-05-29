@@ -182,6 +182,59 @@ class MineBody(BaseModel):
         return v
 
 
+class MemoryBody(BaseModel):
+    """Body for POST /memory (the primary write surface).
+
+    Write-side wing semantics: empty input coerces to ``"unknown"`` (the
+    pre-#179 inline default), then normalizes through ``normalize_wing_slug``.
+    This is distinct from /silent-save (which preserves ``""`` and lets the
+    handler emit a warning) and /mine (which defaults to ``"general"``).
+
+    Room defaults to ``"discoveries"`` (the spec's catch-all per the canonical
+    7-room taxonomy) when missing or empty, then is validated via
+    ``rooms.validate_room_or_raise`` which produces a structured 400 with
+    ``valid_rooms`` + ``hint`` on a typo. The structured detail matches the
+    pre-#179 inline error shape exactly — clients that parsed
+    ``detail.valid_rooms`` continue to work.
+
+    Content is permissive — empty strings round-trip through to mempalace.
+    The pre-#179 handler did ``body.get("content", "")`` with no rejection,
+    so this preserves behavior even though min_length=1 might feel safer.
+    A future PR could tighten it after auditing for callers that intentionally
+    write empty drawers (none known in-tree).
+    """
+
+    content: str = Field("", description="Drawer content body (empty allowed for back-compat).")
+    wing: str = Field("", description="Wing slug — empty → 'unknown', then normalized.")
+    room: str = Field("", description="Canonical room — empty → 'discoveries', validated.")
+
+    @field_validator("wing")
+    @classmethod
+    def _normalize_wing(cls, v):
+        # /memory has WRITE-side wing semantics: empty coerces to the
+        # 'unknown' default (matching pre-#179 inline behavior) and then
+        # normalizes via the write helper. Distinct from /silent-save
+        # which preserves "" and from /backfill-age which treats empty
+        # as None (filter mode).
+        from rooms import normalize_wing_slug
+        if not v or not v.strip():
+            v = "unknown"
+        return normalize_wing_slug(v)
+
+    @field_validator("room")
+    @classmethod
+    def _validate_room(cls, v):
+        # /memory defaults empty room to "discoveries" (spec's catch-all)
+        # then validates against the canonical set. validate_room_or_raise
+        # produces the structured 400 with valid_rooms + hint.
+        if not v or not v.strip():
+            v = "discoveries"
+        # _canon_room is the shared helper at the top of this module;
+        # it raises HTTPException(400, detail={...}) on a non-canonical
+        # value. The HTTPException propagates cleanly through pydantic.
+        return _canon_room(v)
+
+
 class SilentSaveBody(BaseModel):
     """Body for POST /silent-save (Stop-hook diary checkpoint write).
 
