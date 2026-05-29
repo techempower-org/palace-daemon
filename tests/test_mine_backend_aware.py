@@ -95,6 +95,22 @@ class TestMineBackendAware(unittest.IsolatedAsyncioTestCase):
         req.app.state.active_mines = set()
         return req, MineBody(**body)
 
+    async def test_disable_switch_skips_without_spawning(self):
+        """palace-daemon#190: PALACE_DISABLE_AUTOMINE gates POST /mine too,
+        not just the watcher — #190's disruptive mine was a hook-driven
+        POST /mine. With the switch set the endpoint returns a skipped-200
+        and spawns no subprocess, so a bench isn't disrupted by hook mines."""
+        fake_cfg = MagicMock(backend="postgres", palace_path="/tmp/palace")
+        with patch.dict(os.environ, {"PALACE_DISABLE_AUTOMINE": "1"}, clear=False), \
+             patch.object(main._mp, "_config", fake_cfg), \
+             patch("asyncio.create_subprocess_exec") as spawn:
+            req, body = self._request_and_body()
+            result = await main.mine(req, body, x_api_key=None)
+
+        self.assertTrue(result.get("skipped"), "mine must be skipped when disabled")
+        self.assertIn("PALACE_DISABLE_AUTOMINE", result.get("reason", ""))
+        spawn.assert_not_called()
+
     async def test_chroma_enters_exclusive_closes_and_reopens(self):
         fake_excl = _FakeExclusive()
         fake_cfg = MagicMock(backend="chroma", palace_path="/tmp/palace")

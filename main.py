@@ -2370,6 +2370,33 @@ async def mine(
     extract = body.extract
     limit = body.limit
 
+    # palace-daemon#190: gate EXPLICIT mines too, not just the watcher.
+    # #190's disruptive mine was a POST /mine (hook-driven conversation
+    # ingest), not the watcher auto-mine — the bench lock (#104) only gated
+    # _internal_mine, so hook mines slipped through and one was in-flight
+    # when the daemon was SIGTERM'd mid-bench. Honoring BOTH the hard env
+    # switch and the advisory bench lock here means touching
+    # .bench-active.lock (or setting PALACE_DISABLE_AUTOMINE) protects a
+    # bench from ALL mining. Returns a 200 skipped-response (not an error)
+    # so the conversation-mining hooks treat it as a clean no-op rather
+    # than retrying or surfacing a failure.
+    _amd, _amd_why = _automine_disabled()
+    _blk, _blk_why = _bench_lock_active()
+    if _amd or _blk:
+        _why = _amd_why if _amd else f"bench-active.lock present ({_blk_why})"
+        # _log (module logger), not `logging` — the latter is shadowed by a
+        # function-local `import logging` further down in _run_mine_subprocess.
+        _log.info(
+            "POST /mine skipped — mining paused (%s, dir=%s, wing=%s)", _why, raw_dir, wing
+        )
+        return {
+            "skipped": True,
+            "reason": _why,
+            "systemMessage": (
+                f"Mine skipped — mining paused ({_why}). No subprocess spawned."
+            ),
+        }
+
     # During /repair mode=rebuild, queue the mine instead of executing it.
     # Mirrors the /silent-save queue pattern — the rebuild replaces the
     # collection mid-flight, so any concurrent mine subprocess would race
