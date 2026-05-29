@@ -57,7 +57,14 @@ def postgres_dsn(_config_provider=None) -> "str | None":
             import mempalace.mcp_server as _mp
             cfg = _mp._config
         return getattr(cfg, "postgres_dsn", None)
-    except Exception:
+    except Exception as e:
+        # mempalace.mcp_server import / _config access failed. Caller
+        # (`require_postgres`) treats None as BACKEND_DOWN, but we lose
+        # the *reason* — was mempalace not installed, was _config not yet
+        # initialized, was it corrupted? Log so operators can triage.
+        # Same lesson as #157 (silent except: pass hides bugs for weeks).
+        import logging
+        logging.warning("postgres_dsn: config lookup failed (BACKEND_DOWN): %s", e)
         return None
 
 
