@@ -2,6 +2,52 @@
 
 ## Unreleased
 
+### Added — *#179 complete: wing/room canonicalization enforced at every input boundary*
+
+The 11-call-site canonicalization *convention* is now a structural
+*invariant*. Every surface that accepts a wing or room canonicalizes it
+at the request-parse / input-parse layer, so a handler body can no
+longer receive a non-canonical value (closes the #174/#175/#177/#178
+asymmetric-contract bug class):
+
+| Surface | Mechanism | PR |
+|---|---|---|
+| `GET /search`, `/list`, `/search/fast` | FastAPI `Depends()` | #180 |
+| `POST /search/keyword`, `/search/hybrid`, `/search/age-fused` | pydantic body models | #181 |
+| `POST /backfill-age` | `BackfillAgeBody` | #182 |
+| `POST /silent-save` | `SilentSaveBody` | #183 |
+| `POST /mine` | `MineBody` | #184 |
+| `POST /memory` | `MemoryBody` | #186 + #187 |
+| `PALACE_WATCH_DIRS` (watcher) | `parse_watch_dirs` | #188 |
+
+Empty-wing semantics are intentionally per-surface (encoded per model):
+`/memory`→`"unknown"`, `/silent-save`→`""`+warning, `/mine`→`"general"`,
+`/backfill-age`→`None` (filter), watcher→path-basename. A new
+regression suite (`tests/test_write_surface_models.py`, 21 tests) locks
+in this matrix so a future "unify these" refactor fails loudly.
+
+### Fixed — *#187: `MemoryBody` skipped default coercion (validate_default)*
+
+Pydantic v2 skips field validators on *default* values. `MemoryBody`'s
+first deploy (#186) omitted `validate_default=True`, so a `POST /memory`
+with no `room` arrived as `""` instead of coercing to `"discoveries"` —
+mempalace then rejected it ("room is empty after sanitization"). Caught
+by a live-curl probe immediately after deploy; the test suite missed it
+because no test exercised `POST /memory` with a missing-room body (that
+gap is now closed). Fix: `model_config = {"validate_default": True}`.
+
+### Fixed — *#185: deploy.sh restarted on stale source without a freshness check*
+
+The "remote is not a git checkout — assuming mirrored deploy" branch
+restarted the daemon with no verification the Syncthing/rsync mirror
+had received the push. A dead Syncthing daemon on the host let a deploy
+restart on stale source while `/health` + verify-routes reported
+success. Fix: compare a sha256 digest of the git-tracked `.py` sources
+(local vs host) before restarting; on mismatch retry once after
+`PALACE_SYNC_GRACE` then **fail closed**. Scoped to `git ls-files
+'*.py'` — a raw `find` never matches (local `.claude/worktrees/` copies,
+host venv with 100k+ `.py`).
+
 ### Fixed — */cypher maps postgres errors to structured HTTP responses*
 
 Pre-fix the /cypher endpoint only translated `ReadOnlySqlTransaction`
