@@ -144,13 +144,25 @@ def parse_watch_dirs(
         if not path.is_dir():
             _log.warning("PALACE_WATCH_DIRS: skipping %r (not a directory)", path_str)
             continue
-        if not wing:
-            try:
-                from mempalace.config import normalize_wing_name
+        # palace-daemon#179: canonicalize wing at the parse boundary, not
+        # at use time. Pre-#179 _internal_mine called _normalize_wing_slug
+        # defensively right before spawning the subprocess; centralizing
+        # the canonicalization here means WatchTarget objects always carry
+        # canonical slugs. Path-derived wings already went through
+        # normalize_wing_name; explicit env-provided wings now go through
+        # the same path so ``path=Palace_Daemon`` and ``path=palace_daemon``
+        # produce identical WatchTargets.
+        try:
+            from mempalace.config import normalize_wing_name
 
+            if not wing:
                 wing = normalize_wing_name(path.name)
-            except ImportError:
-                wing = path.name.lower().replace(" ", "_").replace("-", "_")
+            else:
+                wing = normalize_wing_name(wing)
+        except ImportError:
+            if not wing:
+                wing = path.name
+            wing = wing.lower().replace(" ", "_").replace("-", "_")
         targets.append(WatchTarget(path=path, wing=wing))
     return targets
 
