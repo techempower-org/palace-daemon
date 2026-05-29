@@ -117,6 +117,30 @@ class SearchHybridBody(BaseModel):
         return v
 
 
+class BackfillAgeBody(BaseModel):
+    """Body for POST /backfill-age.
+
+    All fields optional with safe defaults — the endpoint accepts an
+    empty POST body (e.g. ``curl -X POST .../backfill-age`` with no
+    Content-Type) and falls back to ``backfill everything``.
+
+    Wing here is a *filter* (read-side semantic): restrict the backfill
+    scope to drawers under one wing. Empty/None means "all wings."
+    Normalize via ``rooms.normalize_wing_filter`` so a caller passing
+    ``Palace_Daemon`` finds the drawers stored under ``palace_daemon``.
+    """
+
+    wing: "str | None" = Field(None, description="Optional wing filter.")
+    skip_palace: bool = Field(False, description="Skip Wing/Room/Drawer structure.")
+    skip_entities: bool = Field(False, description="Skip per-drawer entity extraction.")
+    restart: bool = Field(False, description="Clear checkpoint, start fresh.")
+
+    @field_validator("wing")
+    @classmethod
+    def _normalize_wing(cls, v):
+        return _canon_wing(v)
+
+
 class SearchAgeFusedBody(BaseModel):
     """Body for POST /search/age-fused."""
 

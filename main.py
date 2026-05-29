@@ -2916,8 +2916,16 @@ async def mine(request: Request, x_api_key: str | None = Header(default=None)):
 _backfill_state: dict[str, Any] = {"in_progress": False}
 _backfill_lock = asyncio.Lock()
 
+from search_models import BackfillAgeBody  # noqa: E402
+from fastapi import Body  # noqa: E402
+
+
 @app.post("/backfill-age")
-async def backfill_age(request: Request, x_api_key: str | None = Header(default=None)):
+async def backfill_age(
+    request: Request,
+    body: BackfillAgeBody = Body(default_factory=BackfillAgeBody),
+    x_api_key: str | None = Header(default=None),
+):
     """Trigger AGE graph backfill from existing drawer rows.
 
     Runs `mempalace-backfill-age` (or `python -m mempalace.backfill_age`)
@@ -2950,20 +2958,17 @@ async def backfill_age(request: Request, x_api_key: str | None = Header(default=
         if not dsn:
             raise HTTPException(status_code=500, detail="no postgres DSN available")
 
-        body = await request.json() if request.headers.get("content-type") == "application/json" else {}
+        # palace-daemon#179 Option C: body fields (wing, skip_palace,
+        # skip_entities, restart) already validated + wing-canonicalized
+        # by BackfillAgeBody at parse time.
         cmd = [sys.executable, "-m", "mempalace.backfill_age", "--dsn", dsn]
-        # Normalize wing so the backfill filter matches drawers stored
-        # under the canonical wing slug. Pre-fix: backfill-age with
-        # wing="Palace_Daemon" looked for drawers with that literal value
-        # and found nothing (they're stored as "palace_daemon").
-        wing_filter = _rooms.normalize_wing_filter(body.get("wing"))
-        if wing_filter:
-            cmd += ["--wing", wing_filter]
-        if body.get("skip_palace"):
+        if body.wing:
+            cmd += ["--wing", body.wing]
+        if body.skip_palace:
             cmd.append("--skip-palace")
-        if body.get("skip_entities"):
+        if body.skip_entities:
             cmd.append("--skip-entities")
-        if body.get("restart"):
+        if body.restart:
             cmd.append("--restart")
 
         _backfill_state["in_progress"] = True
