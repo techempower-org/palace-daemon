@@ -427,7 +427,10 @@ def read_kg_postgres_stats() -> dict | None:
         from mempalace.knowledge_graph_age import KnowledgeGraphAGE
 
         kg = KnowledgeGraphAGE(dsn=dsn)
-    except Exception:
+    except Exception as e:
+        # Same lesson as #160 — silent None hides KG init failures
+        # behind /graph's empty kg_stats response.
+        logging.warning("read_kg_postgres_stats: KnowledgeGraphAGE init failed: %s", e)
         return None
     try:
         graph = getattr(kg, "GRAPH_NAME", "mempalace_kg")
