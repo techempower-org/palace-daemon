@@ -80,12 +80,20 @@ class TestMineBackendAware(unittest.IsolatedAsyncioTestCase):
         main._repair_state.update(self._orig_repair)
         self.tmp.cleanup()
 
-    def _request(self, **body_overrides):
+    def _request_and_body(self, **body_overrides):
+        """Returns (request_mock, MineBody). Post-#179 /mine signature
+        takes a pydantic body alongside the Request; tests construct
+        both. The request is still needed for `request.app.state.active_mines`
+        access in the subprocess-tracking path (#138/#139)."""
+        from search_models import MineBody
         body = {"dir": self.dir, "wing": "general", "mode": "convos"}
         body.update(body_overrides)
         req = MagicMock()
         req.json = AsyncMock(return_value=body)
-        return req
+        # active_mines set is read by _run_mine_subprocess for lifespan
+        # cleanup; tests don't care about it, just need the attr to exist.
+        req.app.state.active_mines = set()
+        return req, MineBody(**body)
 
     async def test_chroma_enters_exclusive_closes_and_reopens(self):
         fake_excl = _FakeExclusive()
@@ -96,7 +104,7 @@ class TestMineBackendAware(unittest.IsolatedAsyncioTestCase):
              patch.object(main._mp, "_get_collection") as reopen, \
              patch("asyncio.create_subprocess_exec",
                    side_effect=_fake_subprocess_factory()) as spawn:
-            result = await main.mine(self._request(), x_api_key=None)
+            req, body = self._request_and_body(); result = await main.mine(req, body, x_api_key=None)
 
         self.assertTrue(fake_excl.entered, "chroma must hold the exclusive palace lock")
         self.assertTrue(fake_excl.exited)
@@ -114,7 +122,7 @@ class TestMineBackendAware(unittest.IsolatedAsyncioTestCase):
              patch.object(main._mp, "_get_collection") as reopen, \
              patch("asyncio.create_subprocess_exec",
                    side_effect=_fake_subprocess_factory()) as spawn:
-            result = await main.mine(self._request(), x_api_key=None)
+            req, body = self._request_and_body(); result = await main.mine(req, body, x_api_key=None)
 
         self.assertFalse(fake_excl.entered, "postgres must NOT hold the exclusive lock")
         drop.assert_not_called()
@@ -133,7 +141,7 @@ class TestMineBackendAware(unittest.IsolatedAsyncioTestCase):
              patch.object(main._mp, "_get_collection") as reopen, \
              patch("asyncio.create_subprocess_exec",
                    side_effect=_fake_subprocess_factory(returncode=1, stdout=b"", stderr=b"boom")):
-            result = await main.mine(self._request(), x_api_key=None)
+            req, body = self._request_and_body(); result = await main.mine(req, body, x_api_key=None)
 
         drop.assert_called_once_with(close=True)
         # Reopen lives in a finally — must fire even though the mine failed.
@@ -153,7 +161,7 @@ class TestMineBackendAware(unittest.IsolatedAsyncioTestCase):
              patch("asyncio.create_subprocess_exec",
                    side_effect=_fake_subprocess_factory()):
             with self.assertRaises(RuntimeError):
-                await main.mine(self._request(), x_api_key=None)
+                await main.mine(*self._request_and_body(), x_api_key=None)
 
         reopen.assert_called_once_with(True)
         self.assertTrue(fake_excl.exited, "exclusive lock must release after reopen")
@@ -173,7 +181,7 @@ class TestMineBackendAware(unittest.IsolatedAsyncioTestCase):
              patch.object(main._mp, "_get_collection") as reopen, \
              patch("asyncio.create_subprocess_exec", side_effect=_cancel):
             with self.assertRaises(asyncio.CancelledError):
-                await main.mine(self._request(), x_api_key=None)
+                await main.mine(*self._request_and_body(), x_api_key=None)
 
         drop.assert_called_once_with(close=True)
         reopen.assert_called_once_with(True)
@@ -191,7 +199,7 @@ class TestMineBackendAware(unittest.IsolatedAsyncioTestCase):
              patch.object(main._mp, "_get_collection", side_effect=RuntimeError("reopen boom")), \
              patch("asyncio.create_subprocess_exec",
                    side_effect=_fake_subprocess_factory()):
-            result = await main.mine(self._request(), x_api_key=None)
+            req, body = self._request_and_body(); result = await main.mine(req, body, x_api_key=None)
 
         # Handler swallows the reopen failure (logged CRITICAL) and returns.
         self.assertEqual(result["returncode"], 0)

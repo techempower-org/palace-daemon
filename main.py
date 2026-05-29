@@ -2741,8 +2741,15 @@ async def create_backup(x_api_key: str | None = Header(default=None)):
 
 # ── Mine endpoint (serialized bulk import) ────────────────────────────────────
 
+from search_models import MineBody  # noqa: E402
+
+
 @app.post("/mine")
-async def mine(request: Request, x_api_key: str | None = Header(default=None)):
+async def mine(
+    request: Request,
+    body: MineBody,
+    x_api_key: str | None = Header(default=None),
+):
     """
     Run mempalace mine under _mine_sem (one job at a time). Normal read/write
     traffic continues unblocked during the job; mempalace ≥3.3.2 enforces
@@ -2752,19 +2759,11 @@ async def mine(request: Request, x_api_key: str | None = Header(default=None)):
             "extract": "exchange", "limit": 100 }
     """
     _check_auth(x_api_key)
-    body = await request.json()
-    directory = body.get("dir")
-    if not directory:
-        raise HTTPException(status_code=400, detail="'dir' is required")
-    if not isinstance(directory, str):
-        # Closes Copilot finding on jphein/palace-daemon#1: a JSON number /
-        # object / list would crash _translate_client_path().startswith and
-        # surface as 500 rather than a clean 400.
-        raise HTTPException(status_code=400, detail="'dir' must be a string")
-
-    # Hook clients send paths in their own filesystem namespace. Translate
-    # to the daemon's view via PALACE_DAEMON_PATH_MAP before validation.
-    directory = _translate_client_path(directory)
+    # palace-daemon#179: body fields (dir, wing, mode, extract, limit)
+    # already validated + wing-canonicalized by MineBody at parse time.
+    # Filesystem checks on dir stay here — pydantic can't probe the FS.
+    raw_dir = body.dir
+    directory = _translate_client_path(raw_dir)
 
     dir_path = Path(directory)
     if not dir_path.is_absolute() or ".." in dir_path.parts:
@@ -2774,38 +2773,24 @@ async def mine(request: Request, x_api_key: str | None = Header(default=None)):
     if not dir_path.is_dir():
         raise HTTPException(status_code=400, detail=f"Path is not a directory: {directory}")
 
-    # Normalize wing so /mine subprocess writes drawers under the same
-    # canonical slug /memory POST uses — and so post-#175 read endpoints
-    # can find them with the same wing filter. Pre-fix: /mine with
-    # wing="Palace_Daemon" stored drawers under "Palace_Daemon" but
-    # /search?wing=Palace_Daemon normalizes to "palace_daemon" → miss.
-    wing = _normalize_wing_slug(body.get("wing", "general") or "general")
-    mode = body.get("mode", "convos")
-    extract = body.get("extract")
-    limit = body.get("limit")
-
-    if mode not in _MINE_VALID_MODES:
-        raise HTTPException(status_code=400, detail=f"'mode' must be one of: {', '.join(sorted(_MINE_VALID_MODES))}")
-    if extract is not None and extract not in _MINE_VALID_EXTRACTS:
-        raise HTTPException(status_code=400, detail=f"'extract' must be one of: {', '.join(sorted(_MINE_VALID_EXTRACTS))}")
-    if limit is not None:
-        try:
-            limit = int(limit)
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="'limit' must be an integer")
+    wing = body.wing
+    mode = body.mode
+    extract = body.extract
+    limit = body.limit
 
     # During /repair mode=rebuild, queue the mine instead of executing it.
     # Mirrors the /silent-save queue pattern — the rebuild replaces the
     # collection mid-flight, so any concurrent mine subprocess would race
     # the swap. After repair completes, _drain_pending_mines() replays
     # queued mines through the same code path. Pass-through fields preserve
-    # extract/limit on replay.
+    # extract/limit on replay. Use the UN-translated raw_dir so replay
+    # translates fresh (path-map may differ between original + replay).
     if (
         _repair_state["in_progress"]
         and _repair_state.get("mode") == "rebuild"
     ):
         await _enqueue_pending_mine({
-            "dir": body.get("dir"),  # original (untranslated) path so replay translates fresh
+            "dir": raw_dir,
             "wing": wing,
             "mode": mode,
             "extract": extract,
