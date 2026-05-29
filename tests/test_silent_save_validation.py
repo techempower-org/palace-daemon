@@ -116,14 +116,17 @@ class TestSilentSaveEmptyWingWarning(unittest.TestCase):
             body["warnings"],
         )
 
-    def test_missing_entry_still_rejected_with_400(self):
+    def test_missing_entry_still_rejected(self):
         # The wing validation is a *warning*; the entry validation is
-        # still a hard 400. Don't accidentally relax that.
+        # still a hard rejection. Post-#179 pydantic returns 422 for
+        # missing-required-field rather than the previous inline 400 —
+        # the contract that "entry is required" is preserved, just the
+        # HTTP code surface changed to pydantic's standard.
         resp = self.client.post(
             "/silent-save",
             json={"wing": "diary_selene"},
         )
-        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.status_code, 422)
 
 
 if __name__ == "__main__":
