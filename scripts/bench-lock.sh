@@ -57,7 +57,11 @@ _extractor_known() {
 }
 
 _extractor_state() {
-    systemctl is-active "${EXTRACTOR_SERVICE}.service" 2>/dev/null || echo "unknown"
+    # `systemctl is-active` prints the accurate state (active/inactive/
+    # failed/unknown) but exits non-zero for anything but "active" — so we
+    # swallow the exit code with `|| true` rather than appending our own
+    # word (which previously leaked a spurious second "unknown" line).
+    systemctl is-active "${EXTRACTOR_SERVICE}.service" 2>/dev/null || true
 }
 
 # Best-effort stop/start. Never `exit` on failure — the lock is the primary
