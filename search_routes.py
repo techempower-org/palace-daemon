@@ -41,11 +41,108 @@ from search_models import (  # noqa: F401
 
 router = APIRouter()
 
+# ── kind= filter (palace-daemon#194) ─────────────────────────────────────────
+#
+# Stop-hook auto-save checkpoint diary entries (``CHECKPOINT:…`` bodies,
+# ``topic=checkpoint``) are session-summary noise that drowns out real content
+# under vector similarity. ``kind="content"`` (the default) excludes them;
+# ``kind="all"`` returns the unfiltered superset; ``kind="checkpoint"`` returns
+# only the checkpoints (recovery/audit lookups).
+#
+# History: commit 4a318d3 (2026-04-27) RETIRED this filter when the Phase A–E
+# checkpoint-collection split moved every checkpoint out of
+# ``mempalace_drawers`` into ``mempalace_session_recovery`` — the filter was
+# filtering nothing. The 2026-05-29 DB rebackfill re-merged checkpoint drawers
+# back into the main collection, restoring the noise the filter was built for,
+# so the filter is back.
+#
+# Why match on TWO signals (topic OR text prefix) rather than the canonical
+# ``topic`` metadata alone: #194 reports the rebackfilled checkpoint hits come
+# back with empty/dropped metadata (no ``topic``). The ``CHECKPOINT:`` body
+# prefix (mempalace.hooks_cli line ~812) is the resilient fallback that
+# survives the metadata loss. Either signal classifies a hit as a checkpoint.
+_VALID_KINDS = ("content", "checkpoint", "all")
+# Mirror main.py's CHECKPOINT_TOPIC + CHECKPOINT_TOPIC_SYNONYMS.
+_CHECKPOINT_TOPICS = frozenset({"checkpoint", "auto-save"})
+# Bodies of Stop-hook checkpoint diary entries start with this literal
+# (see mempalace.hooks_cli: ``f"CHECKPOINT:{date}|session:{id}…"``).
+_CHECKPOINT_TEXT_PREFIX = "CHECKPOINT:"
+
+
+def _hit_is_checkpoint(hit: dict) -> bool:
+    """True if a search hit is a Stop-hook auto-save checkpoint.
+
+    Two independent signals, OR'd so the classification survives the
+    metadata loss described in palace-daemon#194:
+
+      1. canonical ``topic`` metadata in {checkpoint, auto-save}
+         (the original read-side filter key), or
+      2. the drawer body begins with ``CHECKPOINT:`` (resilient fallback
+         when the rebackfill dropped the topic metadata).
+
+    ``topic`` may live at the hit top level (the /search shape) or under a
+    nested ``metadata`` dict; check both.
+    """
+    if not isinstance(hit, dict):
+        return False
+    meta = hit.get("metadata") if isinstance(hit.get("metadata"), dict) else {}
+    topic = (hit.get("topic") or meta.get("topic") or "")
+    if isinstance(topic, str) and topic.strip().lower() in _CHECKPOINT_TOPICS:
+        return True
+    text = hit.get("text") or hit.get("document") or ""
+    if isinstance(text, str) and text.lstrip().startswith(_CHECKPOINT_TEXT_PREFIX):
+        return True
+    return False
+
+
+def _apply_kind_filter(response, kind: str):
+    """Filter a search response's ``results`` by ``kind`` (palace-daemon#194).
+
+    * ``"all"``        — return unchanged (the superset).
+    * ``"content"``    — drop checkpoint hits.
+    * ``"checkpoint"`` — keep only checkpoint hits.
+
+    No-op when ``response`` isn't a dict or carries no list ``results``.
+    Echoes the applied ``kind`` into the ``filters`` block (the regression
+    in #194 was that ``kind`` never appeared as an applied filter). Returns
+    the same object it was given (mutated in place) for caller convenience.
+
+    NOTE — this is a post-fetch filter over the ``limit`` rows mempalace
+    already returned, not a push-down into mempalace's over-fetched
+    candidate pool (mempalace's read-side kind= machinery was retired in
+    7ba28dc and no longer exists to push down to). Consequence: a
+    ``kind="content"`` response can come back with fewer than ``limit``
+    rows when checkpoints rank inside the top ``limit`` — the excluded
+    checkpoints are dropped, not back-filled from deeper in the pool. The
+    correctness invariant (content ⊊ all, no checkpoints in content) holds;
+    the count is best-effort. Over-fetch-then-filter would need either a
+    larger ``limit`` from the caller or restoring the push-down filter.
+    """
+    if kind == "all" or not isinstance(response, dict):
+        return response
+    results = response.get("results")
+    if not isinstance(results, list):
+        return response
+    if kind == "checkpoint":
+        kept = [h for h in results if _hit_is_checkpoint(h)]
+    else:  # "content"
+        kept = [h for h in results if not _hit_is_checkpoint(h)]
+    response["results"] = kept
+    filters = response.get("filters")
+    if isinstance(filters, dict):
+        filters["kind"] = kind
+    return response
+
 
 @router.get("/search")
 async def search(
     q: str,
     limit: int = 5,
+    # palace-daemon#194: kind= checkpoint filter, re-added after the
+    # 2026-05-29 DB rebackfill re-merged checkpoint drawers into the main
+    # collection (4a318d3 had retired it when the collection split emptied
+    # them out). Default "content" excludes Stop-hook auto-save checkpoints.
+    kind: str = "content",
     # palace-daemon#179: wing/room canonicalization is enforced via
     # FastAPI dependency injection rather than handler-body calls, so
     # new query-param endpoints automatically inherit the contract.
@@ -57,9 +154,11 @@ async def search(
     x_api_key: str | None = Header(default=None),
 ):
     """Semantic search over the main `mempalace_drawers` collection.
-    Stop-hook auto-save checkpoints live in the dedicated
-    `mempalace_session_recovery` collection and are not surfaced here —
-    use the `mempalace_session_recovery_read` MCP tool for those.
+
+    `kind` controls Stop-hook auto-save checkpoint visibility (#194):
+    `"content"` (default) excludes them, `"all"` returns the superset,
+    `"checkpoint"` returns only checkpoints. Recovery/audit reads can also
+    use the `mempalace_session_recovery_read` MCP tool directly.
 
     `wing` and `room` are optional exact-match filters forwarded to
     ``mempalace_search``. Pre-2026-05-16 this endpoint silently dropped
@@ -69,6 +168,11 @@ async def search(
     """
     import main
     main._check_auth(x_api_key)
+    if kind not in _VALID_KINDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"kind must be one of {_VALID_KINDS}; got {kind!r}",
+        )
     # `wing` and `room` already canonicalized by the FastAPI dependencies
     # in the signature above (palace-daemon#179). Handler body just uses
     # them as filters.
@@ -82,7 +186,11 @@ async def search(
         "method": "tools/call",
         "params": {"name": "mempalace_search", "arguments": args},
     })
-    return main._rerank.rerank_response(q, main._unwrap(result), enabled=rerank)
+    # Apply the checkpoint filter before rerank so the cross-encoder ranks
+    # only the kind-eligible pool. mempalace no longer carries a read-side
+    # kind= filter (companion 7ba28dc retired it), so it's enforced here.
+    filtered = _apply_kind_filter(main._unwrap(result), kind)
+    return main._rerank.rerank_response(q, filtered, enabled=rerank)
 
 
 # ── Postgres-native BM25 search ──────────────────────────────────────
@@ -456,15 +564,24 @@ async def search_age_fused(
 async def context(
     topic: str,
     limit: int = 5,
+    # palace-daemon#194: same kind= semantics as /search.
+    kind: str = "content",
     x_api_key: str | None = Header(default=None),
 ):
     """Alias for /search with a semantically friendlier name for LLM tool
-    prompts."""
+    prompts. `kind` carries the same checkpoint-filter semantics as /search
+    (#194): "content" excludes Stop-hook checkpoints, "all" is the superset,
+    "checkpoint" returns only checkpoints."""
     import main
     main._check_auth(x_api_key)
+    if kind not in _VALID_KINDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"kind must be one of {_VALID_KINDS}; got {kind!r}",
+        )
     result = await main._call({
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
         "params": {"name": "mempalace_search", "arguments": main._search_args(topic, limit)},
     })
-    return main._unwrap(result)
+    return _apply_kind_filter(main._unwrap(result), kind)
