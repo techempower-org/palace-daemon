@@ -491,10 +491,10 @@ async def search_age_fused(
                     with conn.cursor() as cur:
                         cur.execute("SET LOCAL statement_timeout = '5s'")
                         cur.execute(
-                            "SELECT id, content, wing, room, "
+                            "SELECT id, document, wing, room, "
                             "       COALESCE(metadata->>'topic', '') AS topic, "
                             "       COALESCE(metadata->>'source_file', '') AS source_file, "
-                            "       created_at "
+                            "       metadata->>'created_at' AS created_at "
                             "FROM mempalace_drawers WHERE id = ANY(%s)",
                             (ids,),
                         )
@@ -505,7 +505,7 @@ async def search_age_fused(
                                 "room": r[3],
                                 "topic": r[4],
                                 "source_file": r[5],
-                                "created_at": r[6].isoformat() if r[6] else None,
+                                "created_at": r[6] or None,
                             }
                             for r in cur.fetchall()
                         }
