@@ -7,13 +7,23 @@ connection-closed pattern (#97). A simple file-lock contract gives bench
 runners a way to pause auto-mine without restarting the daemon (which would
 be catastrophic mid-bench).
 
-The contract:
-- Bench runner touches ``<palace_data_dir>/.bench-active.lock`` (or whatever
-  ``PALACE_BENCH_LOCK_PATH`` points at) before launching.
-- Daemon's WatcherService checks `bench_lock_active()` at every spawn and
-  skips when active.
-- Stale locks (older than ``PALACE_BENCH_LOCK_MAX_AGE_SECONDS``, default 6 h)
-  are treated as inactive so a crashed bench can't wedge auto-mine.
+The contract (two compatible shapes — see #196 refcount):
+
+1. **Legacy single-bench mutex** (#104): the lock *path* is a plain file.
+   Bench runner ``touch``es ``<palace_data_dir>/.bench-active.lock`` before
+   launching and ``rm``s it after. The daemon treats a fresh file as active.
+   The footgun this had: bench A finishing ``rm``s the file while bench B is
+   still ingesting, un-pausing auto-mine mid-bench.
+
+2. **Refcounted** (#196): the lock *path* is a **directory** holding one
+   PID-named marker file per concurrent bench (``<pid>.marker``).
+   ``bench_lock_active()`` is true while *any* non-stale marker is present;
+   auto-mine resumes only when the **last** bench deregisters. Dead-PID
+   markers are reaped so a crashed bench can't wedge auto-mine forever.
+
+Both shapes share the same ``PALACE_BENCH_LOCK_PATH`` / stale-age contract.
+``bench_lock_active()`` auto-detects which shape is present, so old plain-file
+callers and new refcounted callers interoperate against the same daemon.
 
 This module is the daemon-side half. The operator/bench-runner CLI is
 ``scripts/bench-lock.sh``.
@@ -79,8 +89,74 @@ def bench_lock_path(_config_provider=None) -> str:
         return os.path.join(os.path.expanduser("~"), ".palace-bench-active.lock")
 
 
+def _max_age_seconds() -> float:
+    """Resolve the stale-lock threshold (default 6 h)."""
+    try:
+        return float(os.environ.get("PALACE_BENCH_LOCK_MAX_AGE_SECONDS") or "21600")
+    except (TypeError, ValueError):
+        return 21600.0
+
+
+def _refcount_active(dir_path: str, max_age: float, reap: bool = True) -> tuple[bool, str]:
+    """Refcount mode: the lock path is a directory of ``<pid>.marker`` files.
+
+    Active while ≥1 non-stale marker exists. A marker is stale purely by
+    **age** (mtime older than ``max_age``). Stale markers are reaped
+    (best-effort) so a crashed bench can't wedge auto-mine forever.
+
+    We deliberately do **not** reap on PID-liveness. SME benches run on
+    katana and SSH into the daemon host, recording their *katana* PID in the
+    marker name — that PID is meaningless in the daemon host's process table,
+    so a ``kill -0`` check there would wrongly reap a live remote bench. The
+    age guard (default 6 h, refreshed by the bench via a heartbeat ``touch``
+    if it runs longer) is the correct, transport-agnostic backstop.
+    """
+    import time as _time
+    now = _time.time()
+    try:
+        entries = os.listdir(dir_path)
+    except OSError as e:
+        return (False, f"listdir failed: {e}")
+
+    live = 0
+    reaped = 0
+    newest_age = None
+    for name in entries:
+        if not name.endswith(".marker"):
+            continue
+        marker = os.path.join(dir_path, name)
+        try:
+            age = now - os.stat(marker).st_mtime
+        except OSError:
+            continue
+        if age > max_age:
+            if reap:
+                try:
+                    os.unlink(marker)
+                    reaped += 1
+                except OSError:
+                    pass
+            continue
+        live += 1
+        if newest_age is None or age < newest_age:
+            newest_age = age
+
+    if live > 0:
+        return (
+            True,
+            f"refcount dir={dir_path} active={live} reaped={reaped} "
+            f"newest_age={int(newest_age) if newest_age is not None else '?'}s",
+        )
+    return (False, f"refcount dir={dir_path} no live markers (reaped={reaped})")
+
+
 def bench_lock_active(_config_provider=None) -> tuple[bool, str]:
     """Return ``(is_active, reason_string)`` for the bench-active lock.
+
+    Auto-detects the lock shape:
+    - **directory** → refcount mode (#196): active while ≥1 non-stale
+      PID-marker is present; stale/dead markers are reaped.
+    - **plain file** → legacy mutex (#104): active while the file is fresh.
 
     A lock older than ``PALACE_BENCH_LOCK_MAX_AGE_SECONDS`` (default 6 h)
     is treated as stale and ignored — protects against bench runners that
@@ -89,6 +165,7 @@ def bench_lock_active(_config_provider=None) -> tuple[bool, str]:
     """
     import time as _time
     path = bench_lock_path(_config_provider=_config_provider)
+    max_age = _max_age_seconds()
     try:
         st = os.stat(path)
     except FileNotFoundError:
@@ -97,10 +174,12 @@ def bench_lock_active(_config_provider=None) -> tuple[bool, str]:
         # Any other stat failure (permissions, ENOTDIR) should not block
         # auto-mine — surface it in the reason but treat as inactive.
         return (False, f"stat failed: {e}")
-    try:
-        max_age = float(os.environ.get("PALACE_BENCH_LOCK_MAX_AGE_SECONDS") or "21600")  # 6 h
-    except (TypeError, ValueError):
-        max_age = 21600.0
+
+    # Refcount mode: directory of per-bench PID markers.
+    if os.path.isdir(path):
+        return _refcount_active(path, max_age)
+
+    # Legacy single-file mutex: a fresh file means active.
     age = _time.time() - st.st_mtime
     if age > max_age:
         return (False, f"stale (age {int(age)}s > max {int(max_age)}s)")

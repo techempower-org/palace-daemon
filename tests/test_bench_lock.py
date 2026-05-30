@@ -117,5 +117,88 @@ class TestBenchLockActive(unittest.TestCase):
         self.assertFalse(active)
 
 
+class TestBenchLockRefcount(unittest.TestCase):
+    """Refcount mode (#196): the lock path is a directory of PID markers.
+
+    Active while ≥1 non-stale marker exists; stale (by-age) markers are
+    reaped. PID-liveness is deliberately NOT a reap criterion (SME benches
+    SSH in and record a remote PID), so these tests don't rely on it.
+    """
+
+    def setUp(self):
+        import tempfile
+        self.dir_path = tempfile.mkdtemp(prefix="bench-refcount-")
+        os.environ["PALACE_BENCH_LOCK_PATH"] = self.dir_path
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.dir_path, ignore_errors=True)
+        os.environ.pop("PALACE_BENCH_LOCK_PATH", None)
+        os.environ.pop("PALACE_BENCH_LOCK_MAX_AGE_SECONDS", None)
+
+    def _marker(self, pid, age_s=0):
+        path = os.path.join(self.dir_path, f"{pid}.marker")
+        with open(path, "w") as f:
+            f.write("")
+        if age_s:
+            ts = time.time() - age_s
+            os.utime(path, (ts, ts))
+        return path
+
+    def test_empty_dir_is_inactive(self):
+        active, reason = main._bench_lock_active()
+        self.assertFalse(active)
+        self.assertIn("no live markers", reason)
+
+    def test_one_marker_is_active(self):
+        self._marker(11111)
+        active, reason = main._bench_lock_active()
+        self.assertTrue(active)
+        self.assertIn("active=1", reason)
+
+    def test_two_markers_refcount_two(self):
+        self._marker(11111)
+        self._marker(22222)
+        active, reason = main._bench_lock_active()
+        self.assertTrue(active)
+        self.assertIn("active=2", reason)
+
+    def test_stale_marker_reaped_age_only(self):
+        os.environ["PALACE_BENCH_LOCK_MAX_AGE_SECONDS"] = "60"
+        self._marker(11111, age_s=0)          # fresh
+        stale = self._marker(99999, age_s=300)  # stale by age
+        active, reason = main._bench_lock_active()
+        self.assertTrue(active)               # the fresh one keeps it active
+        self.assertIn("active=1", reason)
+        self.assertIn("reaped=1", reason)
+        self.assertFalse(os.path.exists(stale))  # stale marker was reaped
+
+    def test_all_stale_is_inactive(self):
+        os.environ["PALACE_BENCH_LOCK_MAX_AGE_SECONDS"] = "60"
+        self._marker(11111, age_s=300)
+        self._marker(22222, age_s=300)
+        active, reason = main._bench_lock_active()
+        self.assertFalse(active)
+        self.assertIn("no live markers", reason)
+
+    def test_live_marker_with_dead_pid_not_reaped(self):
+        """A fresh marker whose PID is dead/non-local must NOT be reaped —
+        the SSH'd-bench case. Age is the only reap criterion."""
+        # PID 1 is alive but we also test a clearly-not-on-this-host-style id;
+        # either way, a fresh marker stays live regardless of PID liveness.
+        self._marker(2147480000, age_s=0)  # implausible PID, fresh
+        active, reason = main._bench_lock_active()
+        self.assertTrue(active)
+        self.assertIn("active=1", reason)
+
+    def test_non_marker_files_ignored(self):
+        # Files without the .marker suffix don't count toward the refcount.
+        with open(os.path.join(self.dir_path, "README.txt"), "w") as f:
+            f.write("not a marker")
+        active, reason = main._bench_lock_active()
+        self.assertFalse(active)
+        self.assertIn("no live markers", reason)
+
+
 if __name__ == "__main__":
     unittest.main()
