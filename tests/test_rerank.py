@@ -199,5 +199,62 @@ class TestLiveRerank(unittest.TestCase):
             self.assertEqual(out[-1]["id"], "graph-stub")
 
 
+@unittest.skipUnless(_flashrank_available(), "flashrank not installed")
+class TestRerankDeterminism(unittest.TestCase):
+    """Reranking the SAME (query, candidates) must yield the SAME order +
+    scores — within a process AND across a fresh model reload (a daemon
+    restart). This pins the determinism guarantee that SME #117 relied on
+    when it attributed a cross-restart top-5 reorder to the candidate-set
+    change (the 2026-05-29 DB rebackfill), NOT to the reranker.
+
+    If this ever fails, the rerank stage itself has become nondeterministic
+    (e.g. an unstable sort, a float-tie reorder, or a nondeterministic ONNX
+    provider) and a restart could silently reshuffle deployed results.
+    """
+
+    _QUERY = "What was my personal best time in the charity 5K run?"
+    _CANDIDATES = [
+        "I'm training for a charity 5K and want to beat my best of 25:50.",
+        "Do you have drills to improve my tennis toss consistency?",
+        "I set a new personal record of 24:32 at last weekend's 5K.",
+        "Two-factor auth adds a second layer beyond your password.",
+        "My best mile split during the 5K was 7:45.",
+        "Recovery runs should stay in zone 2 heart rate.",
+        "The charity raised $12,000 for the local food bank.",
+        "I track my runs with a GPS watch and review the splits.",
+    ]
+
+    def setUp(self):
+        rerank._ranker = None
+        rerank._ranker_load_error = None
+
+    def tearDown(self):
+        rerank._ranker = None
+        rerank._ranker_load_error = None
+
+    def _rerank(self):
+        hits = [{"id": i, "text": t} for i, t in enumerate(self._CANDIDATES)]
+        with patch.dict(os.environ, {"PALACE_RERANK_ENABLED": "true"}):
+            out, info = rerank.rerank_hits(self._QUERY, hits)
+        self.assertEqual(info["status"], "ok")
+        return [(h["id"], round(float(h["rerank_score"]), 9)) for h in out]
+
+    def test_in_process_repeat_is_identical(self):
+        """Same loaded ranker, reranked 4×: byte-identical order + scores."""
+        first = self._rerank()
+        for _ in range(3):
+            self.assertEqual(self._rerank(), first)
+
+    def test_fresh_reload_is_identical(self):
+        """Force a brand-new model load (restart sim) between runs; identical."""
+        first = self._rerank()
+        # setUp/tearDown reset the singleton, but reload explicitly too so the
+        # ONNX session + tokenizer are reconstructed from scratch.
+        rerank._ranker = None
+        rerank._ranker_load_error = None
+        second = self._rerank()
+        self.assertEqual(first, second)
+
+
 if __name__ == "__main__":
     unittest.main()
