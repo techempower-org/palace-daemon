@@ -20,6 +20,12 @@ Environment=PALACE_MAX_CONCURRENCY=4
 # CRITICAL: forces in-process path, prevents recursive self-call deadlock.
 # See palace-daemon#11.
 Environment=PALACE_DAEMON_STRICT=0
+# Pin the /search reranker model explicitly so deployed ranking is
+# byte-stable across deploys (the code default is this same value, but
+# pinning it here + the exact flashrank== in requirements.txt removes the
+# "fresh deploy pulls a different model and silently reorders top-5" risk).
+# See docs/evals/2026-05-30-retrieval-determinism.md.
+Environment=PALACE_RERANK_MODEL=ms-marco-TinyBERT-L-2-v2
 EnvironmentFile=/home/jp/.config/palace-daemon/env
 Restart=always
 RestartSec=5
