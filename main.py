@@ -159,64 +159,19 @@ from rebuild_progress import (  # noqa: E402
 )
 
 
-# ── Systemd watchdog / sd_notify ─────────────────────────────────────────────
-
-def _sd_notify(msg: str) -> None:
-    """Send a message to systemd notify socket without external dependencies."""
-    sock_path = os.environ.get("NOTIFY_SOCKET", "")
-    if not sock_path:
-        return
-    try:
-        import socket as _sock
-        with _sock.socket(_sock.AF_UNIX, _sock.SOCK_DGRAM) as s:
-            # Abstract namespace sockets use NUL prefix; systemd uses @ prefix.
-            addr = chr(0) + sock_path[1:] if sock_path.startswith("@") else sock_path
-            s.sendto(msg.encode(), addr)
-    except Exception:
-        pass
-
-
-def _watchdog_interval() -> int:
-    """Return WatchdogSec in seconds from WATCHDOG_USEC (set by systemd), or 0."""
-    try:
-        return int(os.environ.get("WATCHDOG_USEC", "0")) // 1_000_000
-    except ValueError:
-        return 0
-
-
-async def _watchdog_loop(interval_secs: int) -> None:
-    """Ping systemd watchdog at half the watchdog interval, only when palace is healthy.
-
-    Honor CancelledError so the lifespan shutdown can stop us cleanly —
-    otherwise uvicorn hangs on "Waiting for background tasks to complete"
-    until systemd SIGKILLs at TimeoutStopSec.
-    """
-    tick = max(10, interval_secs // 2)
-    while True:
-        try:
-            await asyncio.sleep(tick)
-        except asyncio.CancelledError:
-            return
-        # During mode=rebuild, send the keepalive unconditionally and skip the
-        # probe. A rebuild holds _exclusive_palace() with the client/collection
-        # caches nulled (see the /repair handler), so _get_collection() can
-        # return None or block for the whole 6-9h operation. The health-gate
-        # below would then withhold WATCHDOG=1 and systemd would SIGABRT the
-        # daemon mid-rebuild — exactly when a kill is most destructive. Keep
-        # feeding the watchdog; the rebuild is a known long-running operation
-        # we want to run to completion.
-        if _repair_state.get("in_progress") and _repair_state.get("mode") == "rebuild":
-            _sd_notify("WATCHDOG=1\n")
-            continue
-        try:
-            loop = asyncio.get_running_loop()
-            col = await loop.run_in_executor(None, _mp._get_collection)
-            if col is not None:
-                _sd_notify("WATCHDOG=1\n")
-            else:
-                _log.warning("Watchdog: palace collection unavailable — skipping WATCHDOG=1")
-        except Exception as e:
-            _log.warning("Watchdog check failed: %s", e)
+# ── Systemd watchdog / sd_notify (#101 slice) ───────────────────────────────
+# The three helpers live in sd_watchdog.py now (named to avoid shadowing the
+# pip `watchdog` package that watcher.py imports). main.py keeps the
+# `_`-prefixed names alive via re-export so the lifespan startup and existing
+# tests (tests/test_watchdog_rebuild.py patches `main._sd_notify` /
+# `main._mp._get_collection` and mutates `main._repair_state`) keep working
+# unchanged. `watchdog_loop` resolves those names through `main` at call time
+# via a lazy `import main`, so the patches/mutations stay visible.
+from sd_watchdog import (  # noqa: E402
+    sd_notify as _sd_notify,
+    watchdog_interval as _watchdog_interval,
+    watchdog_loop as _watchdog_loop,
+)
 
 
 async def _warn_if_hnsw_threads_unset() -> None:
