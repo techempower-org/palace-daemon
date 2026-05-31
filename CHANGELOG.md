@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Added — *Cat 7b: `POST /backfill-age/indexes` — AGE edge-endpoint indexes for hybrid/age-fused graph-walk latency*
+
+`/search/hybrid` p50 was ~3-5× `/search` and `/search/keyword` (measured
+2026-05-30 on prod familiar: vector 626ms, union 429ms, **hybrid 2064ms**,
+p95 5.6s). Profiling traced the entire delta to AGE graph-walk Cypher that the
+hybrid candidate-merger and `/search/age-fused`'s `_age_lookup` issue per query
+entity. AGE only btree-indexes a label table's own `id`, never the `start_id` /
+`end_id` graphid columns the edge walks join on — so every per-entity lookup
+parallel-seq-scans the whole edge table (MENTIONS 6.69M rows, RELATION 1.92M
+rows). `EXPLAIN ANALYZE` showed a full `Parallel Seq Scan on "MENTIONS"` even
+when the Entity filter matched one row; ~5.8s cold for a hot entity, × N entities.
+
+New operator-triggered route installs the four missing edge-endpoint indexes
+(`idx_mentions_end_id`, `idx_mentions_start_id`, `idx_relation_start_id`,
+`idx_relation_end_id`) with `CREATE INDEX CONCURRENTLY IF NOT EXISTS` — no table
+lock against live reads, idempotent (present indexes are skipped). Validated on a
+synthetic 3.17M-edge AGE graph: the MENTIONS seq scan flips to a `Bitmap Index
+Scan` (planner cost 13855 → 831; cold wall-clock 320ms → 206ms at half-prod
+scale, widening at prod's 2× scale). Auth-gated, postgres-only (503 on chroma).
+Companion `scripts/age_graph_indexes.sql` for offline application; full profile
+in `docs/perf/2026-05-30-hybrid-graph-walk-latency.md`. These indexes belong in
+`mempalace.backfill_age` long-term (tracked as upstream follow-up); this route is
+the bridge until that lands. No silent startup DDL — operator action only.
+
 ### Added — *#190: hard auto-mine kill-switch + bench-mode that frees the mining model*
 
 `PALACE_DISABLE_AUTOMINE` (env, truthy) hard-disables all mining for the
