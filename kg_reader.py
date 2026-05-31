@@ -41,6 +41,38 @@ import os
 import sqlite3
 
 
+# ── Declared ontology (SME Category 8) ───────────────────────────────────────
+#
+# What the MemPalace project *claims* about its own structure, hand-extracted
+# from the upstream README (github.com/milla-jovovich/mempalace). This is the
+# same source SME's sme/corpora/implied_ontology_mempalace.yaml extracts — kept
+# here so the daemon can surface its OWN declared-vs-effective drift via
+# GET /ontology, rather than SME having to infer the drift externally (which
+# scored Cat 8 introspection 0.0: the system couldn't self-report).
+#
+# These are the documented claims, not aspirations the daemon enforces. The
+# effective vocabulary read from the live graph is compared against them so the
+# drift report is honest in both directions: declared-but-absent (over-claim)
+# and present-but-undeclared (under-documented).
+DECLARED_ONTOLOGY = {
+    "source": "readme",
+    "source_repo": "github.com/milla-jovovich/mempalace",
+    # README line 15: "organized into wings (people and projects), halls (types
+    # of memory), and rooms (specific ideas)"; closets/drawers line 202;
+    # tunnels line 204.
+    "entity_types": ["wing", "hall", "room", "drawer", "closet", "tunnel"],
+    # README line 240 (hall = within-wing room link), line 204 (tunnel =
+    # cross-wing room link); member_of is the implicit drawer→room→wing edge.
+    "edge_types": ["hall", "tunnel", "member_of"],
+    # README lines 246-250: the five standard hall types.
+    "hall_vocabulary": ["facts", "events", "discoveries", "preferences", "advice"],
+    # README line 15: "organized hierarchically into wings > halls > rooms >
+    # drawers". Operationalized by SME Cat 8e as modularity > 0.5 + power-law
+    # degree distribution; the daemon reports the structure flag observed.
+    "structure": "hierarchical",
+}
+
+
 def _config():
     """Lazy mempalace config accessor — avoids importing mempalace at module
     load time (matches the postgres.py / db_errors.py pattern)."""
@@ -468,6 +500,176 @@ def read_kg_postgres_stats() -> dict | None:
         "triples": triples,
         "mentions": mentions,
         "relationship_types": rel_types,
+    }
+
+
+def _read_effective_entity_kinds(sample_limit: int = 20000) -> dict[str, int] | None:
+    """Effective entity-kind vocabulary from the MENTIONS ``etype`` tags.
+
+    The AGE ``Entity`` label is untyped — every vertex's ``type`` is the
+    literal string ``"entity"`` (see ``read_kg_postgres``), so the *declared*
+    entity types (wing/hall/room/drawer/closet/tunnel) have no per-node
+    counterpart at the KG layer. The closest thing the daemon actually
+    distinguishes is the extractor's ``etype`` tag carried on each MENTIONS
+    edge (``PROPER_NOUN``, ``TECH_IDENT``, ...). Reporting that distribution is
+    the honest answer to "what kinds of entities do I really have?" — and it
+    exposes the drift: none of these tags are the declared structural types.
+
+    Samples up to ``sample_limit`` MENTIONS rows (the full 5.66M scan would
+    exhaust shared memory, same constraint as ``read_kg_postgres_stats``).
+    Returns a ``{etype: count}`` dict over the sample, or ``None`` when AGE is
+    unreachable so the caller can degrade gracefully.
+    """
+    cfg = _config()
+    dsn = getattr(cfg, "postgres_dsn", None) or os.environ.get(
+        "MEMPALACE_POSTGRES_DSN"
+    )
+    if not dsn:
+        return None
+    try:
+        from mempalace.knowledge_graph_age import KnowledgeGraphAGE
+
+        kg = KnowledgeGraphAGE(dsn=dsn)
+    except Exception as e:
+        logging.warning("_read_effective_entity_kinds: KG init failed: %s", e)
+        return None
+    graph = getattr(kg, "GRAPH_NAME", "mempalace_kg")
+    kinds: dict[str, int] = {}
+    import psycopg2 as _psycopg2
+    try:
+        conn = _psycopg2.connect(dsn, connect_timeout=3)
+    except Exception as e:
+        logging.warning("_read_effective_entity_kinds: connect failed: %s", e)
+        try:
+            kg.close()
+        except Exception:
+            pass
+        return None
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL search_path = ag_catalog, public")
+                cur.execute("SET LOCAL statement_timeout = '10s'")
+                # GROUP BY over a bounded sample — caps the working set so AGE
+                # doesn't materialize the full 5.66M-edge scan.
+                cur.execute(
+                    f'''
+                    WITH men_sample AS (
+                        SELECT properties FROM {graph}."MENTIONS" LIMIT %s
+                    )
+                    SELECT
+                        COALESCE((properties::json->>'etype')::text, 'UNTAGGED') AS etype,
+                        count(*) AS n
+                    FROM men_sample
+                    GROUP BY 1
+                    ''',
+                    (int(sample_limit),),
+                )
+                for etype, n in cur.fetchall():
+                    kinds[etype or "UNTAGGED"] = int(n)
+    except Exception as e:
+        logging.warning("_read_effective_entity_kinds: query failed: %s", e)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        try:
+            kg.close()
+        except Exception:
+            pass
+    return dict(sorted(kinds.items(), key=lambda kv: -kv[1]))
+
+
+def read_ontology_introspection(sample_limit: int = 20000) -> dict | None:
+    """Self-report the daemon's declared-vs-effective ontology drift (Cat 8).
+
+    Surfaces, from live AGE state:
+
+      * ``declared`` — the documented MemPalace ontology (``DECLARED_ONTOLOGY``):
+        6 entity types, 3 edge types, 5 halls, a "hierarchical" structure claim.
+      * ``effective`` — what actually exists:
+          - ``edge_types``: AGE relationship labels with nonzero rows
+            (``RELATION``/``MENTIONS``), reusing the stats path.
+          - ``entity_kinds``: the MENTIONS ``etype`` distribution — the only
+            entity-kind vocabulary the daemon really distinguishes (the
+            ``Entity`` label itself is untyped).
+          - counts (entities / triples / mentions).
+      * ``drift`` — the reconciliation:
+          - ``declared_edge_types_absent`` / ``declared_edge_types_present``:
+            which documented edge types map onto a populated AGE label.
+            (``hall``/``tunnel``/``member_of`` are *structural* edges projected
+            by the SME ``/graph`` adapter from wings/rooms/tunnels — they are
+            NOT AGE relationship labels, so they read as absent at the KG layer.
+            That asymmetry IS the drift, reported plainly rather than hidden.)
+          - ``entity_kinds_undeclared``: effective etypes that match none of the
+            declared structural types (expected: all of them).
+          - ``structure_claim`` vs ``structure_observed``: the daemon does not
+            compute modularity here (that is SME Cat 8e's job over ``/graph``);
+            it reports ``"not_computed"`` so the claim is neither confirmed nor
+            silently endorsed.
+          - ``drift_score``: fraction of declared edge types with no populated
+            AGE label, a cheap honesty signal in [0, 1].
+
+    Returns ``None`` under the chroma backend / unreachable AGE so the route can
+    answer 503 rather than fabricate an empty ontology.
+    """
+    if getattr(_config(), "backend", None) != "postgres":
+        return None
+    stats = read_kg_postgres_stats()
+    if stats is None:
+        return None
+
+    populated_labels = stats.get("relationship_types", []) or []
+    entity_kinds = _read_effective_entity_kinds(sample_limit=sample_limit) or {}
+
+    declared_edges = DECLARED_ONTOLOGY["edge_types"]
+    # A declared edge type is "present" at the KG layer iff a same-named AGE
+    # relationship label is populated. None of hall/tunnel/member_of are AGE
+    # labels (they are structural projections), so this is expected to be all-
+    # absent on the current corpus — and that is exactly the drift to surface.
+    label_lower = {x.lower() for x in populated_labels}
+    edges_present = [e for e in declared_edges if e.lower() in label_lower]
+    edges_absent = [e for e in declared_edges if e.lower() not in label_lower]
+
+    declared_types_lower = {t.lower() for t in DECLARED_ONTOLOGY["entity_types"]}
+    kinds_undeclared = [
+        k for k in entity_kinds if k.lower() not in declared_types_lower
+    ]
+
+    drift_score = (
+        len(edges_absent) / len(declared_edges) if declared_edges else 0.0
+    )
+
+    return {
+        "declared": dict(DECLARED_ONTOLOGY),
+        "effective": {
+            "edge_types": populated_labels,
+            "entity_kinds": entity_kinds,
+            "entities": stats.get("entities", 0),
+            "triples": stats.get("triples", 0),
+            "mentions": stats.get("mentions", 0),
+        },
+        "drift": {
+            "declared_edge_types_present": edges_present,
+            "declared_edge_types_absent": edges_absent,
+            "entity_kinds_undeclared": kinds_undeclared,
+            "structure_claim": DECLARED_ONTOLOGY["structure"],
+            "structure_observed": "not_computed",
+            "drift_score": drift_score,
+            "note": (
+                "Declared edge types hall/tunnel/member_of are structural "
+                "projections (wings/rooms/tunnels), not AGE relationship "
+                "labels; absence at the KG layer is expected and reported. "
+                "Structure (hierarchical) is verified by SME Cat 8e over "
+                "/graph, not here."
+            ),
+        },
     }
 
 
