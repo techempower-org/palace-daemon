@@ -88,6 +88,15 @@ class TestBuildPlan(unittest.TestCase):
         # is, are, has, weird → 4 remap rules (is_a unchanged, appendchild dropped)
         self.assertEqual(self.plan["distinct_remapped"], 4)
 
+    def test_drops_list_captures_dropped_raws(self):
+        # The dropped (map_predicate → None) raws are captured for the DELETE
+        # pass — exactly the edges counted in dropped_edges, no separate set.
+        self.assertEqual(self.plan["drops"], [{"raw": "appendchild", "edges": 7}])
+        self.assertEqual(self.plan["top_drops"], [{"raw": "appendchild", "edges": 7}])
+        # invariant: drop edge total == reported dropped_edges (no drift)
+        self.assertEqual(sum(d["edges"] for d in self.plan["drops"]),
+                         self.plan["dropped_edges"])
+
 
 class TestApplyGuards(unittest.TestCase):
     def _args(self, **kw):
@@ -258,6 +267,149 @@ class TestRemapExisting(unittest.TestCase):
         update = next((s for s in sqls if "UPDATE" in s and "RELATION" in s), "")
         self.assertIn("NOT ((e.properties::text::jsonb) ? 'raw_relation_type')",
                       update)
+
+
+class TestDropCodeTokens(unittest.TestCase):
+    """#72b: --drop-code-tokens DELETEs the blocklisted junk-predicate edges.
+
+    Targeted set-based DELETE (TEMP drop_predicate + COPY + one DELETE keyed on
+    the coalesced ORIGINAL predicate), NOT a remap-plan piggyback. Reachable
+    standalone (no remaps) and idempotent by construction. psycopg is mocked so
+    we assert SQL shape + COPY rows without a real AGE database.
+    """
+
+    def _args(self, **kw):
+        base = dict(apply=True, dsn="postgresql://x", i_have_a_backup=True,
+                    drop_code_tokens=True, remap_existing=False)
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def _mock_psycopg(self, deleted_rows=999):
+        fake_cur = MagicMock()
+        fake_cur.rowcount = deleted_rows
+        fake_cur.fetchone.return_value = (0,)
+        fake_copy_writer = MagicMock()
+        fake_cur.copy.return_value.__enter__.return_value = fake_copy_writer
+        fake_conn = MagicMock()
+        fake_conn.cursor.return_value.__enter__.return_value = fake_cur
+        fake_psycopg = MagicMock()
+        fake_psycopg.connect.return_value.__enter__.return_value = fake_conn
+        return fake_psycopg, fake_conn, fake_cur, fake_copy_writer
+
+    def test_delete_unit_sql_shape_and_copy_rows(self):
+        # Direct unit test of _drop_code_tokens: TEMP table, COPY, one DELETE.
+        plan = {"drops": [{"raw": "cd", "edges": 2543},
+                          {"raw": "ls", "edges": 2020},
+                          {"raw": "for", "edges": 1267}],
+                "dropped_edges": 5830}
+        fake_psycopg, fake_conn, fake_cur, fake_copy_writer = self._mock_psycopg(5830)
+
+        mig._drop_code_tokens(plan, "postgresql://x", fake_psycopg)
+
+        # all blocklisted raws COPY'd into the temp table, in order
+        rows = [c.args for c in fake_copy_writer.write_row.call_args_list]
+        self.assertEqual(rows, [(("cd",),), (("ls",),), (("for",),)])
+
+        sqls = [str(c.args[0]) for c in fake_cur.execute.call_args_list]
+        # a TEMP drop_predicate table was created
+        self.assertTrue(any("drop_predicate" in s and "TEMP TABLE" in s
+                            for s in sqls))
+        delete_sql = next((s for s in sqls if "DELETE" in s and "RELATION" in s), "")
+        self.assertIn('mempalace_kg."RELATION"', delete_sql)
+        self.assertIn("drop_predicate", delete_sql)          # joins the temp set
+        self.assertIn("COALESCE", delete_sql)                # keys on ORIGINAL predicate
+        self.assertIn("raw_relation_type", delete_sql)
+        self.assertIn("relation_type", delete_sql)
+        # it is a DELETE, not an UPDATE/remap
+        self.assertNotIn("UPDATE", delete_sql)
+        fake_conn.commit.assert_called()
+
+    def test_delete_noop_when_no_drops(self):
+        # Empty drop set → returns quietly, never opens a connection.
+        fake_psycopg, _, _, _ = self._mock_psycopg()
+        mig._drop_code_tokens({"drops": [], "dropped_edges": 0},
+                              "postgresql://x", fake_psycopg)
+        fake_psycopg.connect.assert_not_called()
+
+    def test_apply_runs_drop_pass_after_remap(self):
+        # --apply with both remaps AND --drop-code-tokens → UPDATE then DELETE.
+        plan = {
+            "remaps": [{"raw": "is", "canonical": "is_a", "edges": 100}],
+            "drops": [{"raw": "cd", "edges": 50}],
+            "edges_would_change": 100, "edges_unchanged": 0, "dropped_edges": 50,
+        }
+        fake_psycopg, _, fake_cur, _ = self._mock_psycopg(50)
+        with patch.dict("sys.modules", {"psycopg": fake_psycopg}):
+            mig._apply(plan, self._args(drop_code_tokens=True))
+        sqls = [str(c.args[0]) for c in fake_cur.execute.call_args_list]
+        self.assertTrue(any("UPDATE" in s and "RELATION" in s for s in sqls))
+        self.assertTrue(any("DELETE" in s and "RELATION" in s for s in sqls))
+
+    def test_apply_runs_drop_pass_standalone_when_no_remaps(self):
+        # Graph already canonical (no remaps) but code tokens still present:
+        # --drop-code-tokens must STILL reach the DELETE (not short-circuit).
+        plan = {
+            "remaps": [],
+            "drops": [{"raw": "ls", "edges": 30}],
+            "edges_would_change": 0, "edges_unchanged": 0, "dropped_edges": 30,
+        }
+        fake_psycopg, _, fake_cur, _ = self._mock_psycopg(30)
+        with patch.dict("sys.modules", {"psycopg": fake_psycopg}):
+            mig._apply(plan, self._args(drop_code_tokens=True))
+        sqls = [str(c.args[0]) for c in fake_cur.execute.call_args_list]
+        self.assertTrue(any("DELETE" in s and "RELATION" in s for s in sqls))
+        # no UPDATE ran (nothing to remap)
+        self.assertFalse(any("UPDATE" in s and "RELATION" in s for s in sqls))
+
+    def test_apply_no_drop_pass_without_flag(self):
+        # No --drop-code-tokens → DELETE never runs, even with drops in the plan.
+        plan = {
+            "remaps": [{"raw": "is", "canonical": "is_a", "edges": 100}],
+            "drops": [{"raw": "cd", "edges": 50}],
+            "edges_would_change": 100, "edges_unchanged": 0, "dropped_edges": 50,
+        }
+        fake_psycopg, _, fake_cur, _ = self._mock_psycopg()
+        with patch.dict("sys.modules", {"psycopg": fake_psycopg}):
+            mig._apply(plan, self._args(drop_code_tokens=False))
+        sqls = [str(c.args[0]) for c in fake_cur.execute.call_args_list]
+        self.assertFalse(any("DELETE" in s and "RELATION" in s for s in sqls))
+
+
+class TestDropCodeTokensIntegration(unittest.TestCase):
+    """End-to-end-ish: build_plan with the REAL CanonicalMapper feeds the drop
+    set, so the DELETE targets exactly the blocklisted predicates the mapper
+    drops. No model load — uses the lexical mapper.
+    """
+
+    def test_real_mapper_drops_match_blocklists(self):
+        from mempalace.kg_predicate_norm import (
+            SHELL_COMMAND_BLOCKLIST,
+            STOPWORD_BLOCKLIST,
+        )
+
+        vocab = [
+            {"rt": "cd", "n": 2543},        # shell command → drop
+            {"rt": "ls", "n": 2020},        # shell command → drop
+            {"rt": "for", "n": 1267},       # stopword → drop
+            {"rt": "is", "n": 5000},        # real relation → is_a (not dropped)
+            {"rt": "uses", "n": 800},       # canonical (not dropped)
+        ]
+        mapper = mig.CanonicalMapper(use_embeddings=False)  # lexical, no model
+        plan = mig.build_plan(vocab, mapper)
+
+        dropped_raws = {d["raw"] for d in plan["drops"]}
+        self.assertIn("cd", dropped_raws)
+        self.assertIn("ls", dropped_raws)
+        self.assertIn("for", dropped_raws)
+        # real relations are NOT in the drop set
+        self.assertNotIn("is", dropped_raws)
+        self.assertNotIn("uses", dropped_raws)
+        # every dropped raw really is a blocklisted/heuristic-junk token
+        for raw in dropped_raws:
+            self.assertTrue(
+                raw in SHELL_COMMAND_BLOCKLIST or raw in STOPWORD_BLOCKLIST,
+                f"{raw!r} dropped but not in a blocklist",
+            )
 
 
 if __name__ == "__main__":

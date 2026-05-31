@@ -103,12 +103,38 @@ latter::
     )
     WHERE (e.properties::text::jsonb) ? 'raw_relation_type'
 
-## Code tokens
+## Code tokens (``--drop-code-tokens``, #72b)
 
-Code-token predicates the canonical mapper drops are NOT deleted by this
-migration (deletion is destructive and out of scope) — they are reported and
-left as-is. ``--drop-code-tokens`` is reserved for a follow-up; it currently
-prints a no-op warning under ``--apply``.
+Code-token / shell-command / stopword predicates the canonical mapper drops
+(where ``CanonicalMapper.map_predicate`` returns ``None`` — i.e. the
+``CODE_TOKEN_BLOCKLIST`` + ``SHELL_COMMAND_BLOCKLIST`` + ``STOPWORD_BLOCKLIST``
+sets and the digit/code-look heuristic in ``mempalace.kg_predicate_norm``) are
+content-free junk mis-extracted as relations (``cd``, ``ls``, ``grep``,
+``can``, ``for`` …). They carry no entity→entity relation, so the right
+disposition is deletion, not remap. The default migration leaves them in place
+and only *reports* them (``→ code tokens (NOT touched unless
+--drop-code-tokens)``).
+
+``--drop-code-tokens`` (apply only, same ``--dsn`` + ``--i-have-a-backup``
+gating) DELETEs exactly that set. The deleted set is ``plan["drops"]`` — the
+same predicates the dry-run counts as ``dropped_edges``, so there is no second
+definition of "junk" that could drift from the reported number. Mechanism is a
+**targeted set-based DELETE**, not a remap-plan piggyback: a TEMP
+``drop_predicate`` table (COPY of the blocklisted raws) joined to the backing
+table::
+
+    DELETE FROM mempalace_kg."RELATION" e
+    USING drop_predicate d
+    WHERE COALESCE((e.properties::text::jsonb)->>'raw_relation_type',
+                   (e.properties::text::jsonb)->>'relation_type') = d.raw
+
+The ``coalesce`` keys on the ORIGINAL predicate so it catches both
+never-migrated edges (junk in ``relation_type``) and already-migrated ones
+(junk preserved in ``raw_relation_type``). It runs WITHOUT re-executing the
+~11-min embedding remap plan — the drop set is computed once in ``build_plan``.
+Idempotent: once deleted, a re-run matches 0 rows. Unlike the remap UPDATE this
+is *irreversible* (the edges are gone, not relabelled), which is why it is
+opt-in and stays behind the backup gate.
 
 ## Operational checklist (before --apply)
 
@@ -207,6 +233,7 @@ def build_plan(vocab: list[dict], mapper: CanonicalMapper) -> dict:
     raw_distinct = len(vocab)
 
     remaps: list[dict] = []          # raw → canonical (changed)
+    drops: list[dict] = []           # raw → None (code-token / junk, deletable)
     unchanged_distinct = 0
     unchanged_edges = 0
     changed_edges = 0
@@ -224,6 +251,7 @@ def build_plan(vocab: list[dict], mapper: CanonicalMapper) -> dict:
         if canon is None:
             dropped_edges += n
             dropped_distinct += 1
+            drops.append({"raw": raw, "edges": n})
             continue
         after_distinct.add(canon)
         canon_edges[canon] += n
@@ -238,6 +266,7 @@ def build_plan(vocab: list[dict], mapper: CanonicalMapper) -> dict:
             remaps.append({"raw": raw, "canonical": canon, "edges": n})
 
     remaps.sort(key=lambda d: -d["edges"])
+    drops.sort(key=lambda d: -d["edges"])
     top_canon = sorted(canon_edges.items(), key=lambda kv: -kv[1])[:25]
 
     return {
@@ -254,7 +283,9 @@ def build_plan(vocab: list[dict], mapper: CanonicalMapper) -> dict:
         "dropped_distinct": dropped_distinct,
         "top_canonicals": [{"canonical": c, "edges": n} for c, n in top_canon],
         "top_remaps": remaps[:30],
+        "top_drops": drops[:30],
         "remaps": remaps,  # full list used by --apply
+        "drops": drops,    # full list used by --drop-code-tokens DELETE pass
     }
 
 
@@ -280,6 +311,13 @@ def print_plan(plan: dict, mode: str, remap_existing: bool = False) -> None:
     for r in plan["top_remaps"]:
         print(f"  {r['edges']:>9,}  {r['raw']}  →  {r['canonical']}")
     print()
+    if plan.get("top_drops"):
+        print("-- TOP CODE-TOKEN DROPS (raw → DELETE, by edge count) " + "-" * 16)
+        for d in plan["top_drops"]:
+            print(f"  {d['edges']:>9,}  {d['raw']}  →  (delete)")
+        print(f"  ... pass --apply --drop-code-tokens (+ --dsn --i-have-a-backup) "
+              f"to DELETE all {plan['dropped_edges']:,} code-token edges")
+        print()
     print("-- reversibility: original retained as r.raw_relation_type "
           "(rollback in module docstring) --")
     if remap_existing:
@@ -316,17 +354,19 @@ def _apply(plan: dict, args: argparse.Namespace) -> None:
             "kg-extract worker first. This mutates production."
         )
 
-    remaps = plan.get("remaps") or []
-    if not remaps:
-        print("apply: no raw→canonical changes (graph already canonical)")
-        return
-
     try:
         import psycopg
     except ImportError as e:
         raise SystemExit(f"--apply requires psycopg in the active venv: {e}")
 
     import time
+
+    remaps = plan.get("remaps") or []
+    if not remaps:
+        print("apply: no raw→canonical changes (graph already canonical)")
+        if args.drop_code_tokens:
+            _drop_code_tokens(plan, dsn, psycopg)
+        return
 
     remap_existing = getattr(args, "remap_existing", False)
     mode_label = "REMAP-EXISTING" if remap_existing else "first-migration"
@@ -416,8 +456,82 @@ def _apply(plan: dict, args: argparse.Namespace) -> None:
                   f"(expected ~{expected_unmigrated:,} = already-canonical + dropped)")
 
     if args.drop_code_tokens:
-        print("  --drop-code-tokens: NOT YET IMPLEMENTED. Code-token edges remain; "
-              "file a follow-up to add a DELETE pass.")
+        _drop_code_tokens(plan, dsn, psycopg)
+
+
+def _drop_code_tokens(plan: dict, dsn: str, psycopg) -> None:
+    """DELETE the code-token / shell-command / stopword RELATION edges (#72b).
+
+    These are the predicates the canonical mapper drops outright — where
+    ``CanonicalMapper.map_predicate`` returns ``None`` (via
+    ``mempalace.kg_predicate_norm.normalize_predicate``: ``CODE_TOKEN_BLOCKLIST``,
+    ``SHELL_COMMAND_BLOCKLIST``, ``STOPWORD_BLOCKLIST``, the digit/code-look
+    heuristic, and bare-negation fragments). They are content-free junk
+    mis-extracted as relations (e.g. ``cd``, ``ls``, ``grep``, ``can``, ``for``)
+    and carry no entity→entity semantics, so deletion — not remap — is the right
+    disposition. The set is exactly ``plan["drops"]``, i.e. byte-for-byte the
+    edges the dry-run reports as ``dropped_edges`` (no separate definition of
+    "junk", so no drift between the reported count and what is deleted).
+
+    Mechanism — TARGETED set-based DELETE, NOT a remap-plan piggyback. A TEMP
+    ``drop_predicate`` table is populated via COPY with the blocklisted raws,
+    then a single::
+
+        DELETE FROM mempalace_kg."RELATION" e
+        USING drop_predicate d
+        WHERE COALESCE((e.properties::text::jsonb)->>'raw_relation_type',
+                       (e.properties::text::jsonb)->>'relation_type') = d.raw
+
+    keyed on the ORIGINAL predicate (``coalesce(raw_relation_type,
+    relation_type)``) so it catches both never-migrated edges (original in
+    ``relation_type``) and already-migrated ones (original in
+    ``raw_relation_type`` — a migrated code token has its junk predicate
+    preserved there). This runs WITHOUT the ~11-min embedding remap plan: the
+    drop set is computed once during ``build_plan`` and reused here.
+
+    Idempotent: once the edges are gone, a re-run's DELETE matches 0 rows.
+
+    Same host-side gating as the UPDATE applies — the caller (``_apply``) has
+    already enforced ``--dsn`` + ``--i-have-a-backup`` before reaching here.
+    """
+    import time
+
+    drops = plan.get("drops") or []
+    if not drops:
+        print("  --drop-code-tokens: no code-token edges in the plan (nothing to delete)")
+        return
+
+    total = sum(int(d["edges"]) for d in drops)
+    print(f"  --drop-code-tokens: {len(drops):,} junk predicates → "
+          f"~{total:,} edge DELETEs (targeted set-based, no remap-plan re-run)")
+
+    with psycopg.connect(dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SET statement_timeout = 0")
+            cur.execute(
+                "CREATE TEMP TABLE drop_predicate (raw text PRIMARY KEY)"
+            )
+            with cur.copy("COPY drop_predicate (raw) FROM STDIN") as cp:
+                for d in drops:
+                    cp.write_row((d["raw"],))
+            cur.execute("ANALYZE drop_predicate")
+
+            t0 = time.time()
+            cur.execute(
+                """
+                DELETE FROM mempalace_kg."RELATION" e
+                USING drop_predicate d
+                WHERE COALESCE(
+                          (e.properties::text::jsonb)->>'raw_relation_type',
+                          (e.properties::text::jsonb)->>'relation_type') = d.raw
+                """
+            )
+            deleted = cur.rowcount
+            conn.commit()
+            elapsed = time.time() - t0
+            rate = deleted / max(elapsed, 0.001)
+            print(f"  DELETE: {deleted:,} edges in {elapsed:.0f}s ({rate:.0f} edges/s) "
+                  f"(expected ~{total:,})")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -454,8 +568,8 @@ def main(argv: list[str] | None = None) -> int:
     plan = build_plan(vocab, mapper)
 
     if args.json:
-        # don't dump the giant full remap list in the summary json
-        out = {k: v for k, v in plan.items() if k != "remaps"}
+        # don't dump the giant full remap / drop lists in the summary json
+        out = {k: v for k, v in plan.items() if k not in ("remaps", "drops")}
         out["mode"] = "APPLY" if args.apply else "DRY-RUN"
         out["remap_existing"] = bool(args.remap_existing)
         print(json.dumps(out, indent=2))
