@@ -27,3 +27,11 @@ psycopg[binary]>=3.1
 # palace-daemon.service) keeps deployed ranking byte-stable across deploys.
 # Bump deliberately, re-run tests/test_rerank.py::TestRerankDeterminism.
 flashrank==0.2.10
+# Graph algorithms for the gated GET /graph/structural-stats endpoint
+# (SME Cat 8 modularity / community detection over the full RELATION graph).
+# Cat 5 connectivity (components/isolates) uses a dependency-free union-find;
+# only the Louvain modularity needs networkx. Pure-Python, no native build.
+# compute_structural_stats degrades to modularity=None with a note if absent,
+# so this is a soft dep — but the structural-stats endpoint can't report Cat 8
+# modularity without it. Only imported on demand by that one gated route.
+networkx>=3.0

@@ -503,6 +503,209 @@ def read_kg_postgres_stats() -> dict | None:
     }
 
 
+# ── Full-graph structural stats (SME Cat 5/8) ────────────────────────────────
+
+
+def compute_structural_stats(
+    edges: list[tuple], total_entities: int, *, with_modularity: bool = True
+) -> dict:
+    """Pure WCC (+ optional modularity) over an explicit edge list. No DB.
+
+    SME Cat 5 (connectivity / isolates) and Cat 8 (modularity / community
+    structure) need the FULL knowledge graph, but a /graph sample is biased and
+    limit-dependent (the ``other`` fraction alone drifts 47%→58% across sample
+    sizes). This computes the exact stats over the whole RELATION edge set.
+
+    ``edges`` is a list of ``(start_id, end_id)`` integer pairs (AGE graphids);
+    ``total_entities`` is the full ``Entity`` count so isolates (entities with
+    no RELATION edge — present in the graph but not in any edge) are counted
+    against the true vertex universe, not just the edge endpoints.
+
+    Connectivity (Cat 5) uses a dependency-free union-find — exact, ~O(E·α),
+    no networkx — so the endpoint ships useful component/isolate stats with no
+    new daemon dependency. Modularity (Cat 8) genuinely needs community
+    detection: it is attempted via networkx Louvain when available and
+    ``with_modularity`` is set, and degrades to ``modularity: None`` with a
+    note otherwise (so a missing/declined networkx dep doesn't block the
+    connectivity reading). Louvain over ~1.9M edges is the expensive part.
+
+    Returns component_count, largest_component_size, largest_component_fraction,
+    isolate_count, component_size_histogram (top sizes), edges, and modularity
+    fields.
+    """
+    # --- Connectivity via union-find (no dependency) -------------------
+    parent: dict = {}
+    size: dict = {}
+
+    def _find(x):
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        # Path compression.
+        while parent[x] != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    def _add(x):
+        if x not in parent:
+            parent[x] = x
+            size[x] = 1
+
+    edge_count = 0
+    for a, b in edges:
+        if a is None or b is None:
+            continue
+        edge_count += 1
+        _add(a)
+        _add(b)
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            # Union by size.
+            if size[ra] < size[rb]:
+                ra, rb = rb, ra
+            parent[rb] = ra
+            size[ra] += size[rb]
+
+    nodes_with_edges = len(parent)
+    comp_sizes: dict = {}
+    for node in parent:
+        root = _find(node)
+        comp_sizes[root] = comp_sizes.get(root, 0) + 1
+    components = sorted(comp_sizes.values(), reverse=True)
+
+    # Isolates = entities that exist but carry no RELATION edge: the full
+    # vertex universe minus the entities that appear in at least one edge.
+    isolate_count = max(int(total_entities) - nodes_with_edges, 0)
+    # Fold edge-less isolates in as singleton components so the count +
+    # histogram describe the whole entity universe, not just the edge subgraph.
+    component_count = len(components) + isolate_count
+    largest = components[0] if components else (1 if total_entities else 0)
+    largest_fraction = largest / total_entities if total_entities else 0.0
+
+    stats: dict = {
+        "entities": int(total_entities),
+        "edges": edge_count,
+        "component_count": component_count,
+        "largest_component_size": largest,
+        "largest_component_fraction": largest_fraction,
+        "isolate_count": isolate_count,
+        "component_size_histogram": components[:20],
+        "modularity": None,
+        "modularity_communities": None,
+        "modularity_note": None,
+    }
+
+    # --- Modularity via networkx Louvain (optional) --------------------
+    if with_modularity and edge_count:
+        try:
+            import networkx as nx
+            from networkx.algorithms.community import (
+                louvain_communities,
+                modularity,
+            )
+        except ImportError:
+            stats["modularity_note"] = (
+                "networkx not installed; modularity (Cat 8) not computed — "
+                "connectivity stats (Cat 5) are exact and dependency-free"
+            )
+            return stats
+        try:
+            g = nx.Graph()
+            for a, b in edges:
+                if a is not None and b is not None:
+                    g.add_edge(a, b)
+            # Modularity over the largest WCC — a disconnected graph's
+            # modularity is otherwise dominated by trivial singletons.
+            largest_nodes = max(nx.connected_components(g), key=len)
+            sub = g.subgraph(largest_nodes)
+            communities = louvain_communities(sub, seed=42)
+            stats["modularity"] = float(modularity(sub, communities))
+            stats["modularity_communities"] = len(communities)
+        except Exception as e:  # pragma: no cover - networkx variance
+            stats["modularity_note"] = f"modularity computation failed: {e}"
+            logging.warning("compute_structural_stats: modularity failed: %s", e)
+
+    return stats
+
+
+def read_structural_stats(*, with_modularity: bool = True) -> dict | None:
+    """Full-graph Cat 5/8 stats over the live AGE RELATION graph.
+
+    ⚠️ HEAVY: reads ALL ``(start_id, end_id)`` integer pairs from
+    ``<graph>."RELATION"`` (≈1.9M rows / tens of MB on the canonical palace)
+    and runs networkx WCC + Louvain in-process — a GB-RAM / seconds-to-minutes
+    spike. This must NOT be called inline on the box serving the live palace;
+    the route gates it behind the bench-lock + caches the result, and the
+    one-time production run is scheduled off-peak. Build/validation runs
+    against a scratch palace.
+
+    Reads the endpoint integer columns directly (no agtype) so the scan
+    doesn't OOM the way a Cypher ``MATCH ()-[r:RELATION]->()`` does (#160).
+    Returns ``None`` under the chroma backend / unreachable AGE.
+    """
+    if getattr(_config(), "backend", None) != "postgres":
+        return None
+    cfg = _config()
+    dsn = getattr(cfg, "postgres_dsn", None) or os.environ.get(
+        "MEMPALACE_POSTGRES_DSN"
+    )
+    if not dsn:
+        return None
+    try:
+        from mempalace.knowledge_graph_age import KnowledgeGraphAGE
+
+        kg = KnowledgeGraphAGE(dsn=dsn)
+        graph = getattr(kg, "GRAPH_NAME", "mempalace_kg")
+        try:
+            kg.close()
+        except Exception:
+            pass
+    except Exception as e:
+        logging.warning("read_structural_stats: KG init failed: %s", e)
+        return None
+
+    import psycopg2 as _psycopg2
+    try:
+        conn = _psycopg2.connect(dsn, connect_timeout=3)
+    except Exception as e:
+        logging.warning("read_structural_stats: connect failed: %s", e)
+        return None
+
+    edges: list[tuple] = []
+    total_entities = 0
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL search_path = ag_catalog, public")
+                # Generous timeout — this is the gated heavy path, not /graph.
+                cur.execute("SET LOCAL statement_timeout = '600s'")
+                cur.execute(f'SELECT count(*) FROM {graph}."Entity"')
+                row = cur.fetchone()
+                total_entities = int(row[0]) if row else 0
+                # Endpoint integer pairs only — no agtype, no edge-object
+                # materialization (the #160 OOM is from materializing r).
+                cur.execute(
+                    f'SELECT start_id, end_id FROM {graph}."RELATION"'
+                )
+                edges = [(r[0], r[1]) for r in cur.fetchall()]
+    except Exception as e:
+        logging.warning("read_structural_stats: RELATION scan failed: %s", e)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    return compute_structural_stats(
+        edges, total_entities, with_modularity=with_modularity
+    )
+
+
 def _read_effective_entity_kinds(sample_limit: int = 20000) -> dict[str, int] | None:
     """Effective entity-kind vocabulary from the MENTIONS ``etype`` tags.
 
