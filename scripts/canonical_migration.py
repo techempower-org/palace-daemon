@@ -51,6 +51,44 @@ The exact rewrite is::
 does not include ``ag_catalog``, and the cast otherwise fails.) The original
 ``relation_type`` is preserved in ``raw_relation_type`` for reversibility.
 
+## Re-mapping already-migrated edges (``--remap-existing``, #45)
+
+The first-migration UPDATE above is one-shot: its ``AND NOT (... ?
+'raw_relation_type')`` guard makes a second run a no-op, because every migrated
+edge now has ``raw_relation_type`` set. That guard is correct for the original
+rollout but blocks the #45 use case — after the predicate *normalizer*
+(``mempalace.kg_predicate_norm``) is improved, the bulk of the ``other`` bucket
+should be re-evaluated, and those edges are exactly the already-migrated ones.
+
+``--remap-existing`` switches both the plan and the apply:
+
+* The frequency read uses ``coalesce(r.raw_relation_type, r.relation_type)`` so
+  the mapper re-evaluates the ORIGINAL predicate, not the prior (possibly
+  ``other``) canonical.
+* The UPDATE keys the join on the same ``coalesce(...)`` original, DROPS the
+  first-migration guard, PRESERVES the original (``coalesce`` keeps an existing
+  ``raw_relation_type``, only backfilling it on never-migrated edges), and adds
+  ``relation_type IS DISTINCT FROM m.canonical`` so only edges whose canonical
+  actually changes are touched (no MVCC churn on no-ops)::
+
+    UPDATE mempalace_kg."RELATION" e
+    SET properties = (
+        ((e.properties::text::jsonb)
+         || jsonb_build_object(
+              'raw_relation_type',
+              COALESCE((e.properties::text::jsonb)->>'raw_relation_type',
+                       (e.properties::text::jsonb)->>'relation_type'),
+              'relation_type', m.canonical)
+        )::text::ag_catalog.agtype
+    )
+    FROM predicate_mapping m
+    WHERE COALESCE((e.properties::text::jsonb)->>'raw_relation_type',
+                   (e.properties::text::jsonb)->>'relation_type') = m.raw
+      AND ((e.properties::text::jsonb)->>'relation_type') IS DISTINCT FROM m.canonical
+
+Default OFF — without the flag, behavior is byte-for-byte the original
+first-migration semantics. Same backup + paused-worker gating applies.
+
 ## Reversibility
 
 Rollback restores ``relation_type`` from ``raw_relation_type`` and drops the
@@ -94,9 +132,25 @@ _FREQ_CYPHER = (
     "MATCH ()-[r:RELATION]->() RETURN r.relation_type AS rt, count(*) AS n"
 )
 
+# Remap-existing variant (#45): read the ORIGINAL predicate, not the stored
+# canonical. Edges migrated by a prior run carry the original in
+# ``raw_relation_type`` and a (possibly ``other``) canonical in
+# ``relation_type``; to re-evaluate them against an improved mapper we must feed
+# the mapper the original. ``coalesce`` falls back to ``relation_type`` for
+# never-migrated edges (their stored value IS the original).
+_FREQ_CYPHER_REMAP = (
+    "MATCH ()-[r:RELATION]->() "
+    "RETURN coalesce(r.raw_relation_type, r.relation_type) AS rt, count(*) AS n"
+)
 
-def _fetch_vocab_readonly() -> list[dict]:
-    """READ-ONLY GROUP BY of predicate frequencies via the daemon /cypher."""
+
+def _fetch_vocab_readonly(remap_existing: bool = False) -> list[dict]:
+    """READ-ONLY GROUP BY of predicate frequencies via the daemon /cypher.
+
+    When ``remap_existing`` is set, the frequency query reads the original
+    predicate (``coalesce(raw_relation_type, relation_type)``) so the plan
+    re-evaluates already-migrated edges against the current mapper (#45).
+    """
     import urllib.error
     import urllib.request
 
@@ -106,7 +160,8 @@ def _fetch_vocab_readonly() -> list[dict]:
         raise SystemExit(
             "need PALACE_API_KEY + PALACE_DAEMON_URL (source ~/.config/palace-daemon/env)"
         )
-    payload = json.dumps({"cypher": _FREQ_CYPHER}).encode()
+    cypher = _FREQ_CYPHER_REMAP if remap_existing else _FREQ_CYPHER
+    payload = json.dumps({"cypher": cypher}).encode()
     req = urllib.request.Request(
         f"{url}/cypher", data=payload,
         headers={"X-Api-Key": key, "Content-Type": "application/json"},
@@ -143,7 +198,7 @@ def _load_vocab(args: argparse.Namespace) -> list[dict]:
         if not isinstance(data, list):
             raise SystemExit(f"{args.freq_file}: expected a JSON list of {{rt,n}}")
         return data
-    return _fetch_vocab_readonly()
+    return _fetch_vocab_readonly(remap_existing=getattr(args, "remap_existing", False))
 
 
 def build_plan(vocab: list[dict], mapper: CanonicalMapper) -> dict:
@@ -203,10 +258,11 @@ def build_plan(vocab: list[dict], mapper: CanonicalMapper) -> dict:
     }
 
 
-def print_plan(plan: dict, mode: str) -> None:
+def print_plan(plan: dict, mode: str, remap_existing: bool = False) -> None:
     te = plan["total_edges"]
+    tag = " [REMAP-EXISTING]" if remap_existing else ""
     print("=" * 72)
-    print(f"CANONICAL PREDICATE MIGRATION — {mode}  (issue #72a)")
+    print(f"CANONICAL PREDICATE MIGRATION — {mode}{tag}  (issue #72a / #45)")
     print("=" * 72)
     print(f"total RELATION edges     : {te:,}")
     print(f"distinct predicates now  : {plan['raw_distinct']:,}")
@@ -226,6 +282,9 @@ def print_plan(plan: dict, mode: str) -> None:
     print()
     print("-- reversibility: original retained as r.raw_relation_type "
           "(rollback in module docstring) --")
+    if remap_existing:
+        print("-- REMAP-EXISTING: re-evaluates already-migrated edges; keys on the "
+              "ORIGINAL predicate (coalesce(raw_relation_type, relation_type)) --")
     if mode == "DRY-RUN":
         print("\nNO mutation performed. Re-run with --apply (host-side, with a "
               "backup) to migrate.")
@@ -269,7 +328,10 @@ def _apply(plan: dict, args: argparse.Namespace) -> None:
 
     import time
 
-    print(f"apply: {len(remaps):,} rules → ~{plan['edges_would_change']:,} edge updates")
+    remap_existing = getattr(args, "remap_existing", False)
+    mode_label = "REMAP-EXISTING" if remap_existing else "first-migration"
+    print(f"apply [{mode_label}]: {len(remaps):,} rules → "
+          f"~{plan['edges_would_change']:,} edge updates")
     print("  (set-based UPDATE on mempalace_kg.\"RELATION\" backing table)")
 
     with psycopg.connect(dsn) as conn:
@@ -286,22 +348,56 @@ def _apply(plan: dict, args: argparse.Namespace) -> None:
             cur.execute("ANALYZE predicate_mapping")
 
             t0 = time.time()
-            cur.execute(
-                """
-                UPDATE mempalace_kg."RELATION" e
-                SET properties = (
-                    ((e.properties::text::jsonb)
-                     || jsonb_build_object(
-                          'raw_relation_type',
-                          (e.properties::text::jsonb)->>'relation_type',
-                          'relation_type', m.canonical)
-                    )::text::ag_catalog.agtype
+            if remap_existing:
+                # #45: re-map ALREADY-migrated edges against an improved mapper.
+                # Key the join on the ORIGINAL predicate
+                # (coalesce(raw_relation_type, relation_type)) — NOT on the
+                # stored relation_type, which for migrated edges is the prior
+                # (possibly `other`) canonical. The original is PRESERVED:
+                # coalesce keeps an existing raw_relation_type, only backfilling
+                # it from relation_type on never-migrated edges. The
+                # ``IS DISTINCT FROM`` guard skips no-op rewrites so we only pay
+                # for edges whose canonical actually changes. NOTE the
+                # first-migration guard (``NOT ( ? 'raw_relation_type')``) is
+                # deliberately ABSENT here — that's the whole point of the flag.
+                cur.execute(
+                    """
+                    UPDATE mempalace_kg."RELATION" e
+                    SET properties = (
+                        ((e.properties::text::jsonb)
+                         || jsonb_build_object(
+                              'raw_relation_type',
+                              COALESCE(
+                                  (e.properties::text::jsonb)->>'raw_relation_type',
+                                  (e.properties::text::jsonb)->>'relation_type'),
+                              'relation_type', m.canonical)
+                        )::text::ag_catalog.agtype
+                    )
+                    FROM predicate_mapping m
+                    WHERE COALESCE(
+                              (e.properties::text::jsonb)->>'raw_relation_type',
+                              (e.properties::text::jsonb)->>'relation_type') = m.raw
+                      AND ((e.properties::text::jsonb)->>'relation_type')
+                          IS DISTINCT FROM m.canonical
+                    """
                 )
-                FROM predicate_mapping m
-                WHERE ((e.properties::text::jsonb)->>'relation_type') = m.raw
-                  AND NOT ((e.properties::text::jsonb) ? 'raw_relation_type')
-                """
-            )
+            else:
+                cur.execute(
+                    """
+                    UPDATE mempalace_kg."RELATION" e
+                    SET properties = (
+                        ((e.properties::text::jsonb)
+                         || jsonb_build_object(
+                              'raw_relation_type',
+                              (e.properties::text::jsonb)->>'relation_type',
+                              'relation_type', m.canonical)
+                        )::text::ag_catalog.agtype
+                    )
+                    FROM predicate_mapping m
+                    WHERE ((e.properties::text::jsonb)->>'relation_type') = m.raw
+                      AND NOT ((e.properties::text::jsonb) ? 'raw_relation_type')
+                    """
+                )
             affected = cur.rowcount
             conn.commit()
             elapsed = time.time() - t0
@@ -337,6 +433,18 @@ def main(argv: list[str] | None = None) -> int:
                     help="required acknowledgement for --apply")
     ap.add_argument("--drop-code-tokens", action="store_true",
                     help="(apply only) also delete code-token edges")
+    ap.add_argument(
+        "--remap-existing", action="store_true",
+        help=(
+            "RE-MAP already-migrated edges against the current mapper (#45). "
+            "Reads the original predicate (coalesce(raw_relation_type, "
+            "relation_type)) for the plan AND drops the first-migration guard "
+            "in --apply, so edges that previously landed in `other` get "
+            "re-evaluated. Default OFF: behavior is byte-for-byte the original "
+            "first-migration semantics. Use after the predicate normalizer has "
+            "been improved and you want the existing graph to reflect it."
+        ),
+    )
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -349,9 +457,11 @@ def main(argv: list[str] | None = None) -> int:
         # don't dump the giant full remap list in the summary json
         out = {k: v for k, v in plan.items() if k != "remaps"}
         out["mode"] = "APPLY" if args.apply else "DRY-RUN"
+        out["remap_existing"] = bool(args.remap_existing)
         print(json.dumps(out, indent=2))
     else:
-        print_plan(plan, "APPLY" if args.apply else "DRY-RUN")
+        print_plan(plan, "APPLY" if args.apply else "DRY-RUN",
+                   remap_existing=args.remap_existing)
 
     if args.apply:
         _apply(plan, args)
