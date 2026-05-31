@@ -256,5 +256,33 @@ class TestRerankDeterminism(unittest.TestCase):
         self.assertEqual(first, second)
 
 
+class TestRerankPinHardening(unittest.TestCase):
+    """Guard the determinism-across-deploys pins (docs/evals/2026-05-30-
+    retrieval-determinism.md): the rerank stage is deterministic for a FIXED
+    model, so the model must be frozen — an EXACT flashrank pin + an explicit
+    PALACE_RERANK_MODEL in the systemd unit. A floor pin (``>=``) or a missing
+    model env would let a fresh deploy silently reorder /search top-5.
+    """
+
+    def test_flashrank_is_exact_pinned(self):
+        with open(os.path.join(_ROOT, "requirements.txt")) as fh:
+            req = fh.read()
+        lines = [
+            ln.strip() for ln in req.splitlines()
+            if ln.strip().lower().startswith("flashrank")
+        ]
+        self.assertEqual(len(lines), 1, f"expected one flashrank line, got {lines}")
+        self.assertIn("==", lines[0],
+                      f"flashrank must be EXACT-pinned (==), not a floor: {lines[0]!r}")
+        self.assertNotIn(">=", lines[0])
+
+    def test_systemd_unit_pins_rerank_model(self):
+        with open(os.path.join(_ROOT, "palace-daemon.service")) as fh:
+            unit = fh.read()
+        self.assertIn("PALACE_RERANK_MODEL=ms-marco-TinyBERT-L-2-v2", unit,
+                      "palace-daemon.service must pin PALACE_RERANK_MODEL "
+                      "to the deployed default")
+
+
 if __name__ == "__main__":
     unittest.main()

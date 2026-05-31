@@ -18,4 +18,12 @@ psycopg[binary]>=3.1
 # by PALACE_RERANK_ENABLED (default: true). Fall-through is graceful: if
 # import or model load fails, /search* still returns the BM25/vector
 # ordering unchanged.
-flashrank>=0.2.10
+#
+# EXACT pin (not a floor): the rerank stage is deterministic given a fixed
+# model (proven in docs/evals/2026-05-30-retrieval-determinism.md), but a
+# newer flashrank could ship different bundled ONNX weights or a different
+# tokenizer — which would silently reorder /search top-5 across a deploy.
+# Pinning the version + an explicit PALACE_RERANK_MODEL (set in
+# palace-daemon.service) keeps deployed ranking byte-stable across deploys.
+# Bump deliberately, re-run tests/test_rerank.py::TestRerankDeterminism.
+flashrank==0.2.10
