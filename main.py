@@ -1965,6 +1965,13 @@ from kg_reader import read_kg_postgres_stats as _read_kg_postgres_stats  # noqa:
 from kg_reader import read_kg_stats_direct as _read_kg_stats_direct  # noqa: E402,F401
 from kg_reader import read_kg_direct as _read_kg_direct  # noqa: E402,F401
 from kg_reader import read_ontology_introspection as _read_ontology_introspection  # noqa: E402,F401
+from kg_reader import read_structural_stats as _read_structural_stats  # noqa: E402,F401
+
+# Cache for the heavy full-graph Cat 5/8 structural stats. The compute is a
+# GB-RAM / minutes spike over ~1.9M RELATION edges, so it is NEVER run inline
+# on demand: POST /graph/structural-stats triggers it once (refused while a
+# bench is active), GET returns this cached payload. None until first computed.
+_STRUCTURAL_STATS_CACHE: dict | None = None
 
 
 @app.get("/graph")
@@ -2152,6 +2159,94 @@ async def ontology(
             ),
         )
     return report
+
+
+@app.get("/graph/structural-stats")
+async def graph_structural_stats_get(
+    x_api_key: str | None = Header(default=None),
+    palace_viz_session: str | None = Cookie(default=None),
+):
+    """Return the CACHED full-graph Cat 5/8 structural stats.
+
+    SME Cat 5 (connectivity / isolates) and Cat 8 (modularity) need the EXACT
+    full RELATION graph — a ``/graph`` sample is biased and limit-dependent (the
+    ``other`` fraction alone drifts 47%→58% across sample sizes), so the sampled
+    topology numbers aren't the real-graph values. This serves the exact stats
+    computed by ``POST /graph/structural-stats`` (WCC over all ~1.9M edges +
+    Louvain modularity).
+
+    Read-only and cheap: returns whatever is cached. ``404`` until the
+    (heavy, gated) POST has populated it — the compute is never run on a plain
+    GET, so this can't spike the box serving the live palace.
+    """
+    _check_viz_auth(x_api_key, palace_viz_session)
+    if _STRUCTURAL_STATS_CACHE is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "structural stats not computed yet — POST /graph/structural-"
+                "stats to populate (heavy: full-graph WCC + Louvain, gated)"
+            ),
+        )
+    return _STRUCTURAL_STATS_CACHE
+
+
+@app.post("/graph/structural-stats")
+async def graph_structural_stats_compute(
+    x_api_key: str | None = Header(default=None),
+    with_modularity: bool = Query(
+        True,
+        description=(
+            "Compute Cat 8 Louvain modularity (the expensive part) in addition "
+            "to Cat 5 connectivity. Set false for a faster connectivity-only "
+            "refresh."
+        ),
+    ),
+):
+    """Compute + cache the full-graph Cat 5/8 stats. HEAVY + GATED.
+
+    ⚠️ Reads ALL ~1.9M RELATION edge endpoint pairs and runs WCC (dependency-
+    free union-find) + Louvain modularity (networkx) in-process — a GB-RAM /
+    seconds-to-minutes CPU spike. To avoid contending with the live palace this
+    is:
+      * write-auth gated (header API key, not the relaxed viz cookie),
+      * REFUSED with 409 while a bench is active (``.bench-active.lock``),
+      * run under the read semaphore + off the event loop,
+      * cached so it's computed once, not per request.
+
+    The one-time production run is intended off-peak. Returns the freshly
+    computed (and cached) stats, or 503 under chroma / unreachable AGE.
+    """
+    global _STRUCTURAL_STATS_CACHE
+    _check_auth(x_api_key)
+
+    active, why = _bench_lock_active()
+    if active:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"refusing heavy structural-stats compute while a bench is "
+                f"active ({why}); retry when the bench lock clears"
+            ),
+        )
+
+    async def _under_sem(work):
+        async with _read_sem:
+            return await asyncio.to_thread(work)
+
+    stats = await _under_sem(
+        lambda: _read_structural_stats(with_modularity=bool(with_modularity))
+    )
+    if stats is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "structural stats require the postgres/AGE backend and a "
+                "reachable KG"
+            ),
+        )
+    _STRUCTURAL_STATS_CACHE = stats
+    return stats
 
 
 # ── /viz status dashboard ───────────────────────────────────────────────────
