@@ -170,12 +170,29 @@ _AGE_INDEX_DDL: tuple[tuple[str, str], ...] = (
 
 
 def _existing_age_indexes(conn) -> set[str]:
-    """Names of the edge-endpoint indexes already present on mempalace_kg.*."""
+    """Names of the *valid* edge-endpoint indexes present on mempalace_kg.*.
+
+    Checks ``pg_index.indisvalid`` rather than the ``pg_indexes`` view: a
+    ``CREATE INDEX CONCURRENTLY`` that fails partway (interrupted build, lock
+    timeout, duplicate-key violation on a non-unique build's underlying scan)
+    leaves an INVALID index in the catalog. ``pg_indexes`` lists it, but the
+    planner cannot use it. If we treated that name as ``already_present`` we'd
+    skip the rebuild and silently leave the latency bug unfixed. Filtering on
+    ``indisvalid = true`` means an invalid index is reported as absent, so the
+    route re-attempts it — the rebuild then fails with a clear "already exists"
+    error that surfaces in the response, alerting the operator to DROP the
+    invalid index first.
+    """
     wanted = tuple(name for name, _ in _AGE_INDEX_DDL)
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT indexname FROM pg_indexes "
-            "WHERE schemaname = 'mempalace_kg' AND indexname = ANY(%s)",
+            "SELECT c.relname "
+            "FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN pg_index i ON i.indexrelid = c.oid "
+            "WHERE n.nspname = 'mempalace_kg' "
+            "  AND c.relname = ANY(%s) "
+            "  AND i.indisvalid",
             (list(wanted),),
         )
         return {r[0] for r in cur.fetchall()}
@@ -222,14 +239,18 @@ async def backfill_age_indexes(
         created: list[str] = []
         already: list[str] = []
         errors: dict[str, str] = {}
+        # Initialize before connect so a failure setting autocommit (or any
+        # step between connect and the inner try) still closes the connection
+        # in the single finally — a nested try/finally would leak it.
+        conn = None
         try:
-            conn = psycopg2.connect(dsn, connect_timeout=5)
-        except psycopg2.OperationalError as e:
-            _record_db_error(e)
-            raise
-        # CONCURRENTLY forbids an open transaction; autocommit each DDL.
-        conn.autocommit = True
-        try:
+            try:
+                conn = psycopg2.connect(dsn, connect_timeout=5)
+            except psycopg2.OperationalError as e:
+                _record_db_error(e)
+                raise
+            # CONCURRENTLY forbids an open transaction; autocommit each DDL.
+            conn.autocommit = True
             with conn.cursor() as cur:
                 cur.execute("LOAD 'age'")
                 cur.execute('SET search_path = ag_catalog, "$user", public')
@@ -248,10 +269,11 @@ async def backfill_age_indexes(
                         "backfill-age/indexes: %s failed: %s", name, e
                     )
         finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
         return {"created": created, "already_present": already, "errors": errors}
 
     result = await asyncio.to_thread(_run)

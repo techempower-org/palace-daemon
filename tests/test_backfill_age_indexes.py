@@ -188,6 +188,44 @@ class TestBackfillAgeIndexes(unittest.TestCase):
             self.assertIn("CONCURRENTLY", ddl)
             self.assertIn("IF NOT EXISTS", ddl)
 
+    def test_presence_probe_filters_invalid_indexes(self):
+        # Gemini review: a failed CREATE INDEX CONCURRENTLY leaves an INVALID
+        # index that pg_indexes lists but the planner can't use. The probe must
+        # check pg_index.indisvalid so an invalid index is NOT counted present
+        # (otherwise the rebuild is silently skipped and the latency bug stays).
+        conn = _make_conn(existing_index_names=[])
+        with patch.object(main, "_check_auth"), \
+             patch.dict(os.environ, {"MEMPALACE_POSTGRES_DSN": "postgres://fake"}), \
+             patch.object(main._mp, "_config", MagicMock(backend="postgres")), \
+             patch("psycopg2.connect", return_value=conn):
+            client.post("/backfill-age/indexes")
+        probe = [s for s in conn._executed
+                 if "pg_index" in s and "relname" in s]
+        self.assertTrue(probe, "presence probe should query pg_index, not the pg_indexes view")
+        self.assertIn("indisvalid", probe[0])
+
+    def test_connection_closed_when_autocommit_raises(self):
+        # Gemini review: if connect() succeeds but setting autocommit raises,
+        # the connection must still be closed (no leak). The route initializes
+        # conn=None and wraps the whole setup in one try/finally, so the close
+        # runs even though the exception then propagates out of _run.
+        conn = MagicMock()
+        conn.closed = False
+
+        def _raise(self, v):
+            raise RuntimeError("autocommit boom")
+
+        type(conn).autocommit = property(lambda self: False, _raise)
+        # Server exceptions surface as 500 instead of re-raising into the test.
+        local_client = TestClient(main.app, raise_server_exceptions=False)
+        with patch.object(main, "_check_auth"), \
+             patch.dict(os.environ, {"MEMPALACE_POSTGRES_DSN": "postgres://fake"}), \
+             patch.object(main._mp, "_config", MagicMock(backend="postgres")), \
+             patch("psycopg2.connect", return_value=conn):
+            r = local_client.post("/backfill-age/indexes")
+        self.assertEqual(r.status_code, 500)
+        conn.close.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
