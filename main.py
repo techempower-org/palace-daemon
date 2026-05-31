@@ -1964,6 +1964,7 @@ from kg_reader import read_kg_postgres as _read_kg_postgres  # noqa: E402,F401
 from kg_reader import read_kg_postgres_stats as _read_kg_postgres_stats  # noqa: E402,F401
 from kg_reader import read_kg_stats_direct as _read_kg_stats_direct  # noqa: E402,F401
 from kg_reader import read_kg_direct as _read_kg_direct  # noqa: E402,F401
+from kg_reader import read_ontology_introspection as _read_ontology_introspection  # noqa: E402,F401
 
 
 @app.get("/graph")
@@ -2088,6 +2089,69 @@ async def graph(
         "kg_mentions": kg_mentions,
         "kg_stats": kg_stats_age or _unwrap(kg_stats_resp) or {},
     }
+
+
+@app.get("/ontology")
+async def ontology(
+    x_api_key: str | None = Header(default=None),
+    palace_viz_session: str | None = Cookie(default=None),
+    sample_limit: int = Query(
+        20000,
+        ge=1,
+        le=200000,
+        description=(
+            "Cap on MENTIONS rows sampled to compute the effective entity-kind "
+            "(etype) distribution. Bounds the AGE scan so the full 5.66M-edge "
+            "graph doesn't exhaust shared memory; 20K is representative."
+        ),
+    ),
+):
+    """Self-reported ontology drift — declared vs effective (SME Category 8).
+
+    Before this endpoint, SME's Cat 8 introspection sub-test scored 0.0:
+    nothing in the system could surface its own ontology drift, so SME had to
+    infer the declared-vs-real gap entirely externally. This endpoint lets the
+    daemon answer "what do I claim, what do I actually have, and where do they
+    diverge?" honestly.
+
+    Reads live from Apache AGE under the postgres backend:
+
+    - ``declared`` — the documented MemPalace ontology (6 entity types, 3 edge
+      types, 5 standard halls, a "hierarchical" structure claim), extracted
+      from the upstream README. Constant, mirrors what SME's
+      ``implied_ontology_mempalace.yaml`` extracts.
+    - ``effective`` — what the live graph actually holds: AGE relationship
+      labels with nonzero rows, the MENTIONS ``etype`` distribution (the only
+      entity-kind vocabulary the daemon really distinguishes — the ``Entity``
+      label itself is untyped), and entity/triple/mention counts.
+    - ``drift`` — the reconciliation: which declared edge types map onto a
+      populated AGE label, which effective entity kinds are undeclared, a
+      ``drift_score`` in [0, 1], and a note explaining that hall/tunnel/
+      member_of are structural projections (not AGE labels) and that the
+      "hierarchical" structure claim is verified by SME Cat 8e over ``/graph``,
+      not here (reported as ``"not_computed"`` rather than rubber-stamped).
+
+    503 under the chroma backend or when AGE is unreachable — the daemon
+    declines to fabricate an empty ontology.
+    """
+    _check_viz_auth(x_api_key, palace_viz_session)
+
+    async def _direct_under_sem(work):
+        async with _read_sem:
+            return await asyncio.to_thread(work)
+
+    report = await _direct_under_sem(
+        lambda: _read_ontology_introspection(sample_limit=int(sample_limit))
+    )
+    if report is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "ontology introspection requires the postgres/AGE backend "
+                "and a reachable KG"
+            ),
+        )
+    return report
 
 
 # ── /viz status dashboard ───────────────────────────────────────────────────
