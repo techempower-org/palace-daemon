@@ -172,5 +172,93 @@ class TestLoadVocabErrors(unittest.TestCase):
         self.assertIn("cannot read", str(cm.exception))
 
 
+class TestRemapExisting(unittest.TestCase):
+    """#45: --remap-existing re-evaluates already-migrated edges.
+
+    Two behavioral switches: the frequency read uses the ORIGINAL predicate
+    (coalesce(raw_relation_type, relation_type)), and the apply UPDATE keys on
+    that original + drops the first-migration guard. Default OFF must be
+    byte-for-byte the original first-migration SQL.
+    """
+
+    def _args(self, **kw):
+        base = dict(apply=True, dsn="postgresql://x", i_have_a_backup=True,
+                    drop_code_tokens=False, remap_existing=False)
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def _run_apply(self, args):
+        """Run _apply with a mocked psycopg; return the executed SQL strings."""
+        fake_cur = MagicMock()
+        fake_cur.rowcount = 42
+        fake_cur.fetchone.return_value = (0,)
+        fake_cur.copy.return_value.__enter__.return_value = MagicMock()
+        fake_conn = MagicMock()
+        fake_conn.cursor.return_value.__enter__.return_value = fake_cur
+        fake_psycopg = MagicMock()
+        fake_psycopg.connect.return_value.__enter__.return_value = fake_conn
+        plan = {
+            "remaps": [{"raw": "is", "canonical": "is_a", "edges": 100}],
+            "edges_would_change": 100, "edges_unchanged": 0, "dropped_edges": 0,
+        }
+        with patch.dict("sys.modules", {"psycopg": fake_psycopg}):
+            mig._apply(plan, args)
+        return [str(c.args[0]) for c in fake_cur.execute.call_args_list]
+
+    def test_freq_query_reads_original_predicate_when_remap_existing(self):
+        # _FREQ_CYPHER_REMAP coalesces raw_relation_type so the mapper sees the
+        # original, not the prior canonical.
+        self.assertIn("coalesce(r.raw_relation_type, r.relation_type)",
+                      mig._FREQ_CYPHER_REMAP)
+        # default cypher unchanged (no coalesce)
+        self.assertNotIn("coalesce", mig._FREQ_CYPHER)
+
+    def test_fetch_vocab_uses_remap_cypher(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = req.data.decode()
+            cm = MagicMock()
+            cm.__enter__.return_value.read.return_value = b'{"rows": []}'
+            return cm
+
+        env = {"PALACE_API_KEY": "k", "PALACE_DAEMON_URL": "http://d"}
+        with patch.dict(os.environ, env), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            mig._fetch_vocab_readonly(remap_existing=True)
+        self.assertIn("coalesce(r.raw_relation_type, r.relation_type)",
+                      captured["body"])
+
+    def test_remap_existing_apply_drops_guard_and_keys_on_original(self):
+        sqls = self._run_apply(self._args(remap_existing=True))
+        update = next((s for s in sqls if "UPDATE" in s and "RELATION" in s), "")
+        # keys on the coalesced ORIGINAL predicate
+        self.assertIn("COALESCE", update)
+        self.assertIn("raw_relation_type", update)
+        # only touches rows whose canonical actually changes
+        self.assertIn("IS DISTINCT FROM", update)
+        # the first-migration guard is ABSENT in remap mode
+        self.assertNotIn("NOT ((e.properties::text::jsonb) ? 'raw_relation_type')",
+                         update)
+
+    def test_default_apply_keeps_first_migration_guard(self):
+        # remap_existing=False (default) → original SQL with the guard intact.
+        sqls = self._run_apply(self._args(remap_existing=False))
+        update = next((s for s in sqls if "UPDATE" in s and "RELATION" in s), "")
+        self.assertIn("NOT ((e.properties::text::jsonb) ? 'raw_relation_type')",
+                      update)
+        self.assertNotIn("IS DISTINCT FROM", update)
+
+    def test_missing_remap_existing_attr_defaults_false(self):
+        # _apply must tolerate a Namespace without the attr (back-compat with
+        # callers built before #45) via getattr(..., False).
+        ns = argparse.Namespace(apply=True, dsn="postgresql://x",
+                                i_have_a_backup=True, drop_code_tokens=False)
+        sqls = self._run_apply(ns)
+        update = next((s for s in sqls if "UPDATE" in s and "RELATION" in s), "")
+        self.assertIn("NOT ((e.properties::text::jsonb) ? 'raw_relation_type')",
+                      update)
+
+
 if __name__ == "__main__":
     unittest.main()
