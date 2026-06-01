@@ -137,7 +137,7 @@ def _apply_kind_filter(response, kind: str):
 @router.get("/search")
 async def search(
     q: str,
-    limit: int = 5,
+    limit: int = 15,
     # palace-daemon#194: kind= checkpoint filter, re-added after the
     # 2026-05-29 DB rebackfill re-merged checkpoint drawers into the main
     # collection (4a318d3 had retired it when the collection split emptied
