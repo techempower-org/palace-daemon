@@ -9,6 +9,11 @@ Safety mode: if the daemon is unreachable at startup, the client exits
 with an error. Direct database access is disabled to prevent "split-brain"
 concurrency issues and SQLite corruption.
 
+cli-only mode (mcp_mode=cli-only) serves the entire MCP surface locally —
+handshake answered in-process, zero tools advertised, calls rejected — and
+never contacts the daemon, so an asleep palace host doesn't surface as a
+"Failed to connect" MCP error in every client session.
+
 Usage:
     python mempalace-mcp.py --daemon http://localhost:8085
     PALACE_DAEMON_URL=http://localhost:8085 python mempalace-mcp.py
@@ -128,8 +133,26 @@ def run_daemon_mode(daemon_url: str, mcp_mode: str = "all"):
             return None
         if mcp_mode == "cli-only":
             method = request.get("method")
-            # tools/list → advertise zero tools without forwarding, so the
-            # MCP client caches an empty surface (reclaiming ~9k tokens).
+            # Notifications carry no id and expect no response.
+            if request.get("id") is None:
+                return None
+            # The whole surface is served locally: the daemon may be asleep
+            # (Slumber Ward S3) and cli-only must never depend on it.
+            if method == "initialize":
+                params = request.get("params") or {}
+                protocol = params.get("protocolVersion")
+                if not isinstance(protocol, str):
+                    protocol = "2025-11-25"
+                return {"jsonrpc": "2.0", "id": request.get("id"),
+                        "result": {"protocolVersion": protocol,
+                                   "capabilities": {"tools": {}},
+                                   "serverInfo": {"name": "mempalace",
+                                                  "version": "cli-only"}}}
+            if method == "ping":
+                return {"jsonrpc": "2.0", "id": request.get("id"),
+                        "result": {}}
+            # tools/list → advertise zero tools, so the MCP client caches an
+            # empty surface (reclaiming ~9k tokens of schema context).
             if method == "tools/list":
                 return {"jsonrpc": "2.0", "id": request.get("id"),
                         "result": {"tools": []}}
@@ -138,9 +161,17 @@ def run_daemon_mode(daemon_url: str, mcp_mode: str = "all"):
                 return {"jsonrpc": "2.0", "id": request.get("id"),
                         "error": {"code": -32601,
                                   "message": CLI_ONLY_REJECT_MESSAGE}}
-            # initialize, ping, notifications/*, resources/list, prompts/list
-            # fall through to normal forwarding so the server still shows
-            # Connected (with 0 tools).
+            if method == "resources/list":
+                return {"jsonrpc": "2.0", "id": request.get("id"),
+                        "result": {"resources": []}}
+            if method == "prompts/list":
+                return {"jsonrpc": "2.0", "id": request.get("id"),
+                        "result": {"prompts": []}}
+            # Anything else: method-not-found, never forwarded.
+            return {"jsonrpc": "2.0", "id": request.get("id"),
+                    "error": {"code": -32601,
+                              "message": f"Method not available in "
+                                         f"cli-only mode: {method}"}}
         try:
             return forward(daemon_url, request)
         except urllib.error.HTTPError as e:
@@ -172,10 +203,16 @@ def main():
     if args.api_key is not None:
         API_KEY = args.api_key
 
+    mcp_mode = resolve_mcp_mode()
     if find_daemon(args.daemon):
         # Log connection success to stderr so it doesn't break JSON-RPC stdout
-        mcp_mode = resolve_mcp_mode()
         print(f"palace-daemon: connected at {args.daemon} (mcp_mode={mcp_mode})", file=sys.stderr)
+        run_daemon_mode(args.daemon, mcp_mode)
+    elif mcp_mode == "cli-only":
+        # cli-only never contacts the daemon, so an asleep palace host must
+        # not kill the stub at startup.
+        print(f"palace-daemon: unreachable at {args.daemon}; "
+              "serving cli-only handshake locally", file=sys.stderr)
         run_daemon_mode(args.daemon, mcp_mode)
     else:
         print(f"ERROR: palace-daemon unreachable at {args.daemon}. Direct fallback disabled for safety.", file=sys.stderr)

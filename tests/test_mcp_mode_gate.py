@@ -116,19 +116,43 @@ class TestCliOnlyGate(unittest.TestCase):
         self.assertIn("cli-only", resp["error"]["message"])
         self.assertEqual(captured, [], "tools/call must not be forwarded in cli-only")
 
-    def test_initialize_still_forwards_in_cli_only(self):
+    def test_initialize_answered_locally_in_cli_only(self):
+        handle = _build_handle("cli-only")
+        resp, captured = _run(handle, {"jsonrpc": "2.0", "id": 3, "method": "initialize",
+                                       "params": {"protocolVersion": "2025-03-26"}})
+        self.assertEqual(resp["result"]["protocolVersion"], "2025-03-26")
+        self.assertEqual(resp["result"]["serverInfo"]["name"], "mempalace")
+        self.assertIn("tools", resp["result"]["capabilities"])
+        self.assertEqual(captured, [], "initialize must not be forwarded in cli-only")
+
+    def test_initialize_defaults_protocol_version_when_absent(self):
         handle = _build_handle("cli-only")
         resp, captured = _run(handle, {"jsonrpc": "2.0", "id": 3, "method": "initialize"})
-        self.assertEqual(resp["result"], {"forwarded": True})
-        self.assertEqual(len(captured), 1)
+        self.assertEqual(resp["result"]["protocolVersion"], "2025-11-25")
+        self.assertEqual(captured, [])
 
-    def test_ping_and_resources_still_forward_in_cli_only(self):
+    def test_handshake_methods_answered_locally_in_cli_only(self):
         handle = _build_handle("cli-only")
-        seen = []
-        for method in ("ping", "resources/list", "prompts/list"):
-            _, captured = _run(handle, {"jsonrpc": "2.0", "id": 9, "method": method})
-            seen.extend(r["method"] for r in captured)
-        self.assertEqual(seen, ["ping", "resources/list", "prompts/list"])
+        expected = {"ping": {}, "resources/list": {"resources": []},
+                    "prompts/list": {"prompts": []}}
+        for method, result in expected.items():
+            resp, captured = _run(handle, {"jsonrpc": "2.0", "id": 9, "method": method})
+            self.assertEqual(resp["result"], result, method)
+            self.assertEqual(captured, [], f"{method} must not be forwarded in cli-only")
+
+    def test_notifications_swallowed_in_cli_only(self):
+        handle = _build_handle("cli-only")
+        resp, captured = _run(handle, {"jsonrpc": "2.0",
+                                       "method": "notifications/initialized"})
+        self.assertIsNone(resp)
+        self.assertEqual(captured, [])
+
+    def test_unknown_method_rejected_not_forwarded_in_cli_only(self):
+        handle = _build_handle("cli-only")
+        resp, captured = _run(handle, {"jsonrpc": "2.0", "id": 11,
+                                       "method": "logging/setLevel"})
+        self.assertEqual(resp["error"]["code"], -32601)
+        self.assertEqual(captured, [], "cli-only must never contact the daemon")
 
 
 class TestAllModePassthrough(unittest.TestCase):
@@ -144,6 +168,39 @@ class TestAllModePassthrough(unittest.TestCase):
                                        "params": {"name": "mempalace_search", "arguments": {}}})
         self.assertEqual(resp["result"], {"forwarded": True})
         self.assertEqual(len(captured), 1)
+
+
+class TestStartupDaemonGate(unittest.TestCase):
+    """main() must only hard-exit on an unreachable daemon in "all" mode.
+
+    cli-only serves the whole MCP surface locally, so an asleep palace host
+    (Slumber Ward S3) must not turn the plugin into a red "Failed to connect"
+    in every Claude Code session."""
+
+    def _run_main(self, mode, daemon_up):
+        calls = {}
+        argv = ["mempalace-mcp.py", "--daemon", "http://daemon"]
+        with patch.object(proxy.sys, "argv", argv), \
+             patch.object(proxy, "find_daemon", lambda url: daemon_up), \
+             patch.object(proxy, "resolve_mcp_mode", lambda: mode), \
+             patch.object(proxy, "run_daemon_mode",
+                          lambda url, m: calls.setdefault("ran", (url, m))), \
+             patch("builtins.print"):
+            proxy.main()
+        return calls
+
+    def test_cli_only_serves_locally_when_daemon_down(self):
+        calls = self._run_main("cli-only", daemon_up=False)
+        self.assertEqual(calls["ran"], ("http://daemon", "cli-only"))
+
+    def test_all_mode_still_exits_when_daemon_down(self):
+        with self.assertRaises(SystemExit) as ctx:
+            self._run_main("all", daemon_up=False)
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_all_mode_runs_when_daemon_up(self):
+        calls = self._run_main("all", daemon_up=True)
+        self.assertEqual(calls["ran"], ("http://daemon", "all"))
 
 
 class TestNonDictRequestGuard(unittest.TestCase):
