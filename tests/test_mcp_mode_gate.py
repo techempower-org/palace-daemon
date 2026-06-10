@@ -178,10 +178,15 @@ class TestStartupDaemonGate(unittest.TestCase):
     in every Claude Code session."""
 
     def _run_main(self, mode, daemon_up):
-        calls = {}
+        calls = {"probes": 0}
+
+        def _probe(url):
+            calls["probes"] += 1
+            return daemon_up
+
         argv = ["mempalace-mcp.py", "--daemon", "http://daemon"]
         with patch.object(proxy.sys, "argv", argv), \
-             patch.object(proxy, "find_daemon", lambda url: daemon_up), \
+             patch.object(proxy, "find_daemon", _probe), \
              patch.object(proxy, "resolve_mcp_mode", lambda: mode), \
              patch.object(proxy, "run_daemon_mode",
                           lambda url, m: calls.setdefault("ran", (url, m))), \
@@ -193,6 +198,14 @@ class TestStartupDaemonGate(unittest.TestCase):
         calls = self._run_main("cli-only", daemon_up=False)
         self.assertEqual(calls["ran"], ("http://daemon", "cli-only"))
 
+    def test_cli_only_never_probes_the_daemon(self):
+        # The probe blocks up to 3s when the host is asleep; cli-only has
+        # no use for its answer, so it must not run at all (either state).
+        for daemon_up in (True, False):
+            calls = self._run_main("cli-only", daemon_up=daemon_up)
+            self.assertEqual(calls["probes"], 0, f"probed with daemon_up={daemon_up}")
+            self.assertEqual(calls["ran"], ("http://daemon", "cli-only"))
+
     def test_all_mode_still_exits_when_daemon_down(self):
         with self.assertRaises(SystemExit) as ctx:
             self._run_main("all", daemon_up=False)
@@ -201,6 +214,7 @@ class TestStartupDaemonGate(unittest.TestCase):
     def test_all_mode_runs_when_daemon_up(self):
         calls = self._run_main("all", daemon_up=True)
         self.assertEqual(calls["ran"], ("http://daemon", "all"))
+        self.assertEqual(calls["probes"], 1)
 
 
 class TestNonDictRequestGuard(unittest.TestCase):
