@@ -1047,6 +1047,10 @@ def hook_stop(data: dict, harness: str):
     transcript_path = parsed["transcript_path"]
 
     if str(stop_hook_active).lower() in ("true", "1", "yes"):
+        # Log before bailing: without this line, "harness never invoked the
+        # hook" and "harness invoked it with stop_hook_active" are
+        # indistinguishable in hook.log (2026-06-10 silent-window incident).
+        _log(f"Session {session_id}: stop suppressed (stop_hook_active set by harness)")
         _output({})
         return
 
