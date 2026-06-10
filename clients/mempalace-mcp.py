@@ -133,13 +133,16 @@ def run_daemon_mode(daemon_url: str, mcp_mode: str = "all"):
             return None
         if mcp_mode == "cli-only":
             method = request.get("method")
+            # Notifications carry no id and expect no response.
+            if request.get("id") is None:
+                return None
             # The whole surface is served locally: the daemon may be asleep
             # (Slumber Ward S3) and cli-only must never depend on it.
             if method == "initialize":
                 params = request.get("params") or {}
                 protocol = params.get("protocolVersion")
                 if not isinstance(protocol, str):
-                    protocol = "2024-11-05"
+                    protocol = "2025-11-25"
                 return {"jsonrpc": "2.0", "id": request.get("id"),
                         "result": {"protocolVersion": protocol,
                                    "capabilities": {"tools": {}},
@@ -164,9 +167,6 @@ def run_daemon_mode(daemon_url: str, mcp_mode: str = "all"):
             if method == "prompts/list":
                 return {"jsonrpc": "2.0", "id": request.get("id"),
                         "result": {"prompts": []}}
-            # Notifications carry no id and expect no response.
-            if request.get("id") is None:
-                return None
             # Anything else: method-not-found, never forwarded.
             return {"jsonrpc": "2.0", "id": request.get("id"),
                     "error": {"code": -32601,

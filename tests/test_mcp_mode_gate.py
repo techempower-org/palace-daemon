@@ -128,7 +128,7 @@ class TestCliOnlyGate(unittest.TestCase):
     def test_initialize_defaults_protocol_version_when_absent(self):
         handle = _build_handle("cli-only")
         resp, captured = _run(handle, {"jsonrpc": "2.0", "id": 3, "method": "initialize"})
-        self.assertEqual(resp["result"]["protocolVersion"], "2024-11-05")
+        self.assertEqual(resp["result"]["protocolVersion"], "2025-11-25")
         self.assertEqual(captured, [])
 
     def test_handshake_methods_answered_locally_in_cli_only(self):
