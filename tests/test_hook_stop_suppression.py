@@ -14,7 +14,9 @@ Run with::
 """
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -26,6 +28,16 @@ import hook  # noqa: E402
 
 
 class TestStopSuppressionLogging(unittest.TestCase):
+    def setUp(self):
+        # Isolate from the real ~/.mempalace: the gate-passing path touches
+        # STATE_DIR (mkdir + marker reads) and loads hook_settings.json.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for attr in ("STATE_DIR", "HOOK_SETTINGS_PATH"):
+            patcher = patch.object(hook, attr, Path(tmp.name) / attr.lower())
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def _run(self, stop_hook_active):
         logged = []
         data = {
