@@ -208,7 +208,7 @@ def main():
         # cli-only never contacts the daemon, so skip the startup probe
         # entirely — an asleep palace host would otherwise stall every
         # client session for the probe's 3s timeout before serving locally.
-        print("palace-daemon: cli-only mode — serving MCP handshake locally "
+        print("palace-daemon: cli-only mode - serving MCP handshake locally "
               "(daemon probe skipped)", file=sys.stderr)
         run_daemon_mode(args.daemon, mcp_mode)
     elif find_daemon(args.daemon):
