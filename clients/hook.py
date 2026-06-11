@@ -1167,14 +1167,25 @@ def hook_stop(data: dict, harness: str):
         # to ~/.mempalace/hook_state/hook.log is the durable channel.
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         entry = f"AUTO-SAVE:{session_id}|{exchange_count}.msgs|{ts}|hook.{trigger}"
-        diary_ok, _diary_resp = _post_mcp(daemon_url, "mempalace_diary_write", {
+        # session_id rides in the entry text only — the daemon's diary
+        # executor whitelists agent_name/entry/topic/wing and drops the rest.
+        rpc_ok, diary_resp = _post_mcp(daemon_url, "mempalace_diary_write", {
             "agent_name": harness,
             "entry": entry,
             "topic": CHECKPOINT_TOPIC,
             "wing": wing,
-            "session_id": session_id,
         })
-        _log(f"Diary checkpoint {'saved' if diary_ok else 'FAILED (daemon unreachable)'} at exchange {exchange_count} → {wing}")
+        # _post_mcp only fails on transport errors; tool-level failure is a
+        # success=False inside the JSON-RPC envelope — unwrap and check both.
+        inner = _extract_inner(diary_resp) if rpc_ok else {}
+        diary_ok = bool(rpc_ok and inner.get("success"))
+        if diary_ok:
+            _log(f"Diary checkpoint saved at exchange {exchange_count} → {wing}")
+        else:
+            detail = inner.get("error") or (
+                diary_resp.get("error") if isinstance(diary_resp, dict) else str(diary_resp)
+            ) or "no success flag in response"
+            _log(f"Diary checkpoint FAILED at exchange {exchange_count} → {wing}: {detail}")
         ok = _ingest_transcript_via_daemon(daemon_url, transcript_path, wing)
         _log(f"Silent save (diary+mine) {'OK' if ok else 'FAILED (daemon unreachable)'} at exchange {exchange_count} → {wing}")
         if not ok:
