@@ -1132,15 +1132,13 @@ def hook_stop(data: dict, harness: str):
         return
 
     if silent:
-        # Phase 1D refactor (2026-05-14 hybrid-search-taxonomy spec, §3.5):
-        # the hook no longer writes drawers directly via diary_write. The
-        # miner is the single source of writes; the hook is a trigger.
-        # /mine with mode=convos lets the miner chunk the transcript into
-        # one-exchange-per-drawer + emits canonical-room values via the
-        # post-spec detect_convo_room. The "single session summary"
-        # semantic that diary_write previously provided is satisfied by
-        # the convos-mode chunking + retrieval — the conversation is
-        # captured as content-rich drawers, not as one opaque summary.
+        # Diary checkpoints restored (JP, 2026-06-11). The 2026-05-14
+        # refactor made the miner the single write path (mine-only); that
+        # kept the verbatim drawers but left the diary empty, so the
+        # session-start greeting's diary_read context went stale. The hook
+        # now writes a checkpoint diary entry AND triggers the transcript
+        # mine: the diary entry is the marker the greeting reads; the mine
+        # produces the content-rich verbatim drawers.
         wing = _project_wing(data, transcript_path)
 
         # Emit the themed systemMessage in the parent BEFORE detaching.
@@ -1164,11 +1162,21 @@ def hook_stop(data: dict, harness: str):
         if not _detach_for_async_work():
             return
 
-        # We are the (detached) child. Do the slow ingest. Anything
+        # We are the (detached) child. Do the slow work. Anything
         # we print from here goes to /dev/null; logging via _log()
         # to ~/.mempalace/hook_state/hook.log is the durable channel.
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        entry = f"AUTO-SAVE:{session_id}|{exchange_count}.msgs|{ts}|hook.{trigger}"
+        diary_ok, _diary_resp = _post_mcp(daemon_url, "mempalace_diary_write", {
+            "agent_name": harness,
+            "entry": entry,
+            "topic": CHECKPOINT_TOPIC,
+            "wing": wing,
+            "session_id": session_id,
+        })
+        _log(f"Diary checkpoint {'saved' if diary_ok else 'FAILED (daemon unreachable)'} at exchange {exchange_count} → {wing}")
         ok = _ingest_transcript_via_daemon(daemon_url, transcript_path, wing)
-        _log(f"Silent save (mine-only) {'OK' if ok else 'FAILED (daemon unreachable)'} at exchange {exchange_count} → {wing}")
+        _log(f"Silent save (diary+mine) {'OK' if ok else 'FAILED (daemon unreachable)'} at exchange {exchange_count} → {wing}")
         if not ok:
             failure_themed = _theme_save_fail(exchange_count, trigger, {"error": "mine via daemon failed"})
             _log(f"FAILURE themed (would-have-emitted): {failure_themed}")
