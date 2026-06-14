@@ -53,9 +53,11 @@ MEMPALACE_CONFIG_PATH = Path.home() / ".mempalace" / "config.json"
 PENDING_DIR = STATE_DIR / "pending"
 # Per-host wake lock: when a sleeping host wakes a burst of stop/precompact
 # hooks at once, only the first fires the (possibly slow, possibly costly)
-# wake command; the rest see the lock and only wait briefly on /health.
+# wake command; the rest see the lock and only wait briefly on /health. The
+# lock is an fcntl.flock held for the entire wake+poll (see
+# _try_claim_wake_lock) — the kernel releases it when the holder's fd closes
+# or the process dies, so there is no TTL to tune and no stale-reclaim race.
 WAKE_LOCK_PATH = STATE_DIR / ".wake_inflight"
-WAKE_LOCK_TTL = 120          # seconds a wake lock is considered live
 WAKE_COMMAND_TIMEOUT = 15    # seconds the wake command itself may take
 # When a hook skips the wake command because another hook holds the lock,
 # it still waits this long on /health in case that other wake succeeds.
@@ -273,8 +275,20 @@ def _load_auto_wake() -> dict:
     if env_val is not None and env_val.strip().lower() in ("0", "false", "no"):
         return None
     try:
-        raw = json.loads(MEMPALACE_CONFIG_PATH.read_text()).get("auto_wake")
-    except Exception:
+        text = MEMPALACE_CONFIG_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # No config file is the normal "auto_wake not set up" state — stay
+        # silent so we don't spam the log on every hook fire.
+        return None
+    except OSError as e:
+        _log(f"auto_wake: could not read {MEMPALACE_CONFIG_PATH} ({e}) — auto_wake disabled")
+        return None
+    try:
+        raw = json.loads(text).get("auto_wake")
+    except (json.JSONDecodeError, AttributeError) as e:
+        # The config file EXISTS but is malformed — surface it. A silent
+        # disable here once cost hours of "why isn't auto_wake working?".
+        _log(f"auto_wake: malformed {MEMPALACE_CONFIG_PATH} ({e}) — auto_wake disabled")
         return None
     if isinstance(raw, str):
         raw = {"command": raw}
@@ -361,72 +375,72 @@ def _run_wake_command(command: str) -> bool:
     return proc.returncode == 0
 
 
-def _acquire_wake_lock() -> bool:
-    """Claim the per-host wake lock. Returns True for the first claimant.
+def _try_claim_wake_lock():
+    """Try to claim the per-host wake lock via ``fcntl.flock``.
 
-    A stale lock (older than ``WAKE_LOCK_TTL``) is reclaimed so a crashed
-    waker can't wedge the lock forever. Returns False when another live
-    hook already holds it — that hook is the one firing the wake command;
-    followers only wait briefly on /health.
+    Returns the open file handle when we are the leader — the caller MUST
+    keep it open for the whole wake+poll and close it in a ``finally`` to
+    release. Returns ``None`` when another live hook already holds the lock
+    (we are a follower: skip the wake command, just poll /health briefly).
 
-    Best-effort: any filesystem error fails open to "you hold the lock" so
-    a wake is still attempted rather than silently skipped.
+    Mirrors :func:`_try_claim_mine_slot`. ``LOCK_EX | LOCK_NB`` is fully
+    atomic — there is no check-then-create window, so no O_EXCL race — and
+    the kernel drops the lock the instant the holder's fd closes or the
+    process dies, so there is no TTL to tune and no stale-reclaim path
+    (this is what closed the 120s-TTL-vs-300s-timeout split-brain: the lock
+    can never expire while the leader is still polling).
+
+    Best-effort: if the file can't even be opened we fail open by returning
+    a handle anyway, so a wake is still attempted rather than silently
+    skipped.
     """
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        now = time.time()
-        if WAKE_LOCK_PATH.exists():
-            try:
-                age = now - WAKE_LOCK_PATH.stat().st_mtime
-            except OSError:
-                age = WAKE_LOCK_TTL + 1
-            if age < WAKE_LOCK_TTL:
-                return False
-            # Stale — reclaim below.
-        # O_CREAT|O_EXCL gives us atomic "first writer wins". If a racing
-        # hook created it microseconds ago, we lose the race and become a
-        # follower.
-        try:
-            fd = os.open(str(WAKE_LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            # Lost the create race, but the existing lock might be the stale
-            # one we just decided to reclaim. Re-check age: if still stale,
-            # forcibly take it; otherwise become a follower.
-            try:
-                age = now - WAKE_LOCK_PATH.stat().st_mtime
-            except OSError:
-                age = 0
-            if age >= WAKE_LOCK_TTL:
-                try:
-                    fd = os.open(str(WAKE_LOCK_PATH), os.O_CREAT | os.O_WRONLY, 0o600)
-                except OSError:
-                    return True
-            else:
-                return False
-        try:
-            os.write(fd, str(now).encode())
-        finally:
-            os.close(fd)
-        return True
-    except OSError:
-        return True
-
-
-def _release_wake_lock() -> None:
-    try:
-        WAKE_LOCK_PATH.unlink()
     except OSError:
         pass
+    try:
+        fh = open(WAKE_LOCK_PATH, "w")
+    except OSError:
+        # Can't open the lock file at all — fail open. A sentinel object
+        # that close()s cleanly lets the caller treat us as the leader.
+        return _NULL_LOCK
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        fh.close()
+        return None
+    try:
+        fh.write(f"pid={os.getpid()} ts={time.time()}\n")
+        fh.flush()
+    except OSError:
+        pass
+    return fh
+
+
+class _NullLock:
+    """No-op stand-in for a lock handle when the lock file can't be opened.
+
+    Lets ``_try_claim_wake_lock`` fail open (treat us as leader) without the
+    caller special-casing ``None`` vs a real handle: ``close()`` is a no-op.
+    """
+
+    def close(self):
+        return None
+
+
+_NULL_LOCK = _NullLock()
 
 
 def _attempt_wake(daemon_url: str, settings: dict) -> bool:
     """Wake the palace host (if we hold the lock) and poll /health.
 
     Returns True once the daemon answers /health. The wake command is run
-    only by the first hook to claim the per-host lock; a burst of sleeping-
-    host hooks therefore fires exactly one wake command. Followers skip the
-    command but still poll /health for a bounded window, so they can also
-    retry once the leader's wake lands.
+    only by the hook that wins the per-host ``fcntl.flock``; a burst of
+    sleeping-host hooks therefore fires exactly one wake command. The lock
+    is held for the entire wake+poll and released in the ``finally`` (or by
+    the kernel if the process dies). Followers (couldn't get the flock) skip
+    the command but still poll /health for a bounded window, so they can
+    also retry once the leader's wake lands.
 
     Never echoes the command (it may carry secrets). At most one full
     attempt per process.
@@ -435,7 +449,8 @@ def _attempt_wake(daemon_url: str, settings: dict) -> bool:
     poll_s = float(settings.get("poll_interval_seconds", 2.0))
     command = settings.get("command", "")
 
-    is_leader = _acquire_wake_lock()
+    lock = _try_claim_wake_lock()
+    is_leader = lock is not None
     try:
         if is_leader:
             _log(f"auto_wake: waking palace host (up to {timeout_s:.0f}s)")
@@ -444,8 +459,9 @@ def _attempt_wake(daemon_url: str, settings: dict) -> bool:
                 return False
             deadline = time.monotonic() + timeout_s
         else:
-            # Another hook is firing the wake command. Wait a bounded
-            # window on /health rather than fire a redundant command.
+            # Another hook holds the flock and is firing the wake command.
+            # Wait a bounded window on /health rather than fire a redundant
+            # command.
             _log("auto_wake: wake already in flight (lock held) — waiting on /health")
             deadline = time.monotonic() + min(timeout_s, WAKE_FOLLOWER_WAIT)
 
@@ -458,8 +474,13 @@ def _attempt_wake(daemon_url: str, settings: dict) -> bool:
         _log(f"auto_wake: daemon still unreachable after {time.monotonic() - started:.0f}s")
         return False
     finally:
+        # Closing the leader's handle drops the flock immediately. Followers
+        # have lock=None, so there is nothing to close.
         if is_leader:
-            _release_wake_lock()
+            try:
+                lock.close()
+            except OSError:
+                pass
 
 
 def _journal_failed_ingest(transcript_path: str, wing: str, session_id: str) -> None:
@@ -502,6 +523,12 @@ def _drain_pending_journal(daemon_url: str, max_entries: int = 50) -> None:
     ``_ingest_transcript_via_daemon``, and rewrites each journal file
     atomically (tempfile + os.replace) keeping only the entries that still
     failed. Never blocks or crashes session start.
+
+    Entries whose transcript file is gone or no longer valid (deleted,
+    truncated, renamed) are DISCARDED rather than re-queued: they are
+    unrecoverable, and re-appending them would clog the journal forever and
+    burn a replay attempt on every session start. Only genuinely-retryable
+    failures (daemon reachable but the mine didn't take) stay in ``remaining``.
     """
     try:
         if not PENDING_DIR.is_dir():
@@ -549,6 +576,23 @@ def _drain_pending_journal(daemon_url: str, max_entries: int = 50) -> None:
             processed += 1
             tp = obj.get("transcript_path", "")
             wing = obj.get("wing", "")
+
+            # Drop entries whose transcript can no longer be mined. The file
+            # on disk is the durable source; if it's gone/invalid the entry is
+            # unrecoverable, so discarding it (not re-queueing) keeps the
+            # journal from clogging and retrying a dead file every session.
+            vpath = _validate_transcript_path(tp)
+            if vpath is None or not vpath.is_file():
+                _log(f"Journal entry discarded (transcript gone/invalid): {tp or '?'}")
+                continue
+            try:
+                if vpath.stat().st_size < 100:
+                    _log(f"Journal entry discarded (transcript too small): {vpath.name}")
+                    continue
+            except OSError:
+                _log(f"Journal entry discarded (transcript unstat-able): {tp or '?'}")
+                continue
+
             ok = False
             try:
                 ok = _ingest_transcript_via_daemon(daemon_url, tp, wing)
@@ -556,7 +600,7 @@ def _drain_pending_journal(daemon_url: str, max_entries: int = 50) -> None:
                 _log(f"Journal replay raised (kept for retry): {e}")
                 ok = False
             if ok:
-                _log(f"Journal replay OK: {Path(tp).name if tp else '?'} wing={wing}")
+                _log(f"Journal replay OK: {vpath.name} wing={wing}")
             else:
                 remaining.append(obj)
 
@@ -568,6 +612,11 @@ def _rewrite_journal_file(path: Path, remaining: list) -> None:
 
     Empty ``remaining`` removes the file. Uses tempfile + os.replace so a
     crash mid-drain can't truncate the journal. Best-effort.
+
+    The temp file is unlinked in a ``finally`` keyed on whether the
+    ``os.replace`` consumed it — so a non-OSError raised after ``mkstemp``
+    (e.g. a ``TypeError`` from a non-serializable journal object) can't leak
+    the temp file into the pending dir.
     """
     try:
         if not remaining:
@@ -577,6 +626,7 @@ def _rewrite_journal_file(path: Path, remaining: list) -> None:
                 pass
             return
         fd, tmp = tempfile.mkstemp(prefix=path.name, dir=str(path.parent))
+        replaced = False
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 for obj in remaining:
@@ -587,11 +637,15 @@ def _rewrite_journal_file(path: Path, remaining: list) -> None:
                 except OSError:
                     pass
             os.replace(tmp, str(path))
-        except OSError:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+            replaced = True
+        finally:
+            # os.replace consumes tmp on success; on ANY failure (OSError or
+            # otherwise) tmp still exists and must be cleaned up.
+            if not replaced and os.path.exists(tmp):
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
     except OSError:
         pass
 
