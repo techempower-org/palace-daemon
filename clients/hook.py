@@ -30,6 +30,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -42,6 +43,25 @@ FORCE_MIN_INTERVAL = 60      # force_on_stop: minimum seconds between saves (pre
 CHECKPOINT_TOPIC = "checkpoint"  # keep in sync with main.py and mempal-fast.py — used by kind= search filter
 STATE_DIR = Path.home() / ".mempalace" / "hook_state"
 HOOK_SETTINGS_PATH = Path.home() / ".mempalace" / "hook_settings.json"
+# auto_wake config is read from the SAME file the mempalace CLI reads, so a
+# single `auto_wake` entry arms both the interactive CLI path and this hook
+# path. hook.py re-implements the reader in stdlib (no mempalace import).
+MEMPALACE_CONFIG_PATH = Path.home() / ".mempalace" / "config.json"
+# Where failed transcript ingests are journaled for replay on next session
+# start. Kept under hook_state (not the CLI's ~/.mempalace/pending) so the
+# two replay paths never contend for the same files.
+PENDING_DIR = STATE_DIR / "pending"
+# Per-host wake lock: when a sleeping host wakes a burst of stop/precompact
+# hooks at once, only the first fires the (possibly slow, possibly costly)
+# wake command; the rest see the lock and only wait briefly on /health. The
+# lock is an fcntl.flock held for the entire wake+poll (see
+# _try_claim_wake_lock) — the kernel releases it when the holder's fd closes
+# or the process dies, so there is no TTL to tune and no stale-reclaim race.
+WAKE_LOCK_PATH = STATE_DIR / ".wake_inflight"
+WAKE_COMMAND_TIMEOUT = 15    # seconds the wake command itself may take
+# When a hook skips the wake command because another hook holds the lock,
+# it still waits this long on /health in case that other wake succeeds.
+WAKE_FOLLOWER_WAIT = 20      # seconds a lock-follower polls /health
 
 # Canonical topic name for Stop-hook auto-save checkpoint diary entries.
 # Defined as a constant so all hook code paths agree on the string value
@@ -230,6 +250,404 @@ def _load_hook_settings() -> dict:
         return json.loads(HOOK_SETTINGS_PATH.read_text())
     except Exception:
         return {}
+
+
+def _load_auto_wake() -> dict:
+    """Read the opt-in wake-on-demand config from ~/.mempalace/config.json.
+
+    Mirrors ``mempalace.config.MempalaceConfig.auto_wake`` so a single
+    ``auto_wake`` entry arms both the CLI and this hook path — but it is
+    re-implemented in stdlib because hook.py must not import mempalace.
+
+    Accepts the same two shapes the CLI accepts:
+
+        {"auto_wake": "wakeonlan aa:bb:cc:dd:ee:ff"}
+        {"auto_wake": {"command": "...", "timeout_seconds": 45,
+                       "poll_interval_seconds": 2}}
+
+    Returns a normalized dict (``command``, ``timeout_seconds``,
+    ``poll_interval_seconds``) or ``None`` when disabled. ``PALACE_AUTO_WAKE``
+    set to ``0``/``false``/``no`` force-disables. A missing/empty/garbage
+    command disables (fail-open to "off": a typo must never run an
+    unexpected shell command). Timeouts are clamped to sane bounds.
+    """
+    env_val = os.environ.get("PALACE_AUTO_WAKE")
+    if env_val is not None and env_val.strip().lower() in ("0", "false", "no"):
+        return None
+    try:
+        text = MEMPALACE_CONFIG_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # No config file is the normal "auto_wake not set up" state — stay
+        # silent so we don't spam the log on every hook fire.
+        return None
+    except OSError as e:
+        _log(f"auto_wake: could not read {MEMPALACE_CONFIG_PATH} ({e}) — auto_wake disabled")
+        return None
+    try:
+        raw = json.loads(text).get("auto_wake")
+    except (json.JSONDecodeError, AttributeError) as e:
+        # The config file EXISTS but is malformed — surface it. A silent
+        # disable here once cost hours of "why isn't auto_wake working?".
+        _log(f"auto_wake: malformed {MEMPALACE_CONFIG_PATH} ({e}) — auto_wake disabled")
+        return None
+    if isinstance(raw, str):
+        raw = {"command": raw}
+    if not isinstance(raw, dict):
+        return None
+    command = raw.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return None
+
+    def _bounded(key, default, lo, hi):
+        try:
+            val = float(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+        return min(max(val, lo), hi)
+
+    return {
+        "command": command.strip(),
+        "timeout_seconds": _bounded("timeout_seconds", 45.0, 5.0, 300.0),
+        "poll_interval_seconds": _bounded("poll_interval_seconds", 2.0, 0.5, 30.0),
+    }
+
+
+def _is_wake_eligible_error(error: str) -> bool:
+    """True when a daemon-call failure string is connection-level.
+
+    ``_post_mcp`` / ``_post_mine`` already classify failures into
+    ``"network/transport: ..."`` (a connection-level failure a host wake
+    could fix) vs ``"HTTP <code> ..."`` (the daemon answered — waking can't
+    help). We key off that prefix instead of re-catching exceptions so the
+    classification stays in one place. Unknown/empty strings are treated as
+    NOT eligible: only a clearly connection-level failure should trigger a
+    wake command.
+    """
+    if not error:
+        return False
+    low = error.lower()
+    if low.startswith("http"):
+        return False
+    return (
+        "network/transport" in low
+        or "no route to host" in low
+        or "connection refused" in low
+        or "timed out" in low
+        or "timeout" in low
+        or "name or service not known" in low
+        or "temporary failure in name resolution" in low
+    )
+
+
+def _daemon_healthy(daemon_url: str, timeout: float = 3.0) -> bool:
+    """True when the daemon answers ``/health`` with 200. Never raises."""
+    try:
+        req = urllib.request.Request(
+            daemon_url.rstrip("/") + "/health",
+            headers=_request_headers(),
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status == 200
+    except Exception:
+        # Any failure means "not healthy yet" — including ValueError from a
+        # malformed URL or an HTTPException mid-resume. The poll must never
+        # crash the hook.
+        return False
+
+
+def _run_wake_command(command: str) -> bool:
+    """Run the wake command through the shell. Returns True on exit 0.
+
+    The command comes from the user's own config file (same trust level as
+    their shell startup), never from palace content. It is deliberately NOT
+    echoed anywhere — it may embed credentials (IPMI passwords etc).
+    """
+    try:
+        proc = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            timeout=WAKE_COMMAND_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def _try_claim_wake_lock():
+    """Try to claim the per-host wake lock via ``fcntl.flock``.
+
+    Returns the open file handle when we are the leader — the caller MUST
+    keep it open for the whole wake+poll and close it in a ``finally`` to
+    release. Returns ``None`` when another live hook already holds the lock
+    (we are a follower: skip the wake command, just poll /health briefly).
+
+    Mirrors :func:`_try_claim_mine_slot`. ``LOCK_EX | LOCK_NB`` is fully
+    atomic — there is no check-then-create window, so no O_EXCL race — and
+    the kernel drops the lock the instant the holder's fd closes or the
+    process dies, so there is no TTL to tune and no stale-reclaim path
+    (this is what closed the 120s-TTL-vs-300s-timeout split-brain: the lock
+    can never expire while the leader is still polling).
+
+    Best-effort: if the file can't even be opened we fail open by returning
+    a handle anyway, so a wake is still attempted rather than silently
+    skipped.
+    """
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    try:
+        fh = open(WAKE_LOCK_PATH, "w")
+    except OSError:
+        # Can't open the lock file at all — fail open. A sentinel object
+        # that close()s cleanly lets the caller treat us as the leader.
+        return _NULL_LOCK
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        fh.close()
+        return None
+    try:
+        fh.write(f"pid={os.getpid()} ts={time.time()}\n")
+        fh.flush()
+    except OSError:
+        pass
+    return fh
+
+
+class _NullLock:
+    """No-op stand-in for a lock handle when the lock file can't be opened.
+
+    Lets ``_try_claim_wake_lock`` fail open (treat us as leader) without the
+    caller special-casing ``None`` vs a real handle: ``close()`` is a no-op.
+    """
+
+    def close(self):
+        return None
+
+
+_NULL_LOCK = _NullLock()
+
+
+def _attempt_wake(daemon_url: str, settings: dict) -> bool:
+    """Wake the palace host (if we hold the lock) and poll /health.
+
+    Returns True once the daemon answers /health. The wake command is run
+    only by the hook that wins the per-host ``fcntl.flock``; a burst of
+    sleeping-host hooks therefore fires exactly one wake command. The lock
+    is held for the entire wake+poll and released in the ``finally`` (or by
+    the kernel if the process dies). Followers (couldn't get the flock) skip
+    the command but still poll /health for a bounded window, so they can
+    also retry once the leader's wake lands.
+
+    Never echoes the command (it may carry secrets). At most one full
+    attempt per process.
+    """
+    timeout_s = float(settings.get("timeout_seconds", 45.0))
+    poll_s = float(settings.get("poll_interval_seconds", 2.0))
+    command = settings.get("command", "")
+
+    lock = _try_claim_wake_lock()
+    is_leader = lock is not None
+    try:
+        if is_leader:
+            _log(f"auto_wake: waking palace host (up to {timeout_s:.0f}s)")
+            if not _run_wake_command(command):
+                _log("auto_wake: wake command failed")
+                return False
+            deadline = time.monotonic() + timeout_s
+        else:
+            # Another hook holds the flock and is firing the wake command.
+            # Wait a bounded window on /health rather than fire a redundant
+            # command.
+            _log("auto_wake: wake already in flight (lock held) — waiting on /health")
+            deadline = time.monotonic() + min(timeout_s, WAKE_FOLLOWER_WAIT)
+
+        started = time.monotonic()
+        while time.monotonic() < deadline:
+            if _daemon_healthy(daemon_url):
+                _log(f"auto_wake: daemon healthy after {time.monotonic() - started:.0f}s — retrying")
+                return True
+            time.sleep(poll_s)
+        _log(f"auto_wake: daemon still unreachable after {time.monotonic() - started:.0f}s")
+        return False
+    finally:
+        # Closing the leader's handle drops the flock immediately. Followers
+        # have lock=None, so there is nothing to close.
+        if is_leader:
+            try:
+                lock.close()
+            except OSError:
+                pass
+
+
+def _journal_failed_ingest(transcript_path: str, wing: str, session_id: str) -> None:
+    """Append a failed transcript ingest to today's replay journal.
+
+    The payload is tiny — the transcript file itself survives the outage on
+    disk and is the durable source; we only record where to find it. Drained
+    on the next session start (see ``_drain_pending_journal``). Best-effort:
+    any failure is swallowed (the optimistic systemMessage already shipped).
+    """
+    try:
+        PENDING_DIR.mkdir(parents=True, exist_ok=True)
+        line_obj = {
+            "transcript_path": str(transcript_path),
+            "wing": wing or "",
+            "session_id": session_id or "",
+            "ts": datetime.now().isoformat(timespec="seconds"),
+        }
+        day = datetime.now().strftime("%Y-%m-%d")
+        path = PENDING_DIR / f"{day}.jsonl"
+        line = json.dumps(line_obj, ensure_ascii=False)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        _log(f"Journaled failed ingest for replay: {Path(str(transcript_path)).name} wing={wing}")
+    except OSError as e:
+        _log(f"Journal write failed (non-fatal): {e}")
+
+
+def _drain_pending_journal(daemon_url: str, max_entries: int = 50) -> None:
+    """Replay journaled ingests when the daemon is reachable.
+
+    Called best-effort from ``hook_session_start``. Quick /health gate first
+    so an asleep host doesn't slow session start. Dedups by transcript_path
+    (keeping the newest entry), caps work at ``max_entries``, replays each via
+    ``_ingest_transcript_via_daemon``, and rewrites each journal file
+    atomically (tempfile + os.replace) keeping only the entries that still
+    failed. Never blocks or crashes session start.
+
+    Entries whose transcript file is gone or no longer valid (deleted,
+    truncated, renamed) are DISCARDED rather than re-queued: they are
+    unrecoverable, and re-appending them would clog the journal forever and
+    burn a replay attempt on every session start. Only genuinely-retryable
+    failures (daemon reachable but the mine didn't take) stay in ``remaining``.
+    """
+    try:
+        if not PENDING_DIR.is_dir():
+            return
+        files = sorted(PENDING_DIR.glob("*.jsonl"))
+        if not files:
+            return
+        if not _daemon_healthy(daemon_url, timeout=2.0):
+            _log("Journal drain skipped (daemon not reachable)")
+            return
+    except OSError:
+        return
+
+    processed = 0
+    for path in files:
+        if processed >= max_entries:
+            break
+        try:
+            raw_lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        except OSError:
+            continue
+
+        # Dedup by transcript_path, keeping the newest ts. During a long
+        # outage the same transcript is journaled once per Stop fire.
+        by_path: dict = {}
+        order: list = []
+        for ln in raw_lines:
+            try:
+                obj = json.loads(ln)
+            except json.JSONDecodeError:
+                continue
+            key = obj.get("transcript_path", "")
+            prev = by_path.get(key)
+            if prev is None:
+                order.append(key)
+            if prev is None or obj.get("ts", "") >= prev.get("ts", ""):
+                by_path[key] = obj
+
+        remaining: list = []
+        for key in order:
+            obj = by_path[key]
+            if processed >= max_entries:
+                remaining.append(obj)
+                continue
+            processed += 1
+            tp = obj.get("transcript_path", "")
+            wing = obj.get("wing", "")
+
+            # Drop entries whose transcript can no longer be mined. The file
+            # on disk is the durable source; if it's gone/invalid the entry is
+            # unrecoverable, so discarding it (not re-queueing) keeps the
+            # journal from clogging and retrying a dead file every session.
+            vpath = _validate_transcript_path(tp)
+            if vpath is None or not vpath.is_file():
+                _log(f"Journal entry discarded (transcript gone/invalid): {tp or '?'}")
+                continue
+            try:
+                if vpath.stat().st_size < 100:
+                    _log(f"Journal entry discarded (transcript too small): {vpath.name}")
+                    continue
+            except OSError:
+                _log(f"Journal entry discarded (transcript unstat-able): {tp or '?'}")
+                continue
+
+            ok = False
+            try:
+                ok = _ingest_transcript_via_daemon(daemon_url, tp, wing)
+            except Exception as e:
+                _log(f"Journal replay raised (kept for retry): {e}")
+                ok = False
+            if ok:
+                _log(f"Journal replay OK: {vpath.name} wing={wing}")
+            else:
+                remaining.append(obj)
+
+        _rewrite_journal_file(path, remaining)
+
+
+def _rewrite_journal_file(path: Path, remaining: list) -> None:
+    """Atomically replace a journal file with only the still-failed entries.
+
+    Empty ``remaining`` removes the file. Uses tempfile + os.replace so a
+    crash mid-drain can't truncate the journal. Best-effort.
+
+    The temp file is unlinked in a ``finally`` keyed on whether the
+    ``os.replace`` consumed it — so a non-OSError raised after ``mkstemp``
+    (e.g. a ``TypeError`` from a non-serializable journal object) can't leak
+    the temp file into the pending dir.
+    """
+    try:
+        if not remaining:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            return
+        fd, tmp = tempfile.mkstemp(prefix=path.name, dir=str(path.parent))
+        replaced = False
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                for obj in remaining:
+                    f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+            os.replace(tmp, str(path))
+            replaced = True
+        finally:
+            # os.replace consumes tmp on success; on ANY failure (OSError or
+            # otherwise) tmp still exists and must be cleaned up.
+            if not replaced and os.path.exists(tmp):
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+    except OSError:
+        pass
 
 
 def _count_human_messages(transcript_path: str) -> int:
@@ -931,7 +1349,8 @@ def _try_claim_mine_slot(directory: str, mode: str, wing: str):
     return fh
 
 
-def _ingest_transcript_via_daemon(daemon_url: str, transcript_path: str, wing: str):
+def _ingest_transcript_via_daemon(daemon_url: str, transcript_path: str, wing: str,
+                                  failure_out: dict = None):
     """Restore the transcript-ingest step that mempalace's upstream
     ``hooks_cli._ingest_transcript`` does on every save and precompact.
 
@@ -943,6 +1362,12 @@ def _ingest_transcript_via_daemon(daemon_url: str, transcript_path: str, wing: s
     Re-routed through the daemon's ``/mine`` endpoint so we don't take a
     Python import dependency on mempalace itself. Best-effort: any failure
     is logged and the save proceeds — never blocks the hook.
+
+    ``failure_out`` (optional): when a dict is passed, on failure it is
+    populated with ``{"error": <str>, "eligible": <bool>}`` so the wake
+    wrapper can decide whether a host wake could fix the failure. Default
+    ``None`` keeps the original ``bool``-only contract for existing callers
+    and the taxonomy test that mocks this function.
     """
     path = _validate_transcript_path(transcript_path)
     if path is None or not path.is_file() or path.stat().st_size < 100:
@@ -976,8 +1401,14 @@ def _ingest_transcript_via_daemon(daemon_url: str, transcript_path: str, wing: s
         else:
             err = (response or {}).get("error", "unknown")
             _log(f"Transcript ingest failed: {err}")
+            if failure_out is not None:
+                failure_out["error"] = err
+                failure_out["eligible"] = _is_wake_eligible_error(err)
     except Exception as e:
         _log(f"Transcript ingest exception (non-fatal): {e}")
+        if failure_out is not None:
+            failure_out["error"] = str(e)
+            failure_out["eligible"] = _is_wake_eligible_error(str(e))
     finally:
         try:
             slot.close()
@@ -998,6 +1429,49 @@ def _ingest_transcript_via_daemon(daemon_url: str, transcript_path: str, wing: s
     return ok
 
 
+def _ingest_with_wake_and_journal(daemon_url: str, transcript_path: str, wing: str,
+                                  session_id: str) -> bool:
+    """Ingest a transcript, waking a sleeping host and replaying on failure.
+
+    Runs ONLY inside the detached child (after the parent has emitted its
+    optimistic systemMessage), so all of this latency is invisible to the
+    user. Flow:
+
+      1. Ingest via the daemon.
+      2. On a CONNECTION-LEVEL failure (host asleep / no route) AND with
+         ``auto_wake`` configured: fire the wake command (once per host
+         via the wake lock), wait for /health, then RETRY the ingest once.
+         An HTTP/tool-level failure is NOT wake-eligible — the daemon
+         answered, so waking can't help; we skip straight to journaling.
+      3. If the ingest still failed (wake disabled, wake failed, or a
+         non-connection failure), journal the transcript for replay on the
+         next session start.
+
+    Returns the final ingest result (True only when the daemon accepted it).
+    """
+    failure = {}
+    ok = _ingest_transcript_via_daemon(daemon_url, transcript_path, wing,
+                                       failure_out=failure)
+    if ok:
+        return True
+
+    if failure.get("eligible"):
+        wake_settings = _load_auto_wake()
+        if wake_settings:
+            if _attempt_wake(daemon_url, wake_settings):
+                _log("auto_wake: retrying transcript ingest after wake")
+                ok = _ingest_transcript_via_daemon(daemon_url, transcript_path, wing)
+                if ok:
+                    return True
+        else:
+            _log("auto_wake: connection-level failure but auto_wake not configured")
+
+    # Still failed after the wake+retry attempt (or it was never eligible /
+    # never configured). Journal for replay on next session start.
+    _journal_failed_ingest(transcript_path, wing, session_id)
+    return False
+
+
 def hook_session_start(data: dict, harness: str):
     parsed = _parse_harness_input(data, harness)
     session_id = parsed["session_id"]
@@ -1013,6 +1487,15 @@ def hook_session_start(data: dict, harness: str):
     settings = _load_hook_settings()
     daemon_url = settings.get("daemon_url", "http://localhost:8085")
     wing = _project_wing(data, transcript_path)
+
+    # Best-effort: replay any transcript ingests that were journaled while
+    # the daemon was unreachable (sleeping host, outage). Gated on a quick
+    # /health so an asleep host doesn't slow session start; never blocks or
+    # crashes startup on drain errors.
+    try:
+        _drain_pending_journal(daemon_url)
+    except Exception as e:
+        _log(f"Journal drain skipped (non-fatal): {e}")
 
     ok, response = _post_mcp(daemon_url, "mempalace_list_drawers", {
         "wing": wing,
@@ -1186,8 +1669,14 @@ def hook_stop(data: dict, harness: str):
                 diary_resp.get("error") if isinstance(diary_resp, dict) else str(diary_resp)
             ) or "no success flag in response"
             _log(f"Diary checkpoint FAILED at exchange {exchange_count} → {wing}: {detail}")
-        ok = _ingest_transcript_via_daemon(daemon_url, transcript_path, wing)
-        _log(f"Silent save (diary+mine) {'OK' if ok else 'FAILED (daemon unreachable)'} at exchange {exchange_count} → {wing}")
+        # Wake-on-demand + replay journal live entirely in this detached
+        # child: a connection-level failure (host asleep) triggers the
+        # configured wake command + a single retry; a still-failed ingest
+        # is journaled for replay on the next session start. All of this
+        # latency is invisible — the parent already emitted the optimistic
+        # "memories woven" systemMessage above.
+        ok = _ingest_with_wake_and_journal(daemon_url, transcript_path, wing, session_id)
+        _log(f"Silent save (diary+mine) {'OK' if ok else 'FAILED (journaled for replay)'} at exchange {exchange_count} → {wing}")
         if not ok:
             failure_themed = _theme_save_fail(exchange_count, trigger, {"error": "mine via daemon failed"})
             _log(f"FAILURE themed (would-have-emitted): {failure_themed}")
@@ -1237,9 +1726,11 @@ def hook_precompact(data: dict, harness: str):
 
     # We are the (detached) child. Do the slow ingest + optional mine.
     # Both outcomes land in hook.log only; the user already saw the
-    # optimistic themed line above.
-    ingest_ok = _ingest_transcript_via_daemon(daemon_url, transcript_path, wing)
-    _log(f"Pre-compact mine {'OK' if ingest_ok else 'FAILED'} → {wing}")
+    # optimistic themed line above. Wake-on-demand + replay journal run
+    # here too: a sleeping host is woken and the ingest retried once; a
+    # still-failed ingest is journaled for replay on next session start.
+    ingest_ok = _ingest_with_wake_and_journal(daemon_url, transcript_path, wing, session_id)
+    _log(f"Pre-compact mine {'OK' if ingest_ok else 'FAILED (journaled for replay)'} → {wing}")
     if not ingest_ok:
         _log("FAILURE themed (would-have-emitted): ✘ Pre-compact transcript ingest failed — daemon unreachable")
 
