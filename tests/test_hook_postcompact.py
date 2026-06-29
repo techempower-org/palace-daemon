@@ -218,8 +218,11 @@ class TestCompactResume(unittest.TestCase):
         self.assertIn("410K+ drawers", ac)
 
     def test_normal_start_does_not_take_compact_path(self):
-        """Without source=compact the greeting path runs (no _search_fast,
-        no additionalContext) — regression guard for the new branch."""
+        """Without source=compact the greeting path runs and _search_fast
+        (the compact-only BM25 lookup) never fires. The normal path ALSO
+        injects the session-search nudge via additionalContext (see
+        test_hook_session_nudge) — so we assert the additionalContext is the
+        nudge, NOT the compact-recovery packet."""
         searched = {"n": 0}
         with patch.object(hook, "_log"), \
              patch.object(hook, "_output") as output, \
@@ -235,8 +238,9 @@ class TestCompactResume(unittest.TestCase):
             hook.hook_session_start({"session_id": "sess-n", "transcript_path": "/x.jsonl"}, "claude-code")
         env = output.call_args_list[-1].args[0]
         self.assertIn("systemMessage", env)
-        self.assertNotIn("hookSpecificOutput", env)
         self.assertEqual(searched["n"], 0)  # compact-only search never ran
+        ac = env.get("hookSpecificOutput", {}).get("additionalContext", "")
+        self.assertNotIn("[mempalace:compact-recovery]", ac)  # not the compact path
 
 
 # --------------------------------------------------------------------------
