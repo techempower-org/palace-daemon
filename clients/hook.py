@@ -28,11 +28,13 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -1472,10 +1474,198 @@ def _ingest_with_wake_and_journal(daemon_url: str, transcript_path: str, wing: s
     return False
 
 
+# ── SessionStart(source="compact") recovery ─────────────────────────
+#
+# After a compaction the model wakes with only a lossy 9-section summary.
+# These helpers pull recent verbatim state from the palace and inject it as
+# additionalContext so the model can recover what the summary dropped.
+#
+# This path is SYNCHRONOUS (no _detach_for_async_work): additionalContext
+# only reaches the harness via this process's stdout, and detaching redirects
+# stdout to /dev/null. Everything here is therefore bounded to stay well
+# inside the SessionStart timeout (5s, from hooks.json) — a fast /health
+# gate, then two BM25 /search/fast calls (~280ms each). No hybrid search
+# (1100ms, would risk timeout) and no blocking wake+poll cycle.
+
+COMPACT_RECOVERY_OPEN = "[mempalace:compact-recovery]"
+COMPACT_RECOVERY_CLOSE = "[/mempalace:compact-recovery]"
+
+
+def _compact_fallback_context() -> str:
+    """Minimal nudge used when the daemon is unreachable or returns nothing."""
+    return (
+        f"{COMPACT_RECOVERY_OPEN}\n"
+        "Context was just compacted. Your verbatim history is in the "
+        "palace (410K+ drawers). Use mempalace_search to retrieve what you "
+        "need — don't guess from the summary alone.\n"
+        f"{COMPACT_RECOVERY_CLOSE}"
+    )
+
+
+def _compact_output(context: str) -> dict:
+    """Wrap a context string in the SessionStart additionalContext envelope.
+
+    additionalContext enters the model's context (unlike systemMessage, which
+    is user-visible only) — this is the whole point of the compact branch.
+    """
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": context,
+        }
+    }
+
+
+def _search_fast(daemon_url: str, query: str, limit: int = 3,
+                 timeout: float = 2.0) -> list:
+    """GET /search/fast (BM25, no vector / no AGE locks).
+
+    Returns a list of result dicts (possibly empty), or ``None`` on a
+    transport/parse failure. The endpoint returns a bare JSON array of
+    ``{id, wing, room, rank, snippet, source_file, tags}`` rows and requires
+    auth (carried by ``_request_headers`` → ``X-API-Key``).
+    """
+    try:
+        qs = urllib.parse.urlencode({"q": query, "limit": limit})
+        req = urllib.request.Request(
+            daemon_url.rstrip("/") + "/search/fast?" + qs,
+            headers=_request_headers(),
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status != 200:
+                return None
+            body = json.loads(resp.read().decode("utf-8"))
+        return body if isinstance(body, list) else None
+    except Exception as e:
+        _log(f"compact-resume: /search/fast failed for {query!r}: {e}")
+        return None
+
+
+def _kick_wake_nonblocking() -> None:
+    """Fire the configured auto_wake command without waiting (best-effort).
+
+    The compact-resume handler must return additionalContext synchronously
+    inside the SessionStart timeout, so — unlike the MCP search path — it
+    cannot block on a wake+poll cycle. It kicks the wake command and returns
+    immediately; the host is then waking by the time the model issues its
+    first mempalace_search (which has its own wake+retry). All FDs go to
+    /dev/null with start_new_session so the wake child can never write to
+    this hook's stdout (which carries the JSON additionalContext) nor hold it
+    open. ``shlex.split`` (not ``shell=True``) per the no-shell-injection rule.
+    """
+    cfg = _load_auto_wake()
+    if not cfg:
+        return
+    command = (cfg.get("command") or "").strip()
+    if not command:
+        return
+    try:
+        subprocess.Popen(
+            shlex.split(command),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        _log("compact-resume: fired non-blocking auto_wake")
+    except (OSError, ValueError) as e:
+        # ValueError: unbalanced quotes in the command; OSError: binary
+        # missing. The wake is best-effort — never crash the hook.
+        _log(f"compact-resume: auto_wake kick failed (non-fatal): {e}")
+
+
+def _format_compact_packet(wing: str, checkpoint_hits: list,
+                           session_hits: list) -> str:
+    """Render the 500-1000 token recovery packet from /search/fast hits.
+
+    Snippets are clipped to keep the injection within the disruption budget;
+    the model uses mempalace_search to pull anything fuller.
+    """
+    display = _display_wing(wing)
+    lines = [
+        COMPACT_RECOVERY_OPEN,
+        "Context was just compacted. Here is your recent session state "
+        "from the palace:",
+        "",
+        f"Wing: {display}",
+    ]
+
+    if checkpoint_hits:
+        cp = (checkpoint_hits[0].get("snippet") or "").strip().replace("\n", " ")
+        if cp:
+            lines.append(f"Last checkpoint: {cp[:220]}")
+
+    if session_hits:
+        lines.append("")
+        lines.append(f"Recent context (top {len(session_hits)} matches):")
+        for i, hit in enumerate(session_hits, 1):
+            snippet = (hit.get("snippet") or "").strip().replace("\n", " ")
+            room = hit.get("room") or "?"
+            hit_wing = hit.get("wing") or display
+            lines.append(f"{i}. {snippet[:220]} (wing:{hit_wing}/room:{room})")
+
+    lines.append("")
+    lines.append("Use mempalace_search for anything else you need.")
+    lines.append(COMPACT_RECOVERY_CLOSE)
+    return "\n".join(lines)
+
+
+def _handle_compact_resume(data: dict, parsed: dict, harness: str) -> None:
+    """SessionStart(source="compact") branch: inject recent palace state as
+    additionalContext so the model recovers what the lossy summary dropped.
+
+    Synchronous by contract — see the module comment above. Falls back to a
+    minimal nudge whenever the daemon is unreachable or returns nothing.
+    """
+    settings = _load_hook_settings()
+    daemon_url = settings.get("daemon_url", "http://localhost:8085")
+    session_id = parsed["session_id"]
+    wing = _project_wing(data, parsed["transcript_path"])
+
+    # Fast /health gate (1.5s): if the daemon isn't answering quickly, don't
+    # spend the SessionStart budget on search timeouts. Kick a non-blocking
+    # wake (host is up by the model's first search) and return the nudge.
+    if not _daemon_healthy(daemon_url, timeout=1.5):
+        _kick_wake_nonblocking()
+        _log(f"compact-resume: daemon unreachable (wing={wing}) — minimal nudge")
+        _output(_compact_output(_compact_fallback_context()))
+        return
+
+    # Daemon is up: two BM25 fast searches, well inside the 5s budget. The
+    # wing name / session_id ride in the query TEXT; the endpoint's only
+    # structured filter is `wing`, which we deliberately leave unset so a
+    # canonicalization mismatch can't zero out the results (spec §3).
+    session_hits = _search_fast(daemon_url, f"session state {wing}", limit=3) or []
+    checkpoint_hits = _search_fast(daemon_url, f"checkpoint {session_id}", limit=2) or []
+
+    if not session_hits and not checkpoint_hits:
+        _log(f"compact-resume: no palace hits (wing={wing}) — minimal nudge")
+        _output(_compact_output(_compact_fallback_context()))
+        return
+
+    packet = _format_compact_packet(wing, checkpoint_hits, session_hits)
+    _log(f"compact-resume: injecting {len(packet)} chars of palace context (wing={wing})")
+    _output(_compact_output(packet))
+
+
 def hook_session_start(data: dict, harness: str):
     parsed = _parse_harness_input(data, harness)
     session_id = parsed["session_id"]
     transcript_path = parsed["transcript_path"]
+
+    # Claude Code (v2.1.187+) fires SessionStart with a `source` field:
+    # "startup" | "resume" | "clear" | "compact". A "compact" restart means
+    # the model just lost its working context to a lossy summary, so branch
+    # to a synchronous palace-context injection (see _handle_compact_resume).
+    # `source` is a top-level payload field, absent on older / non-claude
+    # harnesses → default "startup" (the normal greeting path).
+    source = data.get("source") or "startup"
+    if source == "compact":
+        _log(f"SESSION START (compact resume) for session {session_id}")
+        _handle_compact_resume(data, parsed, harness)
+        return
+
     _log(f"SESSION START for session {session_id}")
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     _write_last_save_ts(session_id)   # seed so first-stop time_trigger doesn't fire immediately
@@ -1751,6 +1941,85 @@ def hook_precompact(data: dict, harness: str):
         _desktop_notify("MemPalace", "Pre-compaction checkpoint triggered")
 
 
+COMPACTION_TOPIC = "compaction"
+
+
+def _theme_postcompact(wing: str, trigger: str) -> str:
+    """User-visible notification line for a completed compaction.
+
+    🔄 for auto-compaction (hit the context limit), 📋 for a manual /compact.
+    """
+    icon = "🔄" if trigger == "auto" else "📋"
+    return (
+        f"{icon} Context compacted ({trigger}). "
+        f"Your verbatim history is in the palace — "
+        f"use mempalace_search to retrieve what you need."
+    )
+
+
+def hook_postcompact(data: dict, harness: str):
+    """PostCompact: persist the compaction summary to the palace.
+
+    PostCompact is informational-only — it cannot inject additionalContext
+    or return ``decision: "block"`` — so it just notifies the user and saves
+    the summary as a ``compaction`` diary entry. The actual context recovery
+    happens in the SessionStart(source="compact") branch that fires next.
+    """
+    parsed = _parse_harness_input(data, harness)
+    session_id = parsed["session_id"]
+    transcript_path = parsed["transcript_path"]
+    # `trigger` ("auto"|"manual") and `compact_summary` are top-level fields
+    # in the Claude Code v2.1.187 PostCompact payload — _parse_harness_input
+    # only normalizes the common three, so read these straight off `data`.
+    trigger = data.get("trigger", "auto")
+    compact_summary = (data.get("compact_summary") or "").strip()
+    _log(
+        f"POST-COMPACT for session {session_id} "
+        f"(trigger={trigger}, summary={len(compact_summary)} chars)"
+    )
+
+    settings = _load_hook_settings()
+    daemon_url = settings.get("daemon_url", "http://localhost:8085")
+    toast = settings.get("desktop_toast", False)
+    wing = _project_wing(data, transcript_path)
+
+    # Emit the user-visible notification in the PARENT before detaching —
+    # the detached child's stdout is /dev/null (see _detach_for_async_work).
+    _output({"systemMessage": _theme_postcompact(wing, trigger)})
+
+    if not _detach_for_async_work():
+        return
+
+    # Detached child: slow daemon round-trip. Anything printed here goes to
+    # /dev/null; hook.log is the durable channel (mirrors hook_stop's diary
+    # checkpoint). The verbatim transcript was already mined by precompact —
+    # this entry preserves the derived summary on top of that.
+    if not compact_summary:
+        _log("Post-compact: no compact_summary in payload — nothing to save")
+        return
+
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    entry = f"COMPACTION:{session_id}|{trigger}|{ts}\n\n{compact_summary}"
+    rpc_ok, diary_resp = _post_mcp(daemon_url, "mempalace_diary_write", {
+        "agent_name": harness,
+        "entry": entry,
+        "topic": COMPACTION_TOPIC,
+        "wing": wing,
+    })
+    # _post_mcp only fails on transport errors; a tool-level failure is a
+    # success=False inside the JSON-RPC envelope — unwrap and check both.
+    inner = _extract_inner(diary_resp) if rpc_ok else {}
+    if rpc_ok and inner.get("success"):
+        _log(f"Post-compact summary saved → {wing} ({len(compact_summary)} chars)")
+    else:
+        detail = inner.get("error") or (
+            diary_resp.get("error") if isinstance(diary_resp, dict) else str(diary_resp)
+        ) or "no success flag in response"
+        _log(f"Post-compact summary save FAILED → {wing}: {detail}")
+    if toast:
+        _desktop_notify("MemPalace", f"Compaction summary saved ({trigger})")
+
+
 def run_hook(hook_name: str, harness: str):
     # Read stdin in the parent so the child has it whether or not we detach.
     try:
@@ -1769,6 +2038,7 @@ def run_hook(hook_name: str, harness: str):
         "session-start": hook_session_start,
         "stop": hook_stop,
         "precompact": hook_precompact,
+        "postcompact": hook_postcompact,
     }
 
     handler = hooks.get(hook_name)
@@ -1781,7 +2051,8 @@ def run_hook(hook_name: str, harness: str):
 
 def main():
     parser = argparse.ArgumentParser(description="palace-daemon hook runner")
-    parser.add_argument("--hook", required=True, choices=["session-start", "stop", "precompact"])
+    parser.add_argument("--hook", required=True,
+                        choices=["session-start", "stop", "precompact", "postcompact"])
     parser.add_argument("--harness", required=True)
     args = parser.parse_args()
     run_hook(args.hook, args.harness)
