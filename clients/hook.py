@@ -1591,7 +1591,7 @@ def _format_compact_packet(wing: str, checkpoint_hits: list,
         f"Wing: {display}",
     ]
 
-    if checkpoint_hits:
+    if checkpoint_hits and isinstance(checkpoint_hits[0], dict):
         cp = (checkpoint_hits[0].get("snippet") or "").strip().replace("\n", " ")
         if cp:
             lines.append(f"Last checkpoint: {cp[:220]}")
@@ -1600,6 +1600,10 @@ def _format_compact_packet(wing: str, checkpoint_hits: list,
         lines.append("")
         lines.append(f"Recent context (top {len(session_hits)} matches):")
         for i, hit in enumerate(session_hits, 1):
+            # Defend the SessionStart critical path: a malformed /search/fast
+            # response (list of non-dicts) would otherwise raise AttributeError.
+            if not isinstance(hit, dict):
+                continue
             snippet = (hit.get("snippet") or "").strip().replace("\n", " ")
             room = hit.get("room") or "?"
             hit_wing = hit.get("wing") or display

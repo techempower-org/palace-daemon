@@ -201,19 +201,35 @@ def _forward_with_autowake(daemon_url: str, request: dict) -> dict:
                           "message": f"Daemon rejected request (HTTP {e.code} {e.reason})"}}
     except urllib.error.URLError:
         wake_cmd = _load_auto_wake_command()
-        if wake_cmd:
-            try:
-                # shlex.split (no shell=True) per security review — the command
-                # comes from a local config file, but parsing it as argv avoids
-                # shell injection if that file is ever attacker-influenced.
-                subprocess.run(shlex.split(wake_cmd), timeout=15,
-                               capture_output=True)
-                time.sleep(3)
-                return forward(daemon_url, request)
-            except Exception:
-                # Wake failed, command malformed, or host still not up after
-                # 3s (it takes ~20s) — fall through to the graceful message.
-                pass
+        if not wake_cmd:
+            # Host unreachable and no auto_wake configured — don't claim a WoL
+            # was sent (none was). Point at the CLI and how to enable waking.
+            return {"jsonrpc": "2.0", "id": rid,
+                    "result": {
+                        "content": [{"type": "text", "text":
+                            "Palace host is unreachable. Use `mempalace search` "
+                            "CLI, or configure auto_wake in ~/.mempalace/config.json."}],
+                        "isError": False,
+                    }}
+        try:
+            # shlex.split (no shell=True) per security review — the command
+            # comes from a local config file, but parsing it as argv avoids
+            # shell injection if that file is ever attacker-influenced.
+            subprocess.run(shlex.split(wake_cmd), timeout=15,
+                           capture_output=True)
+            time.sleep(3)
+            return forward(daemon_url, request)
+        except urllib.error.HTTPError as e:
+            # Host woke and is reachable but rejecting (4xx/5xx) — surface the
+            # real error instead of masking it as "still waking". HTTPError is a
+            # URLError subclass, so this must precede the generic catch below.
+            return {"jsonrpc": "2.0", "id": rid,
+                    "error": {"code": -32000,
+                              "message": f"Daemon rejected request (HTTP {e.code} {e.reason})"}}
+        except Exception:
+            # Wake failed, command malformed, or host still not up after
+            # 3s (it takes ~20s) — fall through to the graceful message.
+            pass
         return {"jsonrpc": "2.0", "id": rid,
                 "result": {
                     "content": [{"type": "text", "text":

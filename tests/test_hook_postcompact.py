@@ -271,6 +271,20 @@ class TestHelpers(unittest.TestCase):
         self.assertIn("Wing: memorypalace", packet)
         self.assertNotIn("Recent context", packet)
 
+    def test_format_packet_skips_non_dict_hits(self):
+        # A malformed /search/fast response (non-dict rows) must not raise
+        # AttributeError in the SessionStart critical path — bad rows are
+        # skipped, valid rows still render.
+        packet = hook._format_compact_packet(
+            "memorypalace",
+            checkpoint_hits=["not-a-dict"],
+            session_hits=["nope", {"snippet": "good row", "room": "sessions",
+                                   "wing": "memorypalace"}, 42],
+        )
+        self.assertIn("good row", packet)
+        self.assertNotIn("Last checkpoint:", packet)  # bad checkpoint skipped
+        self.assertIn("[/mempalace:compact-recovery]", packet)
+
     def test_theme_postcompact_icons(self):
         self.assertIn("🔄", hook._theme_postcompact("w", "auto"))
         self.assertIn("📋", hook._theme_postcompact("w", "manual"))
