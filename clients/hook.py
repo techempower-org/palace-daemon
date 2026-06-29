@@ -1649,6 +1649,32 @@ def _handle_compact_resume(data: dict, parsed: dict, harness: str) -> None:
     _output(_compact_output(packet))
 
 
+# ── SessionStart search nudge (every non-compact session) ───────────
+#
+# The model has the mempalace_search tool (search-only MCP mode), but a tool
+# in the schema isn't a habit — nothing tells it to reach for the palace
+# before guessing. This short additionalContext nudge fires on EVERY normal
+# SessionStart so "search your memory first" is in-context from message one.
+# (compact sessions get the richer compact-recovery packet instead — see
+# _handle_compact_resume.) Kept to ~50 tokens: it is read every session.
+
+SESSION_CONTEXT_OPEN = "[mempalace:session-context]"
+SESSION_CONTEXT_CLOSE = "[/mempalace:session-context]"
+
+
+def _session_nudge(wing: str) -> str:
+    """The ~50-token search nudge injected via additionalContext."""
+    return (
+        f"{SESSION_CONTEXT_OPEN}\n"
+        "You have mempalace_search — a memory tool with 410K+ drawers of "
+        "verbatim conversation history across 100+ wings. When unsure about "
+        "prior decisions, past context, or \"why was this done this way\", "
+        "SEARCH FIRST instead of guessing. Short keyword queries work best. "
+        f"Wing: {_display_wing(wing)}\n"
+        f"{SESSION_CONTEXT_CLOSE}"
+    )
+
+
 def hook_session_start(data: dict, harness: str):
     parsed = _parse_harness_input(data, harness)
     session_id = parsed["session_id"]
@@ -1693,8 +1719,17 @@ def hook_session_start(data: dict, harness: str):
         "limit": 1,
     })
     if not ok:
-        _log(f"SESSION GREETING skipped (daemon unreachable for wing={wing})")
-        _output({})
+        # Daemon down — no live palace stats to greet with, but the search
+        # nudge is static (needs only the wing), so still inject it. The
+        # nudge matters most exactly when the greeting/diary context is
+        # missing: the model has no other palace signal this session.
+        _log(f"SESSION GREETING skipped (daemon unreachable for wing={wing}) — nudge only")
+        _output({
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": _session_nudge(wing),
+            }
+        })
         return
 
     sys_msg = _theme_session_start(wing, response)
@@ -1710,7 +1745,17 @@ def hook_session_start(data: dict, harness: str):
             sys_msg += "\n" + diary_context
 
     _log(f"SESSION GREETING: {sys_msg}")
-    _output({"systemMessage": sys_msg})
+    # ONE _output object carries both channels: the user-visible greeting
+    # (systemMessage) AND the model-facing search nudge (additionalContext).
+    # A hook may print only a single JSON object to stdout, so these must
+    # not be two separate _output() calls.
+    _output({
+        "systemMessage": sys_msg,
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": _session_nudge(wing),
+        },
+    })
 
 
 def hook_stop(data: dict, harness: str):
