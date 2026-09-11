@@ -1807,6 +1807,15 @@ from postgres import connect_postgres as _connect_postgres  # noqa: E402,F401
 from fast_intercept import fast_status_payload as _fast_status_payload  # noqa: E402,F401
 
 
+# ── Cypher source rewrites (#209) ────────────────────────────────────────────
+# AGE cannot resolve a projection's own alias from its ORDER BY; the daemon
+# rewrites those references into the defining expression before AGE sees the
+# query. Pure text transform, so it lives outside main.py per #101.
+from cypher_rewrite import (  # noqa: E402
+    rewrite_order_by_aliases as _rewrite_order_by_aliases,
+)
+
+
 # ── Daemon-native MCP tools (#93) ─────────────────────────────────────────────
 # Six tools the CLI needs when daemon-strict mode is on. The mempalace CLI's
 # `cmd_rooms` / `cmd_wakeup` / `cmd_mined` open a local ChromaDB client today
@@ -2114,8 +2123,15 @@ async def cypher_query(request: Request, x_api_key: str | None = Header(default=
                 )
                 _generic_excs = _generic_excs + (psycopg.Error,)
 
+            # AGE resolves ORDER BY identifiers against the range table of
+            # the clauses BEFORE the projection, so an alias the projection
+            # itself introduces ("... count(*) AS n ORDER BY n") has no rte
+            # and AGE errors with "could not find rte for n" (#209). Rewrite
+            # such references back into the defining expression, which AGE
+            # accepts. Unparseable input is returned untouched.
+            cypher_for_age = _rewrite_order_by_aliases(cypher)
             try:
-                rows = kg._run_cypher(cypher, params={}, fetch=True)
+                rows = kg._run_cypher(cypher_for_age, params={}, fetch=True)
             except _read_only_excs as e:
                 kg._conn.rollback()
                 return None, ("read-only", str(e))
@@ -2153,7 +2169,7 @@ async def cypher_query(request: Request, x_api_key: str | None = Header(default=
                 except Exception:
                     pass
                 return None, ("postgres-error", str(e))
-            aliases = kg._extract_return_aliases(cypher)
+            aliases = kg._extract_return_aliases(cypher_for_age)
             unwrap = kg._unwrap_agtype
             shaped = []
             for row in rows:
