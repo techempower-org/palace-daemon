@@ -235,6 +235,62 @@ class TestMcpProxyInterception(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(envelope["result"], {"slow_ok": True})
 
+    async def test_intercepts_mempalace_list_wings(self):
+        """#239: the dispatch table must route list_wings to the fast path.
+
+        The shape tests below call ``_fast_mcp_list_wings_payload`` directly,
+        so they would still pass if the dispatch entry were dropped and the
+        tool silently fell back to the 60 s sweep.
+        """
+        body = {"jsonrpc": "2.0", "id": 16, "method": "tools/call",
+                "params": {"name": "mempalace_list_wings", "arguments": {}}}
+
+        fake = {"wings": {"memorypalace": 37729, "2g": 123332}}
+        with patch.object(main, "PALACE_MCP_FAST_INTERCEPT", True), \
+             patch.object(main, "_check_auth"), \
+             patch.object(main, "_fast_mcp_list_wings_payload", return_value=fake), \
+             patch.object(main, "_call") as slow:
+            envelope = await self._call_proxy(body)
+
+        slow.assert_not_called()
+        self.assertEqual(envelope["id"], 16)
+        self.assertEqual(json.loads(envelope["result"]["content"][0]["text"]), fake)
+
+    async def test_intercepts_mempalace_get_taxonomy(self):
+        """#239: same, for get_taxonomy."""
+        body = {"jsonrpc": "2.0", "id": 17, "method": "tools/call",
+                "params": {"name": "mempalace_get_taxonomy", "arguments": {}}}
+
+        fake = {"taxonomy": {"2g": {"problems": 52891, "references": 39878}}}
+        with patch.object(main, "PALACE_MCP_FAST_INTERCEPT", True), \
+             patch.object(main, "_check_auth"), \
+             patch.object(main, "_fast_mcp_get_taxonomy_payload", return_value=fake), \
+             patch.object(main, "_call") as slow:
+            envelope = await self._call_proxy(body)
+
+        slow.assert_not_called()
+        self.assertEqual(envelope["id"], 17)
+        self.assertEqual(json.loads(envelope["result"]["content"][0]["text"]), fake)
+
+    async def test_list_wings_with_arguments_falls_through(self):
+        """The intercept is guarded on ``not arguments`` so a future filtered
+        variant reaches the real tool instead of being answered from the
+        unfiltered counts. Locks that intent."""
+        body = {"jsonrpc": "2.0", "id": 18, "method": "tools/call",
+                "params": {"name": "mempalace_list_wings", "arguments": {"wing": "2g"}}}
+
+        async def _slow(_b):
+            return {"jsonrpc": "2.0", "id": 18, "result": {"slow": True}}
+
+        with patch.object(main, "PALACE_MCP_FAST_INTERCEPT", True), \
+             patch.object(main, "_check_auth"), \
+             patch.object(main, "_fast_mcp_list_wings_payload",
+                          side_effect=AssertionError("fast path must not run")), \
+             patch.object(main, "_call", side_effect=_slow):
+            envelope = await self._call_proxy(body)
+
+        self.assertEqual(envelope["result"], {"slow": True})
+
     async def test_other_tools_are_not_intercepted(self):
         # mempalace_search must go through _call so semaphores + auto-repair
         # + the timeout wrapper all keep working.
@@ -251,10 +307,6 @@ class TestMcpProxyInterception(unittest.IsolatedAsyncioTestCase):
 
         slow.assert_called_once()
         self.assertEqual(envelope["result"], {"hits": []})
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestFastInterceptWingsTaxonomy(unittest.TestCase):
@@ -293,3 +345,7 @@ class TestFastInterceptWingsTaxonomy(unittest.TestCase):
             payload = fast_intercept.fast_mcp_get_taxonomy_payload()
         assert payload["taxonomy"]["a"] == {"problems": 3, "references": 1}
         assert payload["taxonomy"]["b"] == {"": 2}
+
+
+if __name__ == "__main__":
+    unittest.main()
