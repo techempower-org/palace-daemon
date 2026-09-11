@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Added — *#252: `POST /mine` accepts a single non-`.jsonl` file in projects mode*
+
+A mine target was a directory or a single `.jsonl` conversation file. That
+covers transcripts, which the Stop/PreCompact hooks post one at a time, and
+nothing else — so refreshing ONE curated document meant posting the whole
+project directory and holding the palace write lock for the length of that
+walk. The corpus that surfaced this (`2g`) is 111 MB, and the measured worst
+case for a whole-project mine on this palace is 6 hours (mempalace#414/#426).
+
+Why it matters (mempalace#451): palace search kept returning the transcript
+copy of a claim that `2g/CLAUDE.md` had since refuted. The indexed copy of
+the card was filed 2026-09-01; the claim landed in the file on 09-03 and the
+REFUTED banner on 09-05, so the indexed chunk contained neither. Transcripts
+are mined continuously; curated project docs are mined only by a manual
+whole-directory run that nobody makes on a tree that size. Targeted re-index
+is the cheap fix — and it needs the daemon to accept the file.
+
+`projects` mode now accepts any single regular file. Two guards stay: the
+suffix must be one mempalace's own `READABLE_EXTENSIONS` contains (imported
+lazily from the miner, so the daemon cannot accept a file the miner would
+then silently drop — one whitelist, not two), and the file must be under
+`_MINE_MAX_SINGLE_FILE_BYTES` (50 MB; a 50 MB text file chunks into the same
+lock-hold this exists to avoid). `convos` and `session` are unchanged:
+directory or `.jsonl` only. The gate is now `_mineable_path_problem`, which
+returns the reason rather than a bool, so the 400 body names the actual
+problem instead of a generic "not a directory or a .jsonl transcript";
+`_is_mineable_path(path, mode=...)` is the bool wrapper and keeps its old
+default. The drain applies the identical gate, and now validates `mode`
+before it (the gate's answer depends on the mode).
+
+Needs mempalace#455 (`mempalace mine <file> --mode projects`) on the host's
+mempalace — the drain builds exactly that command.
 ### Added — *#252: `/search/fast` passes drawer provenance through (`created_at`, `source_mtime`, `chunk_index`)*
 
 `/search/fast` built its hit dicts from a drawer's `metadata` but kept only

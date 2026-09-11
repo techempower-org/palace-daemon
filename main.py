@@ -414,18 +414,86 @@ async def _enqueue_pending_write(payload: dict) -> None:
     await asyncio.to_thread(_append)
 
 
-def _is_mineable_path(path: Path) -> bool:
-    """A mine target is a directory, or a single ``.jsonl`` conversation file.
+# Ceiling on a single-file projects-mode mine. The point of mining one file
+# is that it is over in seconds; a 50 MB text file chunks into the same
+# long lock-hold the feature exists to avoid, and is far more likely to be a
+# vendored data dump than a document someone edited. Well under mempalace's
+# own 500 MB MAX_FILE_SIZE, which bounds a whole-tree walk, not one file.
+_MINE_MAX_SINGLE_FILE_BYTES = 50 * 1024 * 1024
 
-    Stop/PreCompact hooks used to post a transcript's *parent directory*, so
-    every checkpoint re-mined the whole project (measured 2026-09-03: one
-    such mine ran 6h holding the palace write lock — mempalace#414/#426).
-    ``mempalace mine`` has accepted a single conversation file for a while;
-    accepting it here lets a checkpoint mine only what changed.
+
+def _mineable_text_suffixes() -> frozenset:
+    """Suffixes the miner will actually read as text.
+
+    Sourced from mempalace's own ``READABLE_EXTENSIONS`` so the daemon cannot
+    accept a file the miner then silently drops — one whitelist, not two that
+    drift. Imported lazily: module scope here runs before the palace path is
+    resolved (see ``_palace_path_from_argv``), and this is only needed when a
+    projects-mode file actually arrives.
+    """
+    try:
+        from mempalace.miner import READABLE_EXTENSIONS
+
+        return frozenset(str(suffix).lower() for suffix in READABLE_EXTENSIONS)
+    except Exception as e:
+        _log.warning(
+            "mempalace.miner.READABLE_EXTENSIONS unavailable (%s); "
+            "falling back to a minimal suffix set", e
+        )
+        return frozenset({".md", ".txt", ".rst", ".py", ".json", ".jsonl", ".yaml", ".yml"})
+
+
+def _mineable_path_problem(path: Path, mode: str = "convos") -> "str | None":
+    """Return ``None`` when ``path`` may be mined in ``mode``, else the reason.
+
+    A directory is always mineable. A single ``.jsonl`` conversation file is
+    mineable in every mode: Stop/PreCompact hooks used to post a transcript's
+    *parent directory*, so every checkpoint re-mined the whole project
+    (measured 2026-09-03: one such mine ran 6h holding the palace write lock —
+    mempalace#414/#426).
+
+    Projects mode additionally accepts any other single regular file, which is
+    what makes a targeted re-index possible: refreshing one edited
+    ``CLAUDE.md`` should not mean walking a 111 MB tree. Two guards survive —
+    the suffix has to be one the miner reads as text, and the file has to be
+    under ``_MINE_MAX_SINGLE_FILE_BYTES``.
+
+    Returning the reason rather than a bool is what lets the 400 body name the
+    actual problem; a caller that only wants the verdict uses
+    :func:`_is_mineable_path`.
     """
     if path.is_dir():
-        return True
-    return path.is_file() and path.suffix.lower() == ".jsonl"
+        return None
+    if not path.is_file():
+        return "not a directory or a regular file"
+
+    suffix = path.suffix.lower()
+    if mode != "projects":
+        if suffix == ".jsonl":
+            return None
+        return (
+            f"mode {mode!r} mines a directory or a single .jsonl transcript; "
+            f"{suffix or 'a suffixless file'} is neither "
+            "(use mode 'projects' to mine one document)"
+        )
+
+    if suffix not in _mineable_text_suffixes():
+        return f"suffix {suffix or '<none>'} is not a text extension the miner reads"
+    try:
+        size = path.stat().st_size
+    except OSError as e:
+        return f"stat failed: {e.strerror or e}"
+    if size > _MINE_MAX_SINGLE_FILE_BYTES:
+        return (
+            f"{size / (1024 * 1024):.1f} MB exceeds the "
+            f"{_MINE_MAX_SINGLE_FILE_BYTES // (1024 * 1024)} MB single-file mine limit"
+        )
+    return None
+
+
+def _is_mineable_path(path: Path, mode: str = "convos") -> bool:
+    """Bool form of :func:`_mineable_path_problem` — see it for the rules."""
+    return _mineable_path_problem(path, mode) is None
 
 
 def _pending_mines_path() -> str:
@@ -548,15 +616,18 @@ async def _drain_pending_mines() -> int:
                         "drain-mine: skipping %s — non-absolute or contains '..'", raw_dir
                     )
                     continue
-                if not _is_mineable_path(dir_path):
-                    _log.warning(
-                        "drain-mine: skipping %s — not a directory or .jsonl transcript", directory
-                    )
-                    continue
                 wing = payload.get("wing", "general")
                 mode = payload.get("mode", "convos")
+                # Mode is validated BEFORE the filesystem gate because the
+                # gate's answer depends on it (projects mode accepts one
+                # document, convos/session only a .jsonl), and a cheap
+                # membership test should not run after a stat anyway.
                 if mode not in _MINE_VALID_MODES:
                     _log.warning("drain-mine: skipping %s — invalid mode %r", directory, mode)
+                    continue
+                problem = _mineable_path_problem(dir_path, mode)
+                if problem:
+                    _log.warning("drain-mine: skipping %s — %s", directory, problem)
                     continue
                 extract = payload.get("extract")
                 if extract is not None and extract not in _MINE_VALID_EXTRACTS:
@@ -2818,16 +2889,20 @@ async def mine(
         raise HTTPException(status_code=400, detail="'dir' must be an absolute path with no traversal")
     if not dir_path.exists():
         raise HTTPException(status_code=400, detail=f"Directory does not exist: {directory}")
-    if not _is_mineable_path(dir_path):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Path is not a directory or a .jsonl transcript: {directory}",
-        )
-
     wing = body.wing
     mode = body.mode
     extract = body.extract
     limit = body.limit
+
+    # What counts as a mineable path depends on the mode, so this runs after
+    # the body fields are read. Projects mode takes one document (#252 /
+    # mempalace#451); convos and session stay .jsonl-only.
+    problem = _mineable_path_problem(dir_path, mode)
+    if problem:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot mine {directory}: {problem}",
+        )
 
     # palace-daemon#190: gate EXPLICIT mines too, not just the watcher.
     # #190's disruptive mine was a POST /mine (hook-driven conversation
