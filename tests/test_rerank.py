@@ -139,15 +139,16 @@ class TestFallbackOnLoadFailure(unittest.TestCase):
 # Gated on whether FlashRank is importable AND the network/model cache is
 # present. Skipped on CI hosts that haven't pre-downloaded the nano model.
 
-def _flashrank_available() -> bool:
-    try:
-        import flashrank  # noqa: F401
-        return True
-    except Exception:
-        return False
+from tests._rerank_support import rerank_model_status
+
+# Resolved once at import, like the old predicate, but it asks whether the
+# MODEL is cached rather than whether the package imports — see
+# tests/_rerank_support.py. An import probe let a huggingface 429 turn five
+# skips into five reds on a suite whose CI workflow promises no network.
+_LIVE_MODEL_OK, _LIVE_MODEL_WHY = rerank_model_status()
 
 
-@unittest.skipUnless(_flashrank_available(), "flashrank not installed")
+@unittest.skipUnless(_LIVE_MODEL_OK, _LIVE_MODEL_WHY)
 class TestLiveRerank(unittest.TestCase):
     """Smoke test against the real ms-marco-TinyBERT model.
 
@@ -199,7 +200,7 @@ class TestLiveRerank(unittest.TestCase):
             self.assertEqual(out[-1]["id"], "graph-stub")
 
 
-@unittest.skipUnless(_flashrank_available(), "flashrank not installed")
+@unittest.skipUnless(_LIVE_MODEL_OK, _LIVE_MODEL_WHY)
 class TestRerankDeterminism(unittest.TestCase):
     """Reranking the SAME (query, candidates) must yield the SAME order +
     scores — within a process AND across a fresh model reload (a daemon
