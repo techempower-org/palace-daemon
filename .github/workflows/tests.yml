@@ -1,0 +1,123 @@
+# palace-daemon CI (#267).
+#
+# WHY THIS EXISTS: until now the repo had no workflows at all, so every "N
+# tests passed" figure on a daemon PR was a local run by its author. Measured
+# 2026-09-11 across eight merged PRs (#253 #257 #258 #261 #262 #263 #264 #266):
+# none was independently executed, and a read-only reviewer could not reproduce
+# them from an extracted tree.
+#
+# THE REASON THAT REPRODUCTION FAILED, and why the install block below is not
+# just `pip install -r requirements.txt`:
+#
+#   * `hnswlib` is imported by mempalace's chroma path but is absent from
+#     requirements.txt. A fresh venv gets 40 import errors and loads only 399 of
+#     880 tests — which reads like "an import path problem" and is really a
+#     missing dependency. It ships as the chroma-maintained binary fork and
+#     mempalace's own error message says to install it --no-deps.
+#   * requirements.txt asks for `mempalace>=3.3.2`, which resolves to UPSTREAM
+#     mempalace on PyPI. The daemon's tests need the FORK
+#     (techempower-org/mempalace): `mempalace.kg_predicate_norm` and
+#     `mempalace.knowledge_graph_age` are fork-only modules, and without them 8
+#     more tests error. The developer venvs that produced those PR numbers have
+#     the fork installed EDITABLE from a local checkout, which is why it was
+#     invisible.
+#
+# Both are worked around here rather than in requirements.txt, because that file
+# also drives the deploy to the palace host — see the issue filed alongside this
+# workflow.
+#
+# Python is pinned to 3.12 to match the venv on the palace host.
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # See the header: neither of these is declared in requirements.txt,
+          # and without them the suite cannot even be collected.
+          pip install --no-deps chroma-hnswlib
+          pip install --no-deps --force-reinstall \
+            "git+https://github.com/techempower-org/mempalace@main"
+
+      - name: Show what we actually resolved
+        run: |
+          python -c "import mempalace, sys; print('python', sys.version)"
+          python -c "import mempalace; print('mempalace', mempalace.__file__)"
+          python -c "import mempalace.kg_predicate_norm, mempalace.knowledge_graph_age; print('fork modules: ok')"
+          python -c "import hnswlib; print('hnswlib: ok')"
+
+      - name: Run the unittest suite
+        # The suite is self-contained: no postgres, no live palace, no network.
+        # Tests that would need a service already skip themselves with a
+        # reason, so nothing here fakes one. 880 tests, ~8s.
+        run: python -m unittest discover -s tests -t . -v
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # the advisory step diffs against the base ref
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Pinned, not floating: ruff's default rule selection changes between
+      # releases, so an unpinned gate would start failing on a release we did
+      # not make. Bump deliberately.
+      - name: Install ruff
+        run: pip install ruff==0.16.1
+
+      - name: Lint — real errors, repo-wide (blocking)
+        # E9/F63/F7/F82 is the "this is broken" set: syntax errors, undefined
+        # names, invalid comparisons. Measured clean across the whole repo on
+        # 2026-09-11, so it can block without a grace period — and unlike a
+        # changed-files gate it also protects the files a PR does not touch.
+        run: ruff check . --isolated --select E9,F63,F7,F82 --output-format concise
+
+      - name: Lint — full rules on changed files (advisory)
+        # The repo carries 626 pre-existing findings (47 of them F401 alone).
+        # Blocking on them would fail every PR, and scoping the BLOCKING gate to
+        # changed files would be worse than useless: it bills whoever edits one
+        # line of auth.py for all of auth.py's backlog. So this is advisory —
+        # it shows you what you are standing in, and never fails the build.
+        # Flip continue-on-error off per-rule as the backlog is cleared (#267).
+        continue-on-error: true
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="origin/${{ github.base_ref }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          changed=$(git diff --name-only --diff-filter=ACMR "$base"...HEAD -- '*.py' 2>/dev/null || true)
+          if [ -z "$changed" ]; then
+            echo "no changed Python files — nothing to lint"
+            exit 0
+          fi
+          echo "$changed" | tr '\n' ' '
+          echo
+          # shellcheck disable=SC2086
+          ruff check --isolated --output-format concise $changed
