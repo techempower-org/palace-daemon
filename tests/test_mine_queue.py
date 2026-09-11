@@ -907,6 +907,54 @@ class TestSkipUnchangedTranscriptRemines(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn(f"{second}::convos", state, "the interrupted mine has none")
 
+    async def test_the_state_write_leaves_no_temp_files_behind(self):
+        """A unique temp name must not become litter (#275).
+
+        The fixed `<path>.tmp` sibling it replaced was self-cleaning by
+        reuse; `mkstemp` is not, so every failure path has to remove its own.
+        """
+        t = self._transcript()
+        await main._enqueue_pending_mine({"dir": t, "wing": "w", "mode": "convos"})
+        await self._drain()
+
+        strays = [f for f in os.listdir(self.tmp.name) if f.endswith(".tmp")]
+        self.assertEqual(strays, [], f"temp files left behind: {strays}")
+        self.assertTrue(os.path.isfile(self._state_path))
+
+    async def test_a_failed_write_removes_its_temp_and_keeps_the_old_state(self):
+        """The previous witnesses must survive a failed save, not be lost."""
+        t = self._transcript()
+        await main._enqueue_pending_mine({"dir": t, "wing": "w", "mode": "convos"})
+        await self._drain()
+        good = open(self._state_path, encoding="utf-8").read()
+
+        second = self._transcript("b.jsonl")
+        await main._enqueue_pending_mine({"dir": second, "wing": "w", "mode": "convos"})
+        with patch("json.dump", side_effect=OSError("disk full")):
+            await self._drain()
+
+        self.assertEqual(
+            open(self._state_path, encoding="utf-8").read(),
+            good,
+            "a failed save must not damage the state already on disk",
+        )
+        strays = [f for f in os.listdir(self.tmp.name) if f.endswith(".tmp")]
+        self.assertEqual(strays, [], f"failed save left temp files: {strays}")
+
+    async def test_a_stale_temp_file_does_not_disturb_the_save(self):
+        """The old fixed name would have reused whatever was lying there."""
+        stale = self._state_path + ".tmp"
+        with open(stale, "w", encoding="utf-8") as f:
+            f.write("{ truncated wreckage")
+
+        t = self._transcript()
+        await main._enqueue_pending_mine({"dir": t, "wing": "w", "mode": "convos"})
+        await self._drain()
+
+        state = main._load_mined_state()
+        self.assertIn(f"{t}::convos", state)
+        self.assertTrue(os.path.isfile(stale), "someone else's file is not ours to remove")
+
     async def test_a_corrupt_state_file_does_not_block_mining(self):
         """Unreadable bookkeeping must fail toward doing the work."""
         with open(self._state_path, "w", encoding="utf-8") as f:
