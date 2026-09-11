@@ -317,9 +317,9 @@ class TestRoomsRemove(_BaseTool):
 class TestMined(_BaseTool):
     def test_groups_by_wing(self):
         rows = [
-            ("project_a", "/path/a.txt", 12),
-            ("project_a", "/path/b.txt", 3),
-            ("project_b", "/path/c.txt", 7),
+            ("project_a", "/path/a.txt", 12, None),
+            ("project_a", "/path/b.txt", 3, None),
+            ("project_b", "/path/c.txt", 7, None),
         ]
         cur = _FakeCursor([("FROM mempalace_drawers", rows)])
         with patch.object(postgres, "postgres_dsn", return_value="x"), \
@@ -333,7 +333,7 @@ class TestMined(_BaseTool):
         self.assertFalse(a["truncated"])
 
     def test_wing_filter_passed_to_sql(self):
-        cur = _FakeCursor([("FROM mempalace_drawers", [("project_a", "/x", 1)])])
+        cur = _FakeCursor([("FROM mempalace_drawers", [("project_a", "/x", 1, None)])])
         with patch.object(postgres, "postgres_dsn", return_value="x"), \
              patch("psycopg2.connect", return_value=_FakeConn(cur)):
             main._fast_mcp_mined({"wing": "project_a"})
@@ -343,7 +343,7 @@ class TestMined(_BaseTool):
         self.assertEqual(wing_sql[0][1], ["project_a"])
 
     def test_limit_truncates_per_wing(self):
-        rows = [("w", f"/file{i}.txt", 1) for i in range(5)]
+        rows = [("w", f"/file{i}.txt", 1, None) for i in range(5)]
         cur = _FakeCursor([("FROM mempalace_drawers", rows)])
         with patch.object(postgres, "postgres_dsn", return_value="x"), \
              patch("psycopg2.connect", return_value=_FakeConn(cur)):
@@ -352,6 +352,48 @@ class TestMined(_BaseTool):
         self.assertEqual(len(slot["sources"]), 2)
         self.assertEqual(slot["total_sources"], 5)
         self.assertTrue(slot["truncated"])
+
+    def test_reports_the_newest_source_mtime_per_source(self):
+        """`max_source_mtime` is what makes "has this file moved on since we
+        indexed it?" answerable in ONE call.
+
+        Without it the two halves are split across routes: this aggregation
+        enumerates sources but carried no timestamp, while `/search/fast`
+        carries `source_mtime` but is BM25-ranked, so "not in the top N" is
+        indistinguishable from "not indexed" — a staleness check built on it
+        would fail toward a clean bill of health.
+        """
+        rows = [
+            ("w", "/p/CLAUDE.md", 4, 1757000000.0),
+            ("w", "/p/docs/a.md", 2, None),
+        ]
+        cur = _FakeCursor([("FROM mempalace_drawers", rows)])
+        with patch.object(postgres, "postgres_dsn", return_value="x"), \
+             patch("psycopg2.connect", return_value=_FakeConn(cur)):
+            result = main._fast_mcp_mined({})
+        sources = {s["source_file"]: s for s in result["sources_by_wing"]["w"]["sources"]}
+        self.assertEqual(sources["/p/CLAUDE.md"]["max_source_mtime"], 1757000000.0)
+        self.assertIsNone(
+            sources["/p/docs/a.md"]["max_source_mtime"],
+            "no recorded mtime must read as unknown, never as 0 or as fresh",
+        )
+
+    def test_mtime_is_aggregated_with_max_in_sql(self):
+        """The newest wins, and the cast tolerates a malformed value.
+
+        One unparseable `source_mtime` in one drawer must not error the whole
+        aggregation — a single bad row would otherwise take out the check for
+        every file in the wing.
+        """
+        cur = _FakeCursor([("FROM mempalace_drawers", [("w", "/x", 1, 5.0)])])
+        with patch.object(postgres, "postgres_dsn", return_value="x"), \
+             patch("psycopg2.connect", return_value=_FakeConn(cur)):
+            main._fast_mcp_mined({})
+        sql = [e[0] for e in cur.executed if "FROM mempalace_drawers" in e[0]][0]
+        self.assertIn("max(", sql)
+        self.assertIn("source_mtime", sql)
+        self.assertIn("CASE WHEN", sql, "a bare ::float cast raises on a malformed value")
+        self.assertIn("GROUP BY", sql)
 
     def test_non_int_limit_raises_invalid_params(self):
         with self.assertRaises(main._DaemonToolError) as cm:

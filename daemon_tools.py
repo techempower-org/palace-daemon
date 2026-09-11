@@ -207,6 +207,25 @@ def fast_mcp_mined(arguments: dict) -> dict:
     Walks ``mempalace_drawers.metadata`` for `source_file` and groups by
     wing. Skips drawers whose metadata lacks the key entirely OR has a
     blank source_file (diary entries / kg drawers / manual additions).
+
+    Each source also carries ``max_source_mtime``: the newest
+    ``source_mtime`` recorded across that source's drawers — the file's mtime
+    as the miner saw it. That is what makes "has this file moved on since we
+    indexed it?" answerable in ONE request, which the caller then decides
+    with ``mempalace.provenance.source_stale`` rather than a second notion of
+    staleness.
+
+    It had to go here rather than in a new route: this aggregation already
+    performs exactly the required ``GROUP BY wing, source_file``, and a
+    second endpoint would have been a second copy of it. The alternative
+    sources were measured and neither works — ``/search/fast`` carries
+    ``source_mtime`` but is BM25-ranked, so "not in the top N" is
+    indistinguishable from "not indexed" and a check built on it fails toward
+    a clean bill of health; ``/search/keyword`` costs 2.6s and its
+    ``source_indexed_at`` was ``None`` on every sampled hit.
+
+    ``None`` means no drawer for that source recorded an mtime, and callers
+    MUST read it as unknown — never as 0, and never as fresh.
     """
     wing_filter = arguments.get("wing")
     if wing_filter is not None and not isinstance(wing_filter, str):
@@ -230,8 +249,16 @@ def fast_mcp_mined(arguments: dict) -> dict:
         with conn:
             with conn.cursor() as cur:
                 cur.execute("SET LOCAL statement_timeout = '10s'")
+                # The mtime cast is guarded by a regex rather than written
+                # as a bare ``::double precision``: one malformed value in
+                # one drawer would otherwise abort the whole aggregation and
+                # take the check out for every file in the wing. A bad value
+                # becomes NULL, which max() ignores.
                 sql = (
-                    "SELECT wing, metadata->>'source_file' AS source_file, count(*) AS n "
+                    "SELECT wing, metadata->>'source_file' AS source_file, count(*) AS n, "
+                    "max(CASE WHEN metadata->>'source_mtime' ~ "
+                    "'^[0-9]+(\\.[0-9]+)?$' "
+                    "THEN (metadata->>'source_mtime')::double precision END) AS max_mtime "
                     "FROM mempalace_drawers "
                     "WHERE metadata ? 'source_file' "
                     "  AND metadata->>'source_file' <> '' "
@@ -247,12 +274,18 @@ def fast_mcp_mined(arguments: dict) -> dict:
         conn.close()
     # Group into the issue's shape, honouring per-wing limit.
     by_wing: dict[str, dict] = {}
-    for wing, source_file, n in rows:
+    for wing, source_file, n, max_mtime in rows:
         slot = by_wing.setdefault(
             wing, {"sources": [], "total_sources": 0, "total_drawers": 0, "truncated": False}
         )
         if limit is None or slot["total_sources"] < limit:
-            slot["sources"].append({"source_file": source_file, "drawer_count": int(n)})
+            slot["sources"].append(
+                {
+                    "source_file": source_file,
+                    "drawer_count": int(n),
+                    "max_source_mtime": float(max_mtime) if max_mtime is not None else None,
+                }
+            )
         else:
             slot["truncated"] = True
         slot["total_sources"] += 1
