@@ -1980,6 +1980,14 @@ async def search_fast(
                         "snippet": snippet,
                         "source_file": meta.get("source_file"),
                         "tags": meta.get("tags"),
+                        # palace-daemon#252 / mempalace#451: provenance a caller
+                        # needs to tell a fresh curated doc from a stale copy.
+                        # `filed_at` is the miner's key; the mempalace searcher
+                        # renames it `created_at` on its hits and falls back to
+                        # the older `added_at`, so do exactly the same here.
+                        "created_at": meta.get("filed_at") or meta.get("added_at"),
+                        "source_mtime": meta.get("source_mtime"),
+                        "chunk_index": meta.get("chunk_index"),
                     })
                 return results
 
