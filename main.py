@@ -91,7 +91,17 @@ import rooms as _rooms
 
 # ── Config (env vars override CLI defaults) ───────────────────────────────────
 
-VERSION = "1.9.1"
+# Versioning — PEP 440 local version `<upstream_base>+te.<N>`. This fork is a
+# diverged *superset* of upstream rboarescu/palace-daemon (265 commits past the
+# pre-v1.5.1 merge-base), not a point on upstream's line — features flow
+# fork→upstream here, not the reverse. Bump `+te.<N>` for fork-only changes;
+# when a newer upstream release is verified a subset, set the new base and reset
+# to `+te.1` (e.g. `1.9.0+te.1`). VERSION stays a *string literal* so
+# scripts/deploy.sh's regex can parse it; UPSTREAM_BASE is derived from it so the
+# two can never drift. See docs/VERSIONING.md.
+FORK = "techempower"
+VERSION = "1.8.1+te.1"
+UPSTREAM_BASE = VERSION.split("+", 1)[0]
 DEFAULT_HOST = os.getenv("PALACE_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.getenv("PALACE_PORT", "8085"))
 DEFAULT_PALACE = os.getenv("PALACE_PATH", "")
@@ -1415,6 +1425,7 @@ async def health():
     memcg = await loop.run_in_executor(None, _postgres_memcg_status)
     payload = {
         "status": status, "daemon": "palace-daemon", "version": VERSION,
+        "fork": FORK, "upstream_base": UPSTREAM_BASE,
         "palace": result, **cl,
         "db_errors": db_errors,
     }

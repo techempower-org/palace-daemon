@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Changed — *Versioning: PEP 440 local version `<upstream_base>+te.<N>` for the ahead-diverged fork*
+
+Renumbers the fork from plain SemVer `1.9.1` to `1.8.1+te.1`. The fork had been
+reusing upstream's `v1.x.y` namespace, which (1) collided — fork `v1.5.1` /
+`v1.7.0`–`v1.7.3` are different content from upstream's same-named tags, (2)
+recorded no upstream base, and (3) implied a false linear "one minor ahead"
+relationship. The fork is actually a *diverged superset*: its v1.8.x features
+(crash-loop config, verified backups, `/mine` backend guard) were contributed
+**to** upstream (PRs #23 / #24 / #30), not pulled from it. `<upstream_base>+te.<N>`
+encodes the upstream base in the string, never collides (`+te.*` is fork-only),
+and reads as a diverged build. `GET /health` now also returns `fork` and
+`upstream_base`. New docs: `docs/VERSIONING.md` (scheme + bump rules) and
+`docs/upstream-sync.md` (standing "do not `git merge upstream/main`" assessment,
+2026-07-04). No behavior change beyond the version string and two new `/health`
+fields. Deploy to familiar is a separate manual step.
+
 ### Added — *Cat 7b: `POST /backfill-age/indexes` — AGE edge-endpoint indexes for hybrid/age-fused graph-walk latency*
 
 `/search/hybrid` p50 was ~3-5× `/search` and `/search/keyword` (measured
