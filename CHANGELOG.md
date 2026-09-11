@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Added — *#252: `/search/fast` passes drawer provenance through (`created_at`, `source_mtime`, `chunk_index`)*
+
+`/search/fast` built its hit dicts from a drawer's `metadata` but kept only
+`source_file` and `tags`. A caller could not tell a freshly-mined curated
+document from a months-old copy of the same claim quoted inside a transcript.
+
+Measured case (mempalace#451): `2g/CLAUDE.md` was indexed on 2026-09-01 at
+14:13; the claim it now refutes was added to the file on 09-03 and the REFUTED
+banner on 09-05. Every search hit for that claim was the transcript copy, and
+nothing in the response said the curated card predated both edits.
+
+The three keys already exist in `metadata` — this only stops dropping them.
+`created_at` is `filed_at` (the miner's key) with `added_at` as the older
+fallback, matching what `mempalace.searcher` names the same value on its own
+hits, so a `/search/fast` hit and a `/search/keyword` hit can be compared
+without a per-route key map. Missing keys are emitted as `null` rather than
+omitted, so callers can read them unconditionally. No SQL change (`metadata`
+was already selected), no change to the existing fields.
+
 ### Added — *Cat 7b: `POST /backfill-age/indexes` — AGE edge-endpoint indexes for hybrid/age-fused graph-walk latency*
 
 `/search/hybrid` p50 was ~3-5× `/search` and `/search/keyword` (measured
