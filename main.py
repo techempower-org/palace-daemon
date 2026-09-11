@@ -795,8 +795,22 @@ def _save_mined_state(state: dict) -> None:
     try:
         directory = os.path.dirname(path) or "."
         fd, tmp = tempfile.mkstemp(dir=directory, prefix=".mined-state-", suffix=".tmp")
+        # Ownership of the descriptor transfers to the file object, so the
+        # wrap gets its own try: if os.fdopen itself raises, nothing has
+        # taken the fd and it leaks (measured: fd delta 1 per failure, no
+        # stray file — the unlink below was already correct). Closing it in
+        # the outer handler instead would risk a double close once fdopen
+        # HAS succeeded, and a double close can land on an unrelated
+        # descriptor that has since reused the number.
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
+            handle = os.fdopen(fd, "w", encoding="utf-8")
+        except BaseException:
+            os.close(fd)
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
+        try:
+            with handle as f:
                 json.dump(_prune_mined_state(state), f)
             os.replace(tmp, path)
         except BaseException:
