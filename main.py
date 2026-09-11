@@ -515,6 +515,27 @@ def _mineable_path_problem(path: Path, mode: str = "convos") -> "str | None":
 _MEMORY_SWEEP_GLOB = "*/.claude/projects/*/memory"
 
 
+def _stderr_excerpt(stderr: "bytes | None", limit: int = 600) -> str:
+    """The most informative bounded slice of a failed mine's stderr.
+
+    A head cut is the wrong end for argparse, which prints the usage block
+    first and the actual reason last. Version skew is the case that matters:
+    an older mempalace rejects a flag the daemon now passes with
+    ``error: unrecognized arguments: --no-tunnels`` at roughly offset 556,
+    so the previous ``stderr[:300]`` showed boilerplate and hid the cause
+    (#474). Prefer the last ``error:`` line; otherwise keep the tail.
+    """
+    if not stderr:
+        return ""
+    text = stderr.decode(errors="replace").strip()
+    if not text:
+        return ""
+    for line in reversed(text.splitlines()):
+        if "error:" in line.lower():
+            return line.strip()[:limit]
+    return text[-limit:]
+
+
 def _tunnels_for_target(path: Path, requested: "bool | None" = None) -> bool:
     """Whether this mine should rebuild the wing's derived graph.
 
@@ -892,7 +913,7 @@ async def _drain_pending_mines() -> int:
                         "drain-mine: replay returned %s for %s\n  stderr: %s",
                         proc.returncode,
                         directory,
-                        (stderr or b"")[:1200].decode(errors="replace")[:300],
+                        _stderr_excerpt(stderr),
                     )
                     failed_lines.append(line)
             except Exception:

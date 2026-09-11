@@ -25,6 +25,13 @@ caller who explicitly asked for tunnels, and a plain `bool = true` cannot tell
 payload records what was asked, and the drain re-derives at replay time against
 the path as it is then.
 
+The drain's failure log now prints the last `error:` line (or the tail) of a
+failed mine's stderr instead of `stderr[:300]`. The case that matters is
+version skew: an older mempalace rejects `--no-tunnels` with exit 2 and the
+drain quarantines the entry correctly, but argparse prints its usage block
+first and `error: unrecognized arguments: --no-tunnels` at roughly offset 556
+— so the one line naming the cause was the one line never shown.
+
 Note for the follow-up (#474 item 2): the 29 minutes is **not** the 993 MB
 `hallways.json`. Measured on katana, a 900K-record/396 MB hallways file parses
 in 3.1 s and writes in 8.4 s — about 37 s per mine at the production size. The

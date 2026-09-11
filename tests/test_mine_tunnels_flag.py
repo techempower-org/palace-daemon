@@ -214,3 +214,41 @@ class TestDrainTunnels(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStderrExcerpt(unittest.TestCase):
+    """Version skew has to be legible in the drain's failure log (#474).
+
+    An older mempalace rejects `--no-tunnels` with exit 2. The drain
+    quarantines the entry correctly, but the log printed `stderr[:300]` —
+    and argparse puts the usage block first and the actual reason
+    ("error: unrecognized arguments: --no-tunnels") at roughly offset 556.
+    So the one line naming the cause was the one line never shown.
+    """
+
+    ARGPARSE_STDERR = (
+        "usage: mempalace mine [-h] [--backend BACKEND] "
+        + ("[--some-very-long-option VALUE] " * 20)
+        + "\nmempalace mine: error: unrecognized arguments: --no-tunnels\n"
+    ).encode()
+
+    def test_the_error_line_survives_truncation(self):
+        out = main._stderr_excerpt(self.ARGPARSE_STDERR)
+        self.assertIn("unrecognized arguments: --no-tunnels", out)
+
+    def test_the_error_line_is_beyond_the_old_300_char_cut(self):
+        """Control: proves the fixture actually reproduces the bug."""
+        old_behaviour = self.ARGPARSE_STDERR[:1200].decode(errors="replace")[:300]
+        self.assertNotIn("unrecognized arguments", old_behaviour)
+
+    def test_plain_stderr_without_an_error_line_keeps_the_tail(self):
+        noisy = ("filler line\n" * 200 + "the thing that actually broke\n").encode()
+        out = main._stderr_excerpt(noisy)
+        self.assertIn("the thing that actually broke", out)
+
+    def test_empty_and_none_are_safe(self):
+        self.assertEqual(main._stderr_excerpt(b""), "")
+        self.assertEqual(main._stderr_excerpt(None), "")
+
+    def test_output_stays_bounded(self):
+        self.assertLessEqual(len(main._stderr_excerpt(b"x" * 100_000)), 600)
