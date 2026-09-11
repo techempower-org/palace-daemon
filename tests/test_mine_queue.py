@@ -955,6 +955,47 @@ class TestSkipUnchangedTranscriptRemines(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"{t}::convos", state)
         self.assertTrue(os.path.isfile(stale), "someone else's file is not ours to remove")
 
+    @unittest.skipUnless(os.path.isdir("/proc/self/fd"), "needs /proc to count descriptors")
+    async def test_a_failed_fdopen_does_not_leak_the_descriptor(self):
+        """`mkstemp` hands back a raw fd; only `os.fdopen` takes ownership.
+
+        If the wrap itself raises, nothing owns the descriptor and it leaks —
+        one per failed save, and this now runs once per successful mine
+        rather than once per pass, so a persistent write failure would bleed
+        descriptors steadily. Counted through /proc rather than reasoned
+        about: the unlink was already correct, the close was not.
+        """
+        t = self._transcript()
+
+        def _fd_count():
+            return len(os.listdir("/proc/self/fd"))
+
+        await main._enqueue_pending_mine({"dir": t, "wing": "w", "mode": "convos"})
+        before = _fd_count()
+        with patch("os.fdopen", side_effect=OSError("no memory for a stream")):
+            await self._drain()
+        after = _fd_count()
+
+        self.assertEqual(
+            after,
+            before,
+            f"descriptor leaked: {before} -> {after} after a failed os.fdopen",
+        )
+        strays = [f for f in os.listdir(self.tmp.name) if f.endswith(".tmp")]
+        self.assertEqual(strays, [], f"failed fdopen left temp files: {strays}")
+
+    @unittest.skipUnless(os.path.isdir("/proc/self/fd"), "needs /proc to count descriptors")
+    async def test_repeated_save_failures_do_not_accumulate_descriptors(self):
+        """One leak is a bug; a per-mine leak is a countdown to EMFILE."""
+        def _fd_count():
+            return len(os.listdir("/proc/self/fd"))
+
+        before = _fd_count()
+        with patch("os.fdopen", side_effect=OSError("no memory for a stream")):
+            for i in range(12):
+                main._save_mined_state({f"/p/{i}.jsonl::convos": {"mtime": 1.0, "size": 2}})
+        self.assertEqual(_fd_count(), before, "descriptors accumulated across failures")
+
     async def test_a_corrupt_state_file_does_not_block_mining(self):
         """Unreadable bookkeeping must fail toward doing the work."""
         with open(self._state_path, "w", encoding="utf-8") as f:
