@@ -96,10 +96,16 @@ class TestEvaluateCandidatesMode(unittest.TestCase):
     """
 
     def setUp(self):
-        try:
-            import flashrank  # noqa: F401
-        except Exception:
-            self.skipTest("flashrank not installed")
+        # This test RUNS the cross-encoder (`evaluate(mode="candidates")`
+        # drives rerank.py), so gating on whether flashrank imports was
+        # cheaper than what it consumes: with the model uncached and
+        # huggingface returning 429, the rerank degraded silently and the
+        # ordering assertion below failed instead of skipping (daemon#273).
+        from tests._rerank_support import rerank_model_status
+
+        ok, why = rerank_model_status()
+        if not ok:
+            self.skipTest(why)
         os.environ["PALACE_RERANK_ENABLED"] = "true"
 
     def test_buried_relevant_doc_metrics(self):
