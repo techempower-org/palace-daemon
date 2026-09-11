@@ -639,6 +639,120 @@ def _split_drain_batch(entries: list) -> tuple:
     return batch, deferred
 
 
+# --- skip a re-mine whose source has not moved (daemon#260 item 3) --------
+#
+# Every checkpoint re-queues the live session's transcript. Replaying one
+# whose bytes have not changed since the last SUCCESSFUL mine re-reads,
+# re-chunks and re-embeds identical content while holding the palace write
+# lock. The witness is (mtime, size), recorded here rather than in mempalace:
+# this is the daemon's own scheduling bookkeeping, not palace data.
+#
+# The witness is captured BEFORE the mine spawns, so it records the state the
+# mine read. That ordering is the whole correctness of this: taken afterwards,
+# bytes appended by a live session DURING the mine land in the witness without
+# having been read, and the next checkpoint skips them — silently, on the
+# PreCompact/final save that is likeliest to race a session's last writes.
+# Captured first, a concurrent append costs one redundant mine instead.
+#
+# Stated bound — it is not content identity. An in-place edit preserving both
+# mtime and size would be missed. Transcripts are append-only, so that is not
+# a shape they take; anything that needs certainty should not be routed
+# through the queue's dedup either.
+_MINED_STATE_MAX_ENTRIES = 2000
+
+
+def _mined_state_path() -> str:
+    """Sibling of the pending-mines queue; JSON keyed by ``<path>::<mode>``."""
+    return os.path.join(
+        os.path.dirname(_pending_mines_path()), "palace-daemon-mined-state.json"
+    )
+
+
+def _load_mined_state() -> dict:
+    """Read the last-mined witnesses. Any problem reads as "nothing known".
+
+    Bookkeeping that cannot be read must fail toward doing the work, never
+    toward skipping it: a corrupt state file costs one redundant mine, a
+    state file trusted while broken costs a silently stale palace.
+    """
+    try:
+        with open(_mined_state_path(), encoding="utf-8") as f:
+            state = json.load(f)
+        return state if isinstance(state, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _prune_mined_state(state: dict) -> dict:
+    """Bound the file: it gains a key per transcript and they never stop.
+
+    Only runs once the map is large, so the common pass does no extra stats.
+    Entries whose file is gone go first; if that is not enough, the oldest
+    recorded mtimes go.
+    """
+    if len(state) <= _MINED_STATE_MAX_ENTRIES:
+        return state
+    alive = {}
+    for key, value in state.items():
+        source = key.rsplit("::", 1)[0]
+        try:
+            if os.path.exists(source):
+                alive[key] = value
+        except OSError:
+            continue
+    if len(alive) <= _MINED_STATE_MAX_ENTRIES:
+        return alive
+    ranked = sorted(alive.items(), key=lambda kv: float((kv[1] or {}).get("mtime") or 0))
+    return dict(ranked[len(ranked) - _MINED_STATE_MAX_ENTRIES :])
+
+
+def _save_mined_state(state: dict) -> None:
+    """Write the witnesses atomically; a failure is logged, never raised."""
+    path = _mined_state_path()
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_prune_mined_state(state), f)
+        os.replace(tmp, path)
+    except OSError:
+        _log.exception("drain-mine: could not persist mined-state at %s", path)
+
+
+def _mined_state_key(directory: str, mode: str) -> str:
+    return f"{directory}::{mode}"
+
+
+def _source_witness(directory: str) -> "dict | None":
+    """``{"mtime", "size"}`` for a FILE, else ``None``.
+
+    ``None`` means "no opinion", which callers must treat as "mine it":
+    directories are excluded because a directory's mtime says nothing about
+    what changed inside it, and a path this host cannot stat may still be
+    one the miner can reach through ``PALACE_DAEMON_PATH_MAP``.
+    """
+    try:
+        stat = os.stat(directory)
+    except OSError:
+        return None
+    if not os.path.isfile(directory):
+        return None
+    return {"mtime": stat.st_mtime, "size": stat.st_size}
+
+
+def _drain_should_skip_unchanged(directory: str, mode: str, state: dict) -> bool:
+    """True when this exact source was already mined successfully, unchanged."""
+    witness = _source_witness(directory)
+    if witness is None:
+        return False
+    recorded = state.get(_mined_state_key(directory, mode))
+    if not isinstance(recorded, dict):
+        return False
+    return (
+        recorded.get("size") == witness["size"]
+        and recorded.get("mtime") == witness["mtime"]
+    )
+
+
 def _recover_orphaned_processing(path: str, proc_path: str) -> int:
     """Fold a leftover ``.processing`` batch back into the live queue.
 
@@ -693,6 +807,8 @@ async def _drain_pending_mines() -> int:
     count = 0
     failed_lines: list[str] = []
     requeue_lines: list[str] = []
+    mined_state = _load_mined_state()
+    mined_state_dirty = False
     try:
         with open(proc_path, encoding="utf-8") as f:
             lines = [ln for ln in f.readlines() if ln.strip()]
@@ -779,6 +895,16 @@ async def _drain_pending_mines() -> int:
                 if problem:
                     _log.warning("drain-mine: skipping %s — %s", directory, problem)
                     continue
+                if _drain_should_skip_unchanged(directory, mode, mined_state):
+                    # Unchanged since its last successful mine: re-embedding
+                    # identical bytes is the whole cost with none of the
+                    # benefit, and it holds the palace write lock (#260).
+                    _log.info(
+                        "drain-mine: skipping %s (%s) — unchanged since last successful mine",
+                        directory,
+                        mode,
+                    )
+                    continue
                 extract = payload.get("extract")
                 if extract is not None and extract not in _MINE_VALID_EXTRACTS:
                     _log.warning(
@@ -794,6 +920,14 @@ async def _drain_pending_mines() -> int:
                             "drain-mine: skipping %s — invalid limit %r", directory, limit
                         )
                         continue
+                # Stat BEFORE spawning: the witness has to describe what this
+                # mine READ, not what it left behind. A session appending while
+                # its checkpoint mine runs would otherwise have those bytes
+                # baked into the witness without the mine ever seeing them, and
+                # the next checkpoint would find the file "unchanged" and skip
+                # the tail. Captured here, a concurrent append costs one
+                # redundant mine instead of a silently missing tail.
+                pre_mine_witness = _source_witness(directory)
                 mempalace_bin = os.path.join(os.path.dirname(sys.executable), "mempalace")
                 cmd = [mempalace_bin, "mine", directory, "--mode", mode, "--wing", wing]
                 # Re-apply optional fields the original /mine accepted but
@@ -822,6 +956,9 @@ async def _drain_pending_mines() -> int:
                             active_mines.discard(proc)
                 if proc.returncode == 0:
                     count += 1
+                    if pre_mine_witness is not None:
+                        mined_state[_mined_state_key(directory, mode)] = pre_mine_witness
+                        mined_state_dirty = True
                 elif _LOCK_HELD_MARKER in (stderr or b""):
                     # An external CLI mine (a sweep, a manual `mempalace mine`)
                     # holds the palace flock. That is contention, not failure:
@@ -856,6 +993,12 @@ async def _drain_pending_mines() -> int:
             with open(qpath, "w", encoding="utf-8") as f:
                 f.writelines(failed_lines)
             _log.warning("drain-mine: %d entries quarantined at %s", len(failed_lines), qpath)
+        if mined_state_dirty:
+            # Once per pass, not per mine: a crash loses this pass's
+            # witnesses, which costs one redundant re-mine each — the safe
+            # direction. Only rc==0 replays get here, so a failed mine never
+            # suppresses its own retry.
+            _save_mined_state(mined_state)
         if requeue_lines:
             # Back onto the live queue (appends coexist with new /mine posts).
             with open(path, "a", encoding="utf-8") as f:

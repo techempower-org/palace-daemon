@@ -17,6 +17,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch, AsyncMock, MagicMock
 
@@ -620,3 +621,229 @@ class TestDrainBatchCapAndPriority(unittest.IsolatedAsyncioTestCase):
             ["/t/old.jsonl"],
             "after enough deferrals the transcript outranks a fresh projects mine",
         )
+
+
+class TestSkipUnchangedTranscriptRemines(unittest.IsolatedAsyncioTestCase):
+    """A transcript whose bytes have not moved must not be re-embedded (#260).
+
+    Every checkpoint re-queues the session's ``.jsonl``. When the file has
+    not grown since the last SUCCESSFUL mine, replaying it re-reads,
+    re-chunks and re-embeds byte-identical content, and holds the palace
+    write lock while doing it.
+
+    The witness is (mtime, size), recorded daemon-side in a small JSON file
+    keyed by path. Stated bound, because it is not content identity: an
+    in-place edit that preserves both would be missed. Transcripts are
+    append-only, so that is not a shape they take — and the check is
+    deliberately restricted to FILES, since a directory's mtime says nothing
+    about what changed inside it.
+    """
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._queue_path = os.path.join(self.tmp.name, "pending-mines.jsonl")
+        self._state_path = os.path.join(self.tmp.name, "mined-state.json")
+        self._patches = [
+            patch.object(main, "_pending_mines_path", return_value=self._queue_path),
+            patch.object(main, "_mined_state_path", return_value=self._state_path),
+            patch.object(main, "_translate_client_path", side_effect=lambda p: p),
+            patch.object(main, "_mineable_path_problem", return_value=None),
+        ]
+        for p in self._patches:
+            p.start()
+        self.spawned: list = []
+
+    async def asyncTearDown(self):
+        for p in self._patches:
+            p.stop()
+        self.tmp.cleanup()
+
+    def _transcript(self, name="s.jsonl", body='{"a":1}\n'):
+        path = os.path.join(self.tmp.name, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(body)
+        return path
+
+    def _ok_subprocess(self):
+        async def _fake(*args, **kwargs):
+            self.spawned.append(list(args))
+            proc = MagicMock()
+            proc.communicate = AsyncMock(return_value=(b"", b""))
+            proc.returncode = 0
+            return proc
+
+        return _fake
+
+    def _failing_subprocess(self):
+        async def _fake(*args, **kwargs):
+            self.spawned.append(list(args))
+            proc = MagicMock()
+            proc.communicate = AsyncMock(return_value=(b"", b"boom"))
+            proc.returncode = 1
+            return proc
+
+        return _fake
+
+    async def _drain(self, subprocess_factory=None):
+        factory = subprocess_factory or self._ok_subprocess()
+        with patch("asyncio.create_subprocess_exec", side_effect=factory):
+            return await main._drain_pending_mines()
+
+    async def test_first_mine_of_a_transcript_runs(self):
+        t = self._transcript()
+        await main._enqueue_pending_mine({"dir": t, "wing": "w", "mode": "convos"})
+        self.assertEqual(await self._drain(), 1)
+        self.assertEqual(len(self.spawned), 1)
+
+    async def test_unchanged_transcript_is_skipped_on_the_next_pass(self):
+        t = self._transcript()
+        await main._enqueue_pending_mine({"dir": t, "wing": "w", "mode": "convos"})
+        await self._drain()
+        self.spawned.clear()
+
+        await main._enqueue_pending_mine({"dir": t, "wing": "w", "mode": "convos"})
+        count = await self._drain()
+
+        self.assertEqual(self.spawned, [], "byte-identical transcript must not be re-embedded")
+        self.assertEqual(count, 0, "a skip is not a mine")
+        self.assertFalse(os.path.isfile(self._queue_path), "the skipped entry is consumed")
+
+    async def test_a_grown_transcript_is_mined_again(self):
+        t = self._transcript()
+        await main._enqueue_pending_mine({"dir": t, "wing": "w", "mode": "convos"})
+        await self._drain()
+        self.spawned.clear()
+
+        with open(t, "a", encoding="utf-8") as f:
+            f.write('{"b":2}\n')
+        os.utime(t, (time.time() + 5, time.time() + 5))
+
+        await main._enqueue_pending_mine({"dir": t, "wing": "w", "mode": "convos"})
+        self.assertEqual(await self._drain(), 1)
+        self.assertEqual(len(self.spawned), 1)
+
+    async def test_same_mtime_but_different_size_still_mines(self):
+        """Either half of the witness moving is enough to re-mine."""
+        t = self._transcript()
+        await main._enqueue_pending_mine({"dir": t, "wing": "w", "mode": "convos"})
+        await self._drain()
+        stamp = os.stat(t)
+        self.spawned.clear()
+
+        with open(t, "a", encoding="utf-8") as f:
+            f.write('{"b":2}\n')
+        os.utime(t, (stamp.st_atime, stamp.st_mtime))  # mtime restored, size changed
+
+        await main._enqueue_pending_mine({"dir": t, "wing": "w", "mode": "convos"})
+        self.assertEqual(await self._drain(), 1)
+
+    async def test_a_failed_mine_is_not_recorded_as_done(self):
+        """Only a successful replay may suppress the next one."""
+        t = self._transcript()
+        await main._enqueue_pending_mine({"dir": t, "wing": "w", "mode": "convos"})
+        await self._drain(self._failing_subprocess())
+        self.spawned.clear()
+
+        await main._enqueue_pending_mine({"dir": t, "wing": "w", "mode": "convos"})
+        self.assertEqual(await self._drain(), 1, "a failed mine must not mark the file done")
+
+    async def test_directories_are_never_skipped(self):
+        """A directory's mtime says nothing about the files inside it."""
+        d = os.path.join(self.tmp.name, "memory")
+        os.mkdir(d)
+        for _ in range(2):
+            await main._enqueue_pending_mine({"dir": d, "wing": "w", "mode": "projects"})
+            await self._drain()
+        self.assertEqual(len(self.spawned), 2)
+
+    async def test_a_different_mode_for_the_same_file_still_runs(self):
+        """convos and session mine the same transcript into different shapes."""
+        t = self._transcript()
+        await main._enqueue_pending_mine({"dir": t, "wing": "w", "mode": "convos"})
+        await self._drain()
+        self.spawned.clear()
+
+        await main._enqueue_pending_mine({"dir": t, "wing": "w", "mode": "session"})
+        self.assertEqual(await self._drain(), 1)
+
+    async def test_state_survives_a_reload_and_is_json_keyed_by_path(self):
+        t = self._transcript()
+        await main._enqueue_pending_mine({"dir": t, "wing": "w", "mode": "convos"})
+        await self._drain()
+
+        with open(self._state_path, encoding="utf-8") as f:
+            state = json.load(f)
+        self.assertIn(f"{t}::convos", state)
+        self.assertIn("size", state[f"{t}::convos"])
+        self.assertIn("mtime", state[f"{t}::convos"])
+
+    async def test_bytes_appended_during_the_mine_are_not_marked_as_read(self):
+        """The witness must describe what the mine READ, not what it left.
+
+        A live session appends while its checkpoint mine runs. Statting the
+        file AFTER the subprocess returns bakes those bytes into the witness
+        without the mine ever having seen them, and the next checkpoint then
+        finds the file "unchanged" and skips the tail — silently. The
+        PreCompact / final save is precisely the mine most likely to race a
+        session's last writes, so the lost tail is the most valuable one.
+        """
+        t = self._transcript(body="x" * 1000 + "\n")
+        await main._enqueue_pending_mine({"dir": t, "wing": "w", "mode": "convos"})
+
+        async def _appends_midway(*args, **kwargs):
+            self.spawned.append(list(args))
+            # The session writes two more exchanges while the mine reads.
+            with open(t, "a", encoding="utf-8") as f:
+                f.write("y" * 200 + "\n")
+            os.utime(t, (time.time() + 5, time.time() + 5))
+            proc = MagicMock()
+            proc.communicate = AsyncMock(return_value=(b"", b""))
+            proc.returncode = 0
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=_appends_midway):
+            await main._drain_pending_mines()
+        self.spawned.clear()
+
+        await main._enqueue_pending_mine({"dir": t, "wing": "w", "mode": "convos"})
+        count = await self._drain()
+
+        self.assertEqual(count, 1, "the appended tail was never read; it must be mined")
+        self.assertEqual(len(self.spawned), 1)
+
+    async def test_the_recorded_witness_is_the_pre_spawn_one(self):
+        """Same mechanism, asserted on the stored bytes rather than behaviour."""
+        t = self._transcript(body="x" * 1000 + "\n")
+        size_before = os.stat(t).st_size
+        await main._enqueue_pending_mine({"dir": t, "wing": "w", "mode": "convos"})
+
+        async def _appends_midway(*args, **kwargs):
+            with open(t, "a", encoding="utf-8") as f:
+                f.write("y" * 200 + "\n")
+            proc = MagicMock()
+            proc.communicate = AsyncMock(return_value=(b"", b""))
+            proc.returncode = 0
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=_appends_midway):
+            await main._drain_pending_mines()
+
+        with open(self._state_path, encoding="utf-8") as f:
+            recorded = json.load(f)[f"{t}::convos"]
+        self.assertEqual(recorded["size"], size_before)
+        self.assertNotEqual(recorded["size"], os.stat(t).st_size)
+
+    async def test_a_corrupt_state_file_does_not_block_mining(self):
+        """Unreadable bookkeeping must fail toward doing the work."""
+        with open(self._state_path, "w", encoding="utf-8") as f:
+            f.write("{not json")
+        t = self._transcript()
+        await main._enqueue_pending_mine({"dir": t, "wing": "w", "mode": "convos"})
+        self.assertEqual(await self._drain(), 1)
+
+    async def test_an_unstatable_path_is_mined_rather_than_skipped(self):
+        """The daemon may not see a path its own miner can (path mapping)."""
+        await main._enqueue_pending_mine(
+            {"dir": "/definitely/not/here.jsonl", "wing": "w", "mode": "convos"}
+        )
+        self.assertEqual(await self._drain(), 1)
