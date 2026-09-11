@@ -94,7 +94,14 @@ class TestProjectWing(unittest.TestCase):
 
     def test_no_signal_falls_back_to_personal(self):
         # No cwd, no transcript path, and getcwd happens to be $HOME.
-        with patch.object(os, "getcwd", return_value="/home/jp"):
+        #
+        # Use Path.home() rather than a literal "/home/jp": _project_wing
+        # compares cwd against Path.home(), so hardcoding one developer's home
+        # asserted the behaviour only on that machine. Anywhere else — a CI
+        # runner, another account — "/home/jp" is just a directory whose last
+        # segment is "jp", and the test failed with 'jp' != 'personal' while
+        # the code was correct.
+        with patch.object(os, "getcwd", return_value=str(Path.home())):
             wing = hook._project_wing({}, transcript_path="")
         self.assertEqual(wing, "personal")
 
