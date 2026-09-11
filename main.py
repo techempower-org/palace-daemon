@@ -452,11 +452,13 @@ def _mineable_path_problem(path: Path, mode: str = "convos") -> "str | None":
     (measured 2026-09-03: one such mine ran 6h holding the palace write lock —
     mempalace#414/#426).
 
-    Projects mode additionally accepts any other single regular file, which is
-    what makes a targeted re-index possible: refreshing one edited
-    ``CLAUDE.md`` should not mean walking a 111 MB tree. Two guards survive —
-    the suffix has to be one the miner reads as text, and the file has to be
-    under ``_MINE_MAX_SINGLE_FILE_BYTES``.
+    Projects mode additionally accepts a single non-transcript regular file,
+    which is what makes a targeted re-index possible: refreshing one edited
+    ``CLAUDE.md`` should not mean walking a 111 MB tree. Three guards survive —
+    the suffix has to be one the miner reads as text, it must not be ``.jsonl``
+    (which the whitelist contains on purpose, for tree walks, but which
+    projects mode would file as prose rather than as exchanges), and the file
+    has to be under ``_MINE_MAX_SINGLE_FILE_BYTES``.
 
     Returning the reason rather than a bool is what lets the 400 body name the
     actual problem; a caller that only wants the verdict uses
@@ -477,6 +479,20 @@ def _mineable_path_problem(path: Path, mode: str = "convos") -> "str | None":
             "(use mode 'projects' to mine one document)"
         )
 
+    if suffix == ".jsonl":
+        # `.jsonl` IS in READABLE_EXTENSIONS — deliberately, so a tree walk
+        # keeps picking transcripts up (mempalace's test_miner_jsonl_visibility)
+        # — so the suffix whitelist below would admit a NAMED transcript here.
+        # The mempalace CLI then exits 2 (mempalace#455), which on the
+        # background path surfaces only in the daemon log. Mirror that refusal
+        # at the gate, in the CLI's own words, so the caller gets a 400 that
+        # names the mode that works. This is the missing half of the pair: the
+        # branch above tells a convos-mode caller to use projects.
+        return (
+            "projects mode files a .jsonl as prose, not as exchanges — use mode "
+            "'convos' (`--mode convos`: one drawer per exchange) or mode 'session' "
+            "(one manifest drawer per file)"
+        )
     if suffix not in _mineable_text_suffixes():
         return f"suffix {suffix or '<none>'} is not a text extension the miner reads"
     try:

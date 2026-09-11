@@ -73,16 +73,39 @@ class TestMineablePathProjectsMode(unittest.TestCase):
         self.assertIs(main._is_mineable_path(target, mode="convos"), False)
         self.assertIs(main._is_mineable_path(target, mode="session"), False)
 
-    def test_jsonl_stays_mineable_in_every_mode(self):
+    def test_jsonl_stays_mineable_in_the_transcript_modes(self):
         target = self._file("session.jsonl", '{"a": 1}\n')
         self.assertIs(main._is_mineable_path(target), True)
-        self.assertIs(main._is_mineable_path(target, mode="projects"), True)
+        self.assertIs(main._is_mineable_path(target, mode="convos"), True)
+        self.assertIs(main._is_mineable_path(target, mode="session"), True)
 
     def test_directory_stays_mineable_in_every_mode(self):
         from pathlib import Path
 
         self.assertIs(main._is_mineable_path(Path(self.dir), mode="projects"), True)
         self.assertIs(main._is_mineable_path(Path(self.dir), mode="convos"), True)
+
+    def test_jsonl_is_refused_in_projects_mode(self):
+        """`.jsonl` is IN mempalace's READABLE_EXTENSIONS (61 of them), so the
+        suffix whitelist alone admits a transcript into projects mode. The
+        mempalace CLI then exits 2 (mempalace#455), which on the background
+        path is visible only in the daemon log — where a clean 400 was
+        available at the gate. Refuse here and name the mode that works.
+        """
+        target = self._file("session.jsonl", '{"a": 1}\n')
+        self.assertIs(main._is_mineable_path(target, mode="projects"), False)
+        problem = main._mineable_path_problem(target, mode="projects")
+        self.assertIn("--mode convos", problem)
+
+    def test_a_directory_of_transcripts_is_still_mineable_in_projects_mode(self):
+        """Only a NAMED .jsonl is refused. A directory containing transcripts
+        is a normal projects mine — `.jsonl` is in READABLE_EXTENSIONS on
+        purpose (mempalace's test_miner_jsonl_visibility) and a tree walk
+        should keep picking them up."""
+        from pathlib import Path
+
+        self._file("session.jsonl", '{"a": 1}\n')
+        self.assertIs(main._is_mineable_path(Path(self.dir), mode="projects"), True)
 
     def test_binary_suffix_is_refused_in_projects_mode(self):
         """The miner would not read it, so the daemon must not accept it."""

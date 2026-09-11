@@ -19,13 +19,21 @@ are mined continuously; curated project docs are mined only by a manual
 whole-directory run that nobody makes on a tree that size. Targeted re-index
 is the cheap fix — and it needs the daemon to accept the file.
 
-`projects` mode now accepts any single regular file. Two guards stay: the
-suffix must be one mempalace's own `READABLE_EXTENSIONS` contains (imported
-lazily from the miner, so the daemon cannot accept a file the miner would
-then silently drop — one whitelist, not two), and the file must be under
-`_MINE_MAX_SINGLE_FILE_BYTES` (50 MB; a 50 MB text file chunks into the same
-lock-hold this exists to avoid). `convos` and `session` are unchanged:
-directory or `.jsonl` only. The gate is now `_mineable_path_problem`, which
+`projects` mode now accepts a single non-transcript regular file. Three
+guards stay: the suffix must be one mempalace's own `READABLE_EXTENSIONS`
+contains (imported lazily from the miner, so the daemon cannot accept a file
+the miner would then silently drop — one whitelist, not two); it must not be
+`.jsonl`; and the file must be under `_MINE_MAX_SINGLE_FILE_BYTES` (50 MB; a
+50 MB text file chunks into the same lock-hold this exists to avoid).
+`convos` and `session` are unchanged: directory or `.jsonl` only.
+
+The `.jsonl` exclusion is not redundant with the whitelist — `.jsonl` is IN
+`READABLE_EXTENSIONS`, deliberately, so a tree walk keeps picking transcripts
+up. Without the exclusion a NAMED transcript posted in projects mode passed
+the gate, got a 202, spawned the subprocess, and died at `mempalace mine`'s
+own exit 2 (mempalace#455) — visible only in the daemon log, where a clean
+400 was available. A directory containing transcripts is still a normal
+projects mine. The gate is now `_mineable_path_problem`, which
 returns the reason rather than a bool, so the 400 body names the actual
 problem instead of a generic "not a directory or a .jsonl transcript";
 `_is_mineable_path(path, mode=...)` is the bool wrapper and keeps its old
