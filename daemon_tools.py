@@ -249,15 +249,26 @@ def fast_mcp_mined(arguments: dict) -> dict:
         with conn:
             with conn.cursor() as cur:
                 cur.execute("SET LOCAL statement_timeout = '10s'")
-                # The mtime cast is guarded by a regex rather than written
-                # as a bare ``::double precision``: one malformed value in
-                # one drawer would otherwise abort the whole aggregation and
-                # take the check out for every file in the wing. A bad value
-                # becomes NULL, which max() ignores.
+                # The mtime cast is guarded rather than written as a bare
+                # ``::double precision``: one malformed value in one drawer
+                # would otherwise abort the whole aggregation and take the
+                # check out for every file in the wing. A bad value becomes
+                # NULL, which max() ignores.
+                #
+                # The regex alone is not enough. It rejects 'NaN' and
+                # 'Infinity' (verified in Postgres: both would otherwise cast
+                # fine and produce invalid JSON), but a long run of digits
+                # passes it and OVERFLOWS the cast — measured, a 400-digit
+                # integer raises "value out of range". The length bound is
+                # what closes that: a real mtime is ~10 digits plus a
+                # fractional part, so 20 characters is far past any true
+                # value and far short of the ~308 where double precision
+                # gives out.
                 sql = (
                     "SELECT wing, metadata->>'source_file' AS source_file, count(*) AS n, "
                     "max(CASE WHEN metadata->>'source_mtime' ~ "
                     "'^[0-9]+(\\.[0-9]+)?$' "
+                    "AND length(metadata->>'source_mtime') <= 20 "
                     "THEN (metadata->>'source_mtime')::double precision END) AS max_mtime "
                     "FROM mempalace_drawers "
                     "WHERE metadata ? 'source_file' "
