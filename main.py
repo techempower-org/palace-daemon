@@ -23,6 +23,7 @@ import os
 import sqlite3
 import sys
 import fcntl
+import fnmatch
 import signal
 import time as _time
 from contextlib import asynccontextmanager
@@ -507,6 +508,46 @@ def _mineable_path_problem(path: Path, mode: str = "convos") -> "str | None":
     return None
 
 
+# Sweep directories the memory-sync hook posts. A handful of small memory
+# files should not trigger a whole-wing derived-graph rebuild. Matched with
+# fnmatch (whose ``*`` crosses separators) so it holds regardless of the home
+# prefix the path was translated into on this host.
+_MEMORY_SWEEP_GLOB = "*/.claude/projects/*/memory"
+
+
+def _tunnels_for_target(path: Path, requested: "bool | None" = None) -> bool:
+    """Whether this mine should rebuild the wing's derived graph.
+
+    The post-mine block (topic tunnels, hallways, entity tunnels) costs
+    O(wing), not O(change) — measured on the palace host, a 31-file memory
+    sweep spent 29+ min of CPU and 1.6-4.1 GB RSS there while holding the
+    exclusive mine lock, with twelve more sweeps queued behind it
+    (mempalace#474). Targets that are obviously small should not pay it.
+
+    ``requested`` is the caller's ``tunnels`` field and is TRI-STATE on
+    purpose. ``True``/``False`` are honoured exactly — a caller who asked for
+    tunnels gets them even on one file, and a caller who declined gets no
+    rebuild even on a big tree. ``None`` (omitted) means "you decide", and
+    only then does the automatic rule apply: skip for a single file and for a
+    ``.claude/projects/*/memory`` sweep, compute otherwise.
+
+    A plain ``bool`` defaulting to True could not support this: it cannot
+    distinguish "the caller wants tunnels" from "the caller said nothing", so
+    the automatic rule would silently do less than an explicit request asked
+    for — the same failure shape as accepting a flag and ignoring it.
+    """
+    if requested is not None:
+        return bool(requested)
+    try:
+        if path.is_file():
+            return False
+    except OSError:
+        return True
+    if fnmatch.fnmatch(str(path).rstrip("/"), _MEMORY_SWEEP_GLOB):
+        return False
+    return True
+
+
 def _is_mineable_path(path: Path, mode: str = "convos") -> bool:
     """Bool form of :func:`_mineable_path_problem` — see it for the rules."""
     return _mineable_path_problem(path, mode) is None
@@ -802,6 +843,12 @@ async def _drain_pending_mines() -> int:
                     cmd += ["--extract", extract]
                 if limit:
                     cmd += ["--limit", str(limit)]
+                if not _tunnels_for_target(dir_path, payload.get("tunnels")):
+                    cmd += ["--no-tunnels"]
+                    _log.info(
+                        "drain-mine: %s — skipping the derived-graph rebuild "
+                        "(tunnels=%r)", directory, payload.get("tunnels"),
+                    )
                 async with _mine_sem:
                     proc = await asyncio.create_subprocess_exec(
                         *cmd,
@@ -3043,6 +3090,7 @@ async def mine(
     mode = body.mode
     extract = body.extract
     limit = body.limit
+    tunnels = body.tunnels
 
     # What counts as a mineable path depends on the mode, so this runs after
     # the body fields are read. Projects mode takes one document (#252 /
@@ -3098,6 +3146,10 @@ async def mine(
             "mode": mode,
             "extract": extract,
             "limit": limit,
+            # The caller's own tri-state value, deliberately NOT the derived
+            # one: the payload is the record of what was ASKED, and the drain
+            # re-derives at replay time against the path as it is then.
+            "tunnels": tunnels,
         })
         return {
             "queued": True,
@@ -3119,6 +3171,10 @@ async def mine(
             "mode": mode,
             "extract": extract,
             "limit": limit,
+            # The caller's own tri-state value, deliberately NOT the derived
+            # one: the payload is the record of what was ASKED, and the drain
+            # re-derives at replay time against the path as it is then.
+            "tunnels": tunnels,
         })
         _kick_mine_drain()
         return JSONResponse(
@@ -3139,6 +3195,8 @@ async def mine(
         cmd += ["--extract", extract]
     if limit:
         cmd += ["--limit", str(limit)]
+    if not _tunnels_for_target(dir_path, tunnels):
+        cmd += ["--no-tunnels"]
 
     async def _run_mine_subprocess():
         proc = await asyncio.create_subprocess_exec(
