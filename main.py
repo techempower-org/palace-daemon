@@ -869,8 +869,9 @@ async def _drain_pending_mines() -> int:
     count = 0
     failed_lines: list[str] = []
     requeue_lines: list[str] = []
+    # Only rc==0 replays write into this, so a failed mine never suppresses
+    # its own retry; each write is flushed immediately (see below).
     mined_state = _load_mined_state()
-    mined_state_dirty = False
     try:
         with open(proc_path, encoding="utf-8") as f:
             lines = [ln for ln in f.readlines() if ln.strip()]
@@ -1026,7 +1027,21 @@ async def _drain_pending_mines() -> int:
                     count += 1
                     if pre_mine_witness is not None:
                         mined_state[_mined_state_key(directory, mode)] = pre_mine_witness
-                        mined_state_dirty = True
+                        # Flushed HERE, after each successful mine, not once
+                        # at the end of the pass. The end-of-pass version was
+                        # sized against a pass I assumed took seconds; a real
+                        # pass runs 20 transcript mines and was measured at
+                        # 24+ minutes, so a restart mid-pass discarded up to
+                        # 20 witnesses and the file did not appear at all
+                        # until the first pass finished. Still only costing
+                        # redundant re-mines, but a needless cost the wave's
+                        # own final deploy would have paid.
+                        #
+                        # Affordable at N=1, measured rather than assumed:
+                        # saving a full 2000-key map is 6.2 ms (279 KB) and
+                        # the prune scan 2.7 ms, against ~70 s per mine —
+                        # about 0.009% of the work it is protecting.
+                        _save_mined_state(mined_state)
                 elif _LOCK_HELD_MARKER in (stderr or b""):
                     # An external CLI mine (a sweep, a manual `mempalace mine`)
                     # holds the palace flock. That is contention, not failure:
@@ -1061,12 +1076,6 @@ async def _drain_pending_mines() -> int:
             with open(qpath, "w", encoding="utf-8") as f:
                 f.writelines(failed_lines)
             _log.warning("drain-mine: %d entries quarantined at %s", len(failed_lines), qpath)
-        if mined_state_dirty:
-            # Once per pass, not per mine: a crash loses this pass's
-            # witnesses, which costs one redundant re-mine each — the safe
-            # direction. Only rc==0 replays get here, so a failed mine never
-            # suppresses its own retry.
-            _save_mined_state(mined_state)
         if requeue_lines:
             # Back onto the live queue (appends coexist with new /mine posts).
             with open(path, "a", encoding="utf-8") as f:

@@ -833,6 +833,80 @@ class TestSkipUnchangedTranscriptRemines(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recorded["size"], size_before)
         self.assertNotEqual(recorded["size"], os.stat(t).st_size)
 
+    async def test_the_witness_is_durable_before_the_pass_ends(self):
+        """A restart mid-pass must not discard the mines already done.
+
+        The witness used to be written once at the end of a pass. Measured on
+        the palace host: a pass runs 20 transcript mines and took 24+ minutes,
+        so a deploy landing mid-pass threw away up to 20 witnesses and the
+        state file did not exist at all until the first pass completed. Only
+        redundant re-mines, but a cost with no benefit.
+        """
+        first = self._transcript("a.jsonl")
+        second = self._transcript("b.jsonl")
+        await main._enqueue_pending_mine({"dir": first, "wing": "w", "mode": "convos"})
+        await main._enqueue_pending_mine({"dir": second, "wing": "w", "mode": "convos"})
+
+        seen_after_first = {}
+
+        async def _fake(*args, **kwargs):
+            self.spawned.append(list(args))
+            if len(self.spawned) == 1:
+                # Between mine one and mine two, the witness for mine one
+                # must already be on disk — that is the whole property.
+                pass
+            else:
+                seen_after_first.update(main._load_mined_state())
+            proc = MagicMock()
+            proc.communicate = AsyncMock(return_value=(b"", b""))
+            proc.returncode = 0
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=_fake):
+            await main._drain_pending_mines()
+
+        self.assertIn(
+            f"{first}::convos",
+            seen_after_first,
+            "mine one's witness must be durable before mine two starts",
+        )
+
+    async def test_a_witness_survives_an_interrupted_pass(self):
+        """A deploy signalling the daemon mid-pass must not lose what is done.
+
+        `KeyboardInterrupt` is a BaseException, so it escapes both the
+        per-entry handler and the drain's outer `except Exception` — the
+        pass really is abandoned, which is what a restart between mines
+        looks like. Written this way after the first version of this test
+        was found to pass under the OLD end-of-pass flush too: the pass
+        completed normally there, so it proved nothing.
+        """
+        first = self._transcript("a.jsonl")
+        second = self._transcript("b.jsonl")
+        await main._enqueue_pending_mine({"dir": first, "wing": "w", "mode": "convos"})
+        await main._enqueue_pending_mine({"dir": second, "wing": "w", "mode": "convos"})
+
+        async def _interrupt_on_the_second(*args, **kwargs):
+            self.spawned.append(list(args))
+            if len(self.spawned) > 1:
+                raise KeyboardInterrupt("SIGINT during a deploy")
+            proc = MagicMock()
+            proc.communicate = AsyncMock(return_value=(b"", b""))
+            proc.returncode = 0
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=_interrupt_on_the_second):
+            with self.assertRaises(KeyboardInterrupt):
+                await main._drain_pending_mines()
+
+        state = main._load_mined_state()
+        self.assertIn(
+            f"{first}::convos",
+            state,
+            "the completed mine's witness must have survived the interruption",
+        )
+        self.assertNotIn(f"{second}::convos", state, "the interrupted mine has none")
+
     async def test_a_corrupt_state_file_does_not_block_mining(self):
         """Unreadable bookkeeping must fail toward doing the work."""
         with open(self._state_path, "w", encoding="utf-8") as f:
