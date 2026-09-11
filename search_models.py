@@ -148,6 +148,16 @@ class MineBody(BaseModel):
     mode: str = Field("convos", description="Mine mode.")
     extract: "str | None" = Field(None, description="Optional extract policy.")
     limit: "int | None" = Field(None, ge=1, description="Optional drawer-count cap.")
+    tunnels: "bool | None" = Field(
+        None,
+        description=(
+            "Rebuild the wing's derived graph (topic tunnels, hallways, entity "
+            "tunnels) after the mine. Tri-state: true = always, false = never, "
+            "omitted = let the daemon decide (it skips for a single file and for "
+            "a .claude/projects/*/memory sweep, since that block costs O(wing) "
+            "not O(change) — see mempalace#474)."
+        ),
+    )
     background: bool = Field(
         False,
         description=(

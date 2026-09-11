@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+### Added — *#474: `POST /mine` `tunnels` field — skip the whole-wing derived-graph rebuild on small targets*
+
+Every projects-mode mine recomputes the wing's derived graph after the drawers
+land — topic tunnels, hallways, entity tunnels — however few files changed.
+Measured on the palace host: a 31-file (148 KB) memory sweep spent **29+ min of
+CPU and 1.6–4.1 GB RSS** in that block, wrote zero drawers in that window, and
+held the exclusive mine lock throughout, with twelve more sweeps queued behind
+it. The cost scales with the wing (37K drawers), not with the change.
+
+`mempalace mine --no-tunnels` (mempalace#478) skips it; this wires it to the
+daemon. `MineBody` gains `tunnels`, and both the direct and drain paths append
+`--no-tunnels` when the answer is no. The drain logs when it skips, so an
+operator can see why a rebuild did not happen.
+
+The field is **tri-state** (`true` / `false` / omitted) rather than a bool
+defaulting to true. The drain needs to choose for obviously-small targets — a
+single file, or a `.claude/projects/*/memory` sweep — but must not override a
+caller who explicitly asked for tunnels, and a plain `bool = true` cannot tell
+"wants tunnels" from "said nothing". Omitted means "you decide"; explicit means
+"do this". Queued mines carry the caller's own value, not a derived one: the
+payload records what was asked, and the drain re-derives at replay time against
+the path as it is then.
+
+The drain's failure log now prints the last `error:` line (or the tail) of a
+failed mine's stderr instead of `stderr[:300]`. The case that matters is
+version skew: an older mempalace rejects `--no-tunnels` with exit 2 and the
+drain quarantines the entry correctly, but argparse prints its usage block
+first and `error: unrecognized arguments: --no-tunnels` at roughly offset 556
+— so the one line naming the cause was the one line never shown.
+
+Note for the follow-up (#474 item 2): the 29 minutes is **not** the 993 MB
+`hallways.json`. Measured on katana, a 900K-record/396 MB hallways file parses
+in 3.1 s and writes in 8.4 s — about 37 s per mine at the production size. The
+time is `create_tunnel` doing a full load **and** atomic rewrite of
+`tunnels.json` on every call, from inside the per-entity and per-wing loops:
+100 tunnels 0.61 s, 1000 tunnels 11.5 s, 2000 tunnels 37.9 s, with per-tunnel
+cost rising linearly with tunnels already on disk — O(n²), ≈16 min at 10K
+tunnels. Batching that persist is the real fix and is tracked separately; this
+change is the skip.
+
 ### Added — *#252: `POST /mine` accepts a single non-`.jsonl` file in projects mode*
 
 A mine target was a directory or a single `.jsonl` conversation file. That
