@@ -408,9 +408,15 @@ class TestWakeup(_BaseTool):
 
 
 class TestDispatchTable(_BaseTool):
-    """The six tools are all registered."""
+    """Every daemon-native tool is registered, and none vanished."""
 
-    def test_all_six_in_dispatch(self):
+    def test_dispatch_table_contents(self):
+        """An explicit set, so an accidental removal fails loudly too.
+
+        Add the name here when you add a tool — that is the point of the
+        test. mempalace_list_hallways joined in #255, once mempalace#442
+        gave hallways a table to query.
+        """
         expected = {
             "mempalace_rooms_list",
             "mempalace_rooms_add",
@@ -418,6 +424,7 @@ class TestDispatchTable(_BaseTool):
             "mempalace_rooms_remove",
             "mempalace_mined",
             "mempalace_wakeup",
+            "mempalace_list_hallways",
         }
         self.assertEqual(set(main._DAEMON_NATIVE_TOOLS), expected)
 

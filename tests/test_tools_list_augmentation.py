@@ -74,7 +74,10 @@ class TestToolsListAugmentation(unittest.IsolatedAsyncioTestCase):
             "mempalace_wakeup",
         ):
             self.assertIn(expected, names, f"daemon-native {expected!r} should be in tools/list")
-        self.assertEqual(len(tools), len(upstream_tools) + 6)
+        self.assertEqual(
+            len(tools),
+            len(upstream_tools) + len(daemon_tools.DAEMON_NATIVE_TOOL_DESCRIPTORS),
+        )
 
     async def test_descriptor_shape_matches_mcp_spec(self):
         """Each descriptor must have name, description, and inputSchema."""
@@ -115,10 +118,14 @@ class TestToolsListAugmentation(unittest.IsolatedAsyncioTestCase):
 
         tools = envelope["result"]["tools"]
         names = [t["name"] for t in tools]
-        # mempalace_rooms_list appears exactly once (from upstream), the
-        # other 5 daemon-native tools are appended.
+        # mempalace_rooms_list appears exactly once (from upstream); every
+        # other daemon-native tool is appended. Derived from the registry
+        # rather than hardcoded, so adding a tool does not break this test
+        # for a reason that has nothing to do with what it checks.
         self.assertEqual(names.count("mempalace_rooms_list"), 1)
-        self.assertEqual(len(tools), 1 + 5)
+        self.assertEqual(
+            len(tools), 1 + len(daemon_tools.DAEMON_NATIVE_TOOL_DESCRIPTORS) - 1
+        )
 
     async def test_other_methods_unaffected(self):
         """Methods other than tools/list pass through unchanged."""
