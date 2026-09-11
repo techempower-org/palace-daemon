@@ -330,6 +330,130 @@ def fast_mcp_wakeup(arguments: dict) -> dict:
     return {"text": text, "tokens": tokens, "wing": wing}
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hallways (#255) — answerable only because mempalace#442 gave them a table
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 797K records across 21 wings on the production palace. Any default that
+# could return the store reproduces the hazard this tool was filed about, so
+# the page size is bounded here and a caller cannot raise it past the cap.
+HALLWAY_DEFAULT_LIMIT = 200
+HALLWAY_MAX_LIMIT = 2000
+
+_HALLWAY_COLUMNS = (
+    "id, wing, entity_a, entity_b, co_occurrence_count, rooms, label, "
+    "created_at, created_by, dynamics, extra"
+)
+
+
+def _hallway_row_to_record(row):
+    """Reassemble a hallway record from its promoted columns + jsonb blobs.
+
+    Mirrors ``mempalace.hallway_store._row_to_record``. Kept as a small local
+    function rather than importing mempalace: the daemon answers this without
+    loading the mempalace package at all, which is the point of a fast
+    intercept.
+    """
+    record = {
+        "id": row[0],
+        "wing": row[1],
+        "entity_a": row[2],
+        "entity_b": row[3],
+        "co_occurrence_count": row[4],
+        "rooms": list(row[5] or []),
+        "label": row[6],
+        "created_at": row[7],
+        "created_by": row[8],
+    }
+    for blob in (row[9], row[10]):
+        if isinstance(blob, dict):
+            record.update(blob)
+    return {k: v for k, v in record.items() if not (k == "label" and v is None)}
+
+
+def fast_mcp_list_hallways(arguments: dict) -> dict:
+    """`mempalace_list_hallways({wing?, limit?, offset?})` → bounded page.
+
+    Before mempalace#442 this could not be fast-intercepted at all: the store
+    was a 1.04 GB JSON file, ``list_hallways`` loaded all of it per call, and
+    the ``wing`` argument did not reduce the work. Parsing that array
+    materializes several GB against this daemon's 2 GB cgroup cap, so the
+    call was a memory hazard rather than merely a slow one.
+
+    With the table, the wing filter and the page are both SQL.
+    """
+    arguments = arguments or {}
+    wing = arguments.get("wing")
+    if wing is not None and not isinstance(wing, str):
+        raise _DaemonToolError(_RPC_INVALID_PARAMS, "wing must be a string")
+
+    try:
+        limit = int(arguments.get("limit") or HALLWAY_DEFAULT_LIMIT)
+    except (TypeError, ValueError):
+        raise _DaemonToolError(_RPC_INVALID_PARAMS, "limit must be an integer") from None
+    try:
+        offset = int(arguments.get("offset") or 0)
+    except (TypeError, ValueError):
+        raise _DaemonToolError(_RPC_INVALID_PARAMS, "offset must be an integer") from None
+    limit = max(1, min(limit, HALLWAY_MAX_LIMIT))
+    offset = max(0, offset)
+
+    sql = f"SELECT {_HALLWAY_COLUMNS} FROM mempalace_hallways"
+    params = []
+    if wing is not None:
+        sql += " WHERE wing = %s"
+        params.append(wing)
+    sql += " ORDER BY co_occurrence_count DESC, id"
+    # Fetch one extra row so "there are more" is a fact rather than a guess:
+    # a page that happens to be exactly full is otherwise indistinguishable
+    # from the end of the list, and a silently truncated answer reads as
+    # "that is all of them".
+    sql += " LIMIT %s OFFSET %s" if offset else " LIMIT %s"
+    params.append(limit + 1)
+    if offset:
+        params.append(offset)
+
+    from psycopg2 import errors as pg_errors
+    conn = connect_postgres()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = '5s'")
+                try:
+                    cur.execute(sql, params)
+                    rows = cur.fetchall()
+                except pg_errors.UndefinedTable:
+                    # The table only exists once mempalace#442's migration has
+                    # run. A bare [] here is indistinguishable from "this
+                    # palace has no hallways", which would send an operator
+                    # looking in entirely the wrong place.
+                    return {
+                        "hallways": [],
+                        "wing": wing,
+                        "limit": limit,
+                        "offset": offset,
+                        "truncated": False,
+                        "note": (
+                            "mempalace_hallways table does not exist yet; run "
+                            "python -m mempalace.migrate_hallways to import "
+                            "hallways.json, then set hallway_backend=postgres"
+                        ),
+                    }
+    finally:
+        conn.close()
+
+    truncated = len(rows) > limit
+    records = [_hallway_row_to_record(r) for r in rows[:limit]]
+    return {
+        "hallways": records,
+        "wing": wing,
+        "limit": limit,
+        "offset": offset,
+        "truncated": truncated,
+    }
+
+
 DAEMON_NATIVE_TOOLS = {
     "mempalace_rooms_list": fast_mcp_rooms_list,
     "mempalace_rooms_add": fast_mcp_rooms_add,
@@ -337,6 +461,7 @@ DAEMON_NATIVE_TOOLS = {
     "mempalace_rooms_remove": fast_mcp_rooms_remove,
     "mempalace_mined": fast_mcp_mined,
     "mempalace_wakeup": fast_mcp_wakeup,
+    "mempalace_list_hallways": fast_mcp_list_hallways,
 }
 
 
@@ -347,6 +472,28 @@ DAEMON_NATIVE_TOOLS = {
 # callable but invisible to discovery — consumers would have to hardcode
 # the names, which defeats the protocol.
 DAEMON_NATIVE_TOOL_DESCRIPTORS = [
+    {
+        "name": "mempalace_list_hallways",
+        "description": (
+            "List within-wing entity-to-entity hallways from the "
+            "mempalace_hallways table, strongest first. Bounded: pass wing "
+            "to scope the query (the filter is SQL, so a scoped call scans "
+            "only that wing), and limit/offset to page. `truncated` says "
+            "whether more rows exist beyond this page. Returns an empty "
+            "list with a note if the table has not been migrated yet."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "wing": {"type": "string", "description": "restrict to one wing"},
+                "limit": {
+                    "type": "integer",
+                    "description": f"page size (default {HALLWAY_DEFAULT_LIMIT}, max {HALLWAY_MAX_LIMIT})",
+                },
+                "offset": {"type": "integer", "description": "rows to skip"},
+            },
+        },
+    },
     {
         "name": "mempalace_rooms_list",
         "description": (
