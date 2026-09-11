@@ -55,9 +55,51 @@ def rerank_model_status(cache_dir=None, model=None):
             return False, f"cannot resolve FlashRank's cache dir ({type(exc).__name__})"
 
     model_dir = Path(cache_dir) / model
-    if model_dir.is_dir() and any(model_dir.iterdir()):
-        return True, ""
-    return False, (
-        f"rerank model {model!r} is not cached in {cache_dir} — running this "
-        "would download it, and this suite is network-free (daemon#273)"
-    )
+    if not model_dir.is_dir():
+        return False, (
+            f"rerank model {model!r} is not cached in {cache_dir} — running this "
+            "would download it, and this suite is network-free (daemon#273)"
+        )
+
+    missing = [name for name in _required_files(model) if not (model_dir / name).is_file()]
+    if missing:
+        # A directory that exists but is incomplete is the interrupted-download
+        # case: `_download_model_files` unzips in place, so a killed job or a
+        # full disk leaves a partial tree behind. "Any file present" counted
+        # that as cached, and the live test then failed on load instead of
+        # skipping — the same flake #273 removed, one step narrower (#278).
+        return False, (
+            f"rerank model {model!r} is cached but incomplete in {cache_dir} "
+            f"(missing {', '.join(sorted(missing))}) — an interrupted download; "
+            "delete the directory to refetch (daemon#278)"
+        )
+    return True, ""
+
+
+def _required_files(model):
+    """Every file FlashRank opens unconditionally when loading ``model``.
+
+    Read off its loader rather than guessed: ``Ranker.__init__`` builds an
+    ``InferenceSession`` on ``model_file_map[model_name]``, and
+    ``_get_tokenizer`` opens ``config.json``, ``tokenizer_config.json``,
+    ``special_tokens_map.json`` and ``tokenizer.json``. ``vocab.txt`` is
+    deliberately absent: that one is guarded by ``if vocab_file.exists()``,
+    so requiring it would refuse a complete model.
+    """
+    names = [
+        "config.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "tokenizer.json",
+    ]
+    try:
+        from flashrank.Config import model_file_map
+
+        weights = model_file_map.get(model)
+        if weights:
+            names.append(weights)
+    except Exception:
+        # Unknown layout: fall back to the tokenizer set rather than
+        # inventing a weights filename that would refuse a good cache.
+        pass
+    return names
