@@ -20,6 +20,7 @@ import hmac
 import json
 import logging
 import os
+import tempfile
 import sqlite3
 import sys
 import fcntl
@@ -769,13 +770,39 @@ def _prune_mined_state(state: dict) -> dict:
 
 
 def _save_mined_state(state: dict) -> None:
-    """Write the witnesses atomically; a failure is logged, never raised."""
+    """Write the witnesses atomically; a failure is logged, never raised.
+
+    The temp file is ``mkstemp``-named rather than a fixed ``<path>.tmp``
+    sibling (#275). Two writers sharing one temp name can truncate each
+    other's half-written JSON and then ``os.replace`` the wreckage into
+    place; a unique name per call makes that impossible for free.
+
+    Latent rather than live today, and verified before being called a fix:
+    the daemon runs as a single process (`python main.py`, no uvicorn
+    ``--workers``; ``PALACE_MAX_CONCURRENCY`` is an in-process semaphore),
+    and this function contains no ``await``, so two saves cannot interleave
+    inside one event loop. The exposure is a second process — a future
+    worker count above one, or a post-rebuild drain in a separate
+    interpreter. Worst case was a truncated file, which
+    :func:`_load_mined_state` already tolerates by treating it as "nothing
+    known" and re-mining, so this closes a narrow window rather than a leak.
+
+    A unique temp name brings one new obligation the fixed name did not
+    have: it must be removed when the write or the replace fails, or a
+    failing daemon litters the palace directory with them.
+    """
     path = _mined_state_path()
     try:
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(_prune_mined_state(state), f)
-        os.replace(tmp, path)
+        directory = os.path.dirname(path) or "."
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".mined-state-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(_prune_mined_state(state), f)
+            os.replace(tmp, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
     except OSError:
         _log.exception("drain-mine: could not persist mined-state at %s", path)
 
