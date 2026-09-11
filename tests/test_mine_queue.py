@@ -394,3 +394,229 @@ class TestMineStatusEndpoint(unittest.IsolatedAsyncioTestCase):
     async def test_empty_queue(self):
         out = await main.mine_status(x_api_key=None)
         self.assertEqual((out["queued"], out["processing"], out["next"]), (0, 0, []))
+
+
+class TestDrainBatchCapAndPriority(unittest.IsolatedAsyncioTestCase):
+    """The drain must not swallow the whole queue in one pass (daemon#260).
+
+    Measured 2026-09-10: after the 21:17 restart the drainer renamed the
+    entire pending file into ONE .processing batch -- 884 entries -- and
+    replayed it sequentially. Every /mine posted during that pass waited
+    hours, including the small memory-dir mines a live session depends on.
+
+    A captured production queue (142 entries, 2026-09-03) shows the mix the
+    ordering rule exists for:
+
+        70  ('convos',   jsonl transcript)
+        70  ('session',  jsonl transcript)
+         2  ('projects', memory dir)        <- the ones that were stuck
+
+    28 distinct (dir, mode) pairs across 142 lines, so dedup already
+    collapses the queue ~5:1; the cap is applied to the DEDUPED entries, or
+    a batch of 20 would be spent on duplicates of one transcript.
+    """
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._queue_path = os.path.join(self.tmp.name, "pending-mines.jsonl")
+        self._patches = [
+            patch.object(main, "_pending_mines_path", return_value=self._queue_path),
+            patch.object(main, "_translate_client_path", side_effect=lambda p: p),
+            # Every replayed target passes the mineability gate; this suite is
+            # about scheduling, not about which paths are mineable (L2 owns
+            # _mineable_path_problem).
+            patch.object(main, "_mineable_path_problem", return_value=None),
+        ]
+        for p in self._patches:
+            p.start()
+        self.spawned: list = []
+
+    async def asyncTearDown(self):
+        for p in self._patches:
+            p.stop()
+        self.tmp.cleanup()
+
+    def _ok_subprocess(self):
+        async def _fake(*args, **kwargs):
+            self.spawned.append(list(args))
+            proc = MagicMock()
+            proc.communicate = AsyncMock(return_value=(b"", b""))
+            proc.returncode = 0
+            return proc
+
+        return _fake
+
+    def _dirs_spawned(self) -> list:
+        # cmd = [bin, "mine", <dir>, "--mode", ...]
+        return [a[2] for a in self.spawned]
+
+    def _queue_dirs(self) -> list:
+        if not os.path.isfile(self._queue_path):
+            return []
+        out = []
+        with open(self._queue_path, encoding="utf-8") as f:
+            for ln in f:
+                if ln.strip():
+                    out.append(json.loads(ln)["payload"]["dir"])
+        return out
+
+    async def test_one_pass_takes_at_most_the_batch_cap(self):
+        for i in range(25):
+            await main._enqueue_pending_mine(
+                {"dir": f"/t/{i}.jsonl", "wing": "w", "mode": "convos"}
+            )
+
+        with patch.dict(os.environ, {"MEMPALACE_DRAIN_BATCH": "20"}, clear=False):
+            with patch("asyncio.create_subprocess_exec", side_effect=self._ok_subprocess()):
+                count = await main._drain_pending_mines()
+
+        self.assertEqual(count, 20)
+        self.assertEqual(len(self.spawned), 20)
+
+    async def test_the_remainder_stays_queued_rather_than_being_dropped(self):
+        for i in range(25):
+            await main._enqueue_pending_mine(
+                {"dir": f"/t/{i}.jsonl", "wing": "w", "mode": "convos"}
+            )
+
+        with patch.dict(os.environ, {"MEMPALACE_DRAIN_BATCH": "20"}, clear=False):
+            with patch("asyncio.create_subprocess_exec", side_effect=self._ok_subprocess()):
+                await main._drain_pending_mines()
+
+        left = self._queue_dirs()
+        self.assertEqual(len(left), 5, "the 5 untaken entries must survive the pass")
+        self.assertEqual(left, [f"/t/{i}.jsonl" for i in range(20, 25)])
+
+    async def test_a_post_arriving_after_the_pass_is_not_stuck_behind_the_backlog(self):
+        """The whole point: a new mine waits one pass, not the whole queue."""
+        for i in range(25):
+            await main._enqueue_pending_mine(
+                {"dir": f"/t/{i}.jsonl", "wing": "w", "mode": "convos"}
+            )
+
+        with patch.dict(os.environ, {"MEMPALACE_DRAIN_BATCH": "20"}, clear=False):
+            with patch("asyncio.create_subprocess_exec", side_effect=self._ok_subprocess()):
+                await main._drain_pending_mines()
+            # A live session posts a small memory-dir mine now.
+            await main._enqueue_pending_mine(
+                {"dir": "/proj/memory", "wing": "w", "mode": "projects"}
+            )
+            self.spawned.clear()
+            with patch("asyncio.create_subprocess_exec", side_effect=self._ok_subprocess()):
+                await main._drain_pending_mines()
+
+        self.assertIn("/proj/memory", self._dirs_spawned())
+        self.assertEqual(
+            self._dirs_spawned()[0],
+            "/proj/memory",
+            "a small mine posted after the backlog must not queue behind its remainder",
+        )
+
+    async def test_projects_mines_run_before_transcript_remines(self):
+        await main._enqueue_pending_mine({"dir": "/t/a.jsonl", "wing": "w", "mode": "convos"})
+        await main._enqueue_pending_mine({"dir": "/t/b.jsonl", "wing": "w", "mode": "session"})
+        await main._enqueue_pending_mine({"dir": "/p/memory", "wing": "w", "mode": "projects"})
+        await main._enqueue_pending_mine({"dir": "/t/c.jsonl", "wing": "w", "mode": "convos"})
+
+        with patch("asyncio.create_subprocess_exec", side_effect=self._ok_subprocess()):
+            await main._drain_pending_mines()
+
+        self.assertEqual(self._dirs_spawned()[0], "/p/memory")
+        self.assertEqual(len(self._dirs_spawned()), 4, "ordering only; nothing is dropped")
+
+    async def test_order_is_stable_within_a_priority_class(self):
+        for name in ("a", "b", "c"):
+            await main._enqueue_pending_mine(
+                {"dir": f"/t/{name}.jsonl", "wing": "w", "mode": "convos"}
+            )
+
+        with patch("asyncio.create_subprocess_exec", side_effect=self._ok_subprocess()):
+            await main._drain_pending_mines()
+
+        self.assertEqual(self._dirs_spawned(), ["/t/a.jsonl", "/t/b.jsonl", "/t/c.jsonl"])
+
+    async def test_cap_counts_deduped_targets_not_raw_lines(self):
+        """142 production lines were 28 targets; a raw-line cap wastes the pass."""
+        for _ in range(30):
+            await main._enqueue_pending_mine(
+                {"dir": "/t/same.jsonl", "wing": "w", "mode": "convos"}
+            )
+        await main._enqueue_pending_mine({"dir": "/t/other.jsonl", "wing": "w", "mode": "convos"})
+
+        with patch.dict(os.environ, {"MEMPALACE_DRAIN_BATCH": "2"}, clear=False):
+            with patch("asyncio.create_subprocess_exec", side_effect=self._ok_subprocess()):
+                count = await main._drain_pending_mines()
+
+        self.assertEqual(count, 2)
+        self.assertEqual(sorted(self._dirs_spawned()), ["/t/other.jsonl", "/t/same.jsonl"])
+        self.assertEqual(self._queue_dirs(), [], "nothing left: 31 lines were 2 targets")
+
+    async def test_batch_size_is_configurable_and_survives_a_bad_value(self):
+        for i in range(6):
+            await main._enqueue_pending_mine(
+                {"dir": f"/t/{i}.jsonl", "wing": "w", "mode": "convos"}
+            )
+
+        with patch.dict(os.environ, {"MEMPALACE_DRAIN_BATCH": "3"}, clear=False):
+            with patch("asyncio.create_subprocess_exec", side_effect=self._ok_subprocess()):
+                self.assertEqual(await main._drain_pending_mines(), 3)
+
+        self.spawned.clear()
+        with patch.dict(os.environ, {"MEMPALACE_DRAIN_BATCH": "not-a-number"}, clear=False):
+            with patch("asyncio.create_subprocess_exec", side_effect=self._ok_subprocess()):
+                # Falls back to the default cap, which is > the 3 that remain.
+                self.assertEqual(await main._drain_pending_mines(), 3)
+
+    async def test_an_absurd_batch_size_is_clamped_not_honoured(self):
+        """The override must not be a way to silently remove the cap.
+
+        A number large enough to exceed any real queue restores exactly the
+        whole-file-in-one-pass behaviour the cap exists to prevent, and it
+        parses cleanly, so the non-numeric guard never sees it.
+        """
+        for i in range(4):
+            await main._enqueue_pending_mine(
+                {"dir": f"/t/{i}.jsonl", "wing": "w", "mode": "convos"}
+            )
+
+        with patch.dict(
+            os.environ, {"MEMPALACE_DRAIN_BATCH": "99999999999999999999"}, clear=False
+        ):
+            self.assertEqual(main._drain_batch_size(), main._DRAIN_BATCH_MAX)
+
+        with patch.dict(os.environ, {"MEMPALACE_DRAIN_BATCH": "501"}, clear=False):
+            self.assertEqual(main._drain_batch_size(), main._DRAIN_BATCH_MAX)
+
+        # The ceiling is still a working cap, not a disguised "unlimited".
+        self.assertLess(main._DRAIN_BATCH_MAX, 99999999999999999999)
+
+    async def test_a_repeatedly_deferred_entry_is_promoted(self):
+        """Priority must not become starvation.
+
+        Today's mix makes this unlikely -- the high-priority class was 2 of
+        142 entries -- but "unlikely given the current mix" is a premise that
+        expires, and an unbounded deferral is not something to leave to it.
+        """
+        await main._enqueue_pending_mine({"dir": "/t/old.jsonl", "wing": "w", "mode": "convos"})
+
+        with patch.dict(os.environ, {"MEMPALACE_DRAIN_BATCH": "1"}, clear=False):
+            for i in range(main._DRAIN_PRIORITY_ESCAPE_DEFERRALS):
+                # Each pass, a fresh high-priority mine arrives and wins the
+                # single slot -- until the deferred transcript is promoted.
+                await main._enqueue_pending_mine(
+                    {"dir": f"/p/mem{i}", "wing": "w", "mode": "projects"}
+                )
+                self.spawned.clear()
+                with patch("asyncio.create_subprocess_exec", side_effect=self._ok_subprocess()):
+                    await main._drain_pending_mines()
+
+            await main._enqueue_pending_mine({"dir": "/p/memN", "wing": "w", "mode": "projects"})
+            self.spawned.clear()
+            with patch("asyncio.create_subprocess_exec", side_effect=self._ok_subprocess()):
+                await main._drain_pending_mines()
+
+        self.assertEqual(
+            self._dirs_spawned(),
+            ["/t/old.jsonl"],
+            "after enough deferrals the transcript outranks a fresh projects mine",
+        )

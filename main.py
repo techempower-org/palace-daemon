@@ -543,6 +543,101 @@ _LOCK_HELD_MARKER = b"is held by PID"
 _LOCK_REQUEUE_MAX = 30  # ~ up to 30 * delay of waiting before giving up
 _LOCK_REQUEUE_DELAY_S = 20
 
+# How many deduped targets one drain pass may replay before returning.
+#
+# The drain used to rename the WHOLE pending file into a single .processing
+# batch and replay it sequentially: measured 2026-09-10, 884 entries in one
+# pass after a restart, and every /mine posted during it waited hours. The
+# cap bounds a pass so entries posted meanwhile get a turn on the next one.
+#
+# Applied AFTER dedup, deliberately. A captured production queue (142 lines,
+# 2026-09-03) held 28 distinct (dir, wing, mode) targets — a cap counting raw
+# lines would have spent the batch on 20 copies of one transcript.
+_DRAIN_BATCH_DEFAULT = 20
+
+# Largest batch an operator may ask for. Without a ceiling the override is
+# a way to silently REMOVE the cap — `MEMPALACE_DRAIN_BATCH=99999999999999`
+# parses fine, exceeds any real queue, and restores exactly the
+# whole-file-in-one-pass behaviour this function exists to prevent. A
+# too-large value is clamped rather than rejected: the operator asked for
+# "as many as possible", and that is the biggest answer that is still a cap.
+_DRAIN_BATCH_MAX = 500
+
+
+def _drain_batch_size() -> int:
+    """Deduped targets per drain pass; ``MEMPALACE_DRAIN_BATCH`` overrides.
+
+    Read per call rather than at import so an operator can retune a busy
+    daemon without a restart (the value is only consulted between passes).
+    A missing, unparseable or non-positive value falls back to the default —
+    a typo must not turn the cap off — and anything above
+    ``_DRAIN_BATCH_MAX`` is clamped to it, because an unbounded override is
+    the same failure wearing a plausible number.
+    """
+    raw = os.environ.get("MEMPALACE_DRAIN_BATCH", "").strip()
+    if not raw:
+        return _DRAIN_BATCH_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        _log.warning("drain-mine: ignoring non-numeric MEMPALACE_DRAIN_BATCH=%r", raw)
+        return _DRAIN_BATCH_DEFAULT
+    if value <= 0:
+        _log.warning("drain-mine: ignoring non-positive MEMPALACE_DRAIN_BATCH=%r", raw)
+        return _DRAIN_BATCH_DEFAULT
+    if value > _DRAIN_BATCH_MAX:
+        _log.warning(
+            "drain-mine: clamping MEMPALACE_DRAIN_BATCH=%r to the %d ceiling",
+            raw,
+            _DRAIN_BATCH_MAX,
+        )
+        return _DRAIN_BATCH_MAX
+    return value
+
+
+# Modes whose mines are small: a memory dir or a single document, seconds of
+# work. Everything else here is a whole-transcript re-mine, which is the long
+# one. Ordering by mode rather than by path shape because a `.jsonl`
+# transcript is also "a single file" — the distinction that matters is what
+# the mine costs, and that tracks the mode.
+_DRAIN_SMALL_MODES = frozenset({"projects"})
+
+# A low-priority entry deferred this many passes outranks everything.
+#
+# Priority without a bound is starvation. Today's mix makes that unlikely —
+# the small class was 2 of 142 entries in the captured queue — but "unlikely
+# given the current mix" is a premise that expires quietly, and an unbounded
+# deferral is not a thing to leave resting on it.
+_DRAIN_PRIORITY_ESCAPE_DEFERRALS = 5
+
+
+def _drain_entry_priority(entry: dict) -> int:
+    """Sort key for one queue entry; lower runs first."""
+    if int(entry.get("drain_deferrals", 0) or 0) >= _DRAIN_PRIORITY_ESCAPE_DEFERRALS:
+        return 0
+    payload = entry.get("payload") or {}
+    return 1 if payload.get("mode", "convos") in _DRAIN_SMALL_MODES else 2
+
+
+def _split_drain_batch(entries: list) -> tuple:
+    """Split ``[(line, entry), ...]`` into (this pass, deferred).
+
+    The batch comes back in priority order — that IS the replay order — and
+    the deferred remainder in its original file order, so appending it back
+    keeps older entries ahead of anything posted since.
+    """
+    cap = _drain_batch_size()
+    order = sorted(
+        range(len(entries)),
+        key=lambda i: (_drain_entry_priority(entries[i][1]), i),
+    )
+    batch = [entries[i] for i in order[:cap]]
+    if len(entries) <= cap:
+        return batch, []
+    taken = set(order[:cap])
+    deferred = [entries[i] for i in range(len(entries)) if i not in taken]
+    return batch, deferred
+
 
 def _recover_orphaned_processing(path: str, proc_path: str) -> int:
     """Fold a leftover ``.processing`` batch back into the live queue.
@@ -552,6 +647,13 @@ def _recover_orphaned_processing(path: str, proc_path: str) -> int:
     queued hook mine in that batch would be stranded (observed 2026-09-03:
     a 202-queued transcript sat in ``.processing`` across a restart).
     Returns the number of lines recovered.
+
+    Exact only once the capped drain has finished BOTH of its writes: a
+    crash between appending the deferred remainder to the live queue and
+    rewriting ``.processing`` down to the in-flight batch leaves the
+    deferred entries in both files, and recovery folds back the copies that
+    are already queued. The next pass's dedup collapses them — duplication,
+    never loss, which is the direction this has to fail in.
     """
     if not os.path.isfile(proc_path):
         return 0
@@ -598,21 +700,53 @@ async def _drain_pending_mines() -> int:
         # is the goal, not running it N times. A storm of hook fires during
         # rebuild may have queued the same target dozens of times; one
         # successful drain replay covers them all.
-        seen: set = set()
+        seen: dict = {}
         unique_entries: list = []
         for line in reversed(lines):  # keep newest of each (dir, wing, mode)
             try:
                 entry = json.loads(line)
                 payload = entry.get("payload", {})
                 key = (payload.get("dir"), payload.get("wing"), payload.get("mode", "convos"))
+                deferrals = int(entry.get("drain_deferrals", 0) or 0)
                 if key in seen:
+                    # Keep the newest entry but the HIGHEST deferral count of
+                    # the group: a target that keeps being re-posted while it
+                    # keeps being deferred is exactly the one starving, and
+                    # taking the newest copy's count would reset its claim to
+                    # the escape hatch on every repost.
+                    kept = seen[key]
+                    if deferrals > int(kept.get("drain_deferrals", 0) or 0):
+                        kept["drain_deferrals"] = deferrals
                     continue
-                seen.add(key)
+                seen[key] = entry
                 unique_entries.append((line, entry))
             except json.JSONDecodeError:
                 failed_lines.append(line)
         # Replay in original order
         unique_entries.reverse()
+
+        # Cap the pass and order it, then hand the remainder straight back to
+        # the live queue so /mine posts landing during this pass share the
+        # next one instead of waiting out the whole backlog (daemon#260).
+        unique_entries, deferred_entries = _split_drain_batch(unique_entries)
+        if deferred_entries:
+            with open(path, "a", encoding="utf-8") as f:
+                for _line, deferred_entry in deferred_entries:
+                    carried = dict(deferred_entry)
+                    carried["drain_deferrals"] = int(carried.get("drain_deferrals", 0) or 0) + 1
+                    f.write(json.dumps(carried) + "\n")
+            # Leave .processing describing only what this pass owns, so a
+            # crash mid-pass recovers the in-flight batch and nothing else
+            # (_recover_orphaned_processing folds it back).
+            with open(proc_path, "w", encoding="utf-8") as f:
+                for batch_line, _entry in unique_entries:
+                    f.write(batch_line if batch_line.endswith("\n") else batch_line + "\n")
+            _log.info(
+                "drain-mine: replaying %d of %d queued target(s); %d deferred to the next pass",
+                len(unique_entries),
+                len(unique_entries) + len(deferred_entries),
+                len(deferred_entries),
+            )
         # Module-level _MINE_VALID_* sets, shared with the live /mine
         # endpoint — apply them on replay too so a queue entry can't smuggle
         # through a value the live endpoint would reject, and the two paths
