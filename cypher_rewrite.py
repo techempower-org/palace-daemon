@@ -24,6 +24,24 @@ Note the defect is not aggregate-specific: a plain non-aggregate alias
 fails identically. ``WITH`` projections are affected exactly like
 ``RETURN`` ones, so both are rewritten.
 
+One case is deliberately NOT rewritten: an alias whose name is also a
+variable bound before the projection. There AGE resolves ORDER BY to the
+bound variable and the query already works, so rewriting would silently
+change the sort key of something that is not broken. Measured the same
+day, with input order, a-order and b-order all made distinguishable::
+
+    UNWIND [[2,20],[1,30],[3,10]] AS p WITH p[0] AS a, p[1] AS b ...
+      RETURN b AS out                -> 20,30,10   (natural order)
+      RETURN b AS out ORDER BY a     -> 30,20,10   (by the bound a)
+      RETURN b AS out ORDER BY b     -> 10,20,30   (by b)
+      RETURN b AS a   ORDER BY a     -> 30,20,10   <- binds to the VARIABLE
+      RETURN b AS a   ORDER BY (b)   -> 10,20,30   <- a rewrite would change it
+
+Note this makes the daemon match AGE rather than openCypher, under which
+the projection alias would win. Matching the engine is the right promise
+for a bugfix: the rewrite only ever turns an error into a success, never
+a success into a different success.
+
 The rewrite is deliberately conservative. Anything it cannot parse with
 confidence is returned untouched — a caller-visible 400 from AGE is a far
 better outcome than silently mangling someone's query.
@@ -75,19 +93,27 @@ _ORDER_BY_KEYWORDS = frozenset(
 )
 
 
+# Words that can never be a variable name, for the binding scan below.
+_RESERVED = _CLAUSE_STARTERS | _ORDER_BY_KEYWORDS | frozenset({"AS", "BY", "ON"})
+
+
 class _Unparseable(Exception):
     """Raised when the source cannot be tokenised into balanced clauses."""
 
 
 class _Tok:
-    __slots__ = ("depth", "end", "kind", "start", "text")
+    __slots__ = ("depth", "encloser", "end", "kind", "start", "text")
 
-    def __init__(self, kind, text, start, end, depth):
+    def __init__(self, kind, text, start, end, depth, encloser=None):
         self.kind = kind
         self.text = text
         self.start = start
         self.end = end
         self.depth = depth
+        # The bracket this token sits directly inside ("(", "[", "{" or
+        # None). Distinguishes a map key `{n: 1}` from a pattern variable
+        # `(n:Label)` -- both are an ident followed by ":".
+        self.encloser = encloser
 
     @property
     def upper(self) -> str:
@@ -102,6 +128,7 @@ def _tokenize(src: str) -> list:
     """
     toks = []
     depth = 0
+    stack = []
     for m in _TOKEN_RE.finditer(src):
         kind = m.lastgroup
         if kind in ("ws", "comment"):
@@ -109,12 +136,14 @@ def _tokenize(src: str) -> list:
         text = m.group()
         if kind == "punct" and text in _CLOSERS:
             depth -= 1
-            if depth < 0:
+            if depth < 0 or not stack or _OPENERS[stack[-1]] != text:
                 raise _Unparseable(f"unbalanced {text!r}")
-        toks.append(_Tok(kind, text, m.start(), m.end(), depth))
+            stack.pop()
+        toks.append(_Tok(kind, text, m.start(), m.end(), depth, stack[-1] if stack else None))
         if kind == "punct" and text in _OPENERS:
             depth += 1
-    if depth != 0:
+            stack.append(text)
+    if depth != 0 or stack:
         raise _Unparseable("unbalanced brackets")
     return toks
 
@@ -124,8 +153,8 @@ def _is_clause_boundary(tok: _Tok) -> bool:
 
 
 def _iter_projection_order_by(toks: list):
-    """Yield ``(projection_tokens, order_by_tokens)`` for each RETURN/WITH
-    that is immediately followed by its own ORDER BY clause."""
+    """Yield ``(keyword_index, projection_tokens, order_by_tokens)`` for each
+    RETURN/WITH that is immediately followed by its own ORDER BY clause."""
     n = len(toks)
     for i, tok in enumerate(toks):
         if tok.depth != 0 or tok.kind != "ident" or tok.upper not in _PROJECTION_KEYWORDS:
@@ -141,7 +170,7 @@ def _iter_projection_order_by(toks: list):
         projection = toks[i + 1 : j]
         order_by = toks[j + 2 : k]
         if projection and order_by:
-            yield projection, order_by
+            yield i, projection, order_by
 
 
 def _split_top_level(toks: list) -> list:
@@ -182,6 +211,48 @@ def _alias_map(projection: list, src: str) -> dict:
     return aliases
 
 
+def _bound_identifiers(toks: list, upto: int) -> set:
+    """Names that may already be bound as variables before token ``upto``.
+
+    A conservative over-approximation — when in doubt a name is treated as
+    bound, which costs a rewrite rather than risking a changed sort key.
+
+    Four things that look like identifiers never bind, and are excluded so
+    the common shapes stay rewritable: property keys (``x.n``), labels and
+    relationship types (``:n``), function names (``n(...)``), and map-literal
+    keys (``{n: 1}``). Without those exclusions
+    `MATCH (x) WHERE x.n > 1 RETURN x.n AS n ORDER BY n` would be skipped
+    over a property key that binds nothing.
+
+    The map-key exclusion is why tokens carry their enclosing bracket: a map
+    key and a pattern variable are both "ident followed by ``:``", and only
+    the pattern variable binds.
+    """
+    names = set()
+    for pos in range(min(upto, len(toks))):
+        tok = toks[pos]
+        if tok.kind != "ident" or tok.upper in _RESERVED:
+            continue
+        prev = toks[pos - 1] if pos > 0 else None
+        nxt = toks[pos + 1] if pos + 1 < len(toks) else None
+        if prev is not None and prev.kind == "punct" and prev.text in (".", ":"):
+            continue
+        if nxt is not None and nxt.kind == "punct" and nxt.text == "(":
+            continue
+        # A key inside a map literal binds nothing. Only exclude it when the
+        # enclosing bracket is "{" -- in a pattern, `(n:Label)` looks the
+        # same but `n` IS a binding.
+        if (
+            nxt is not None
+            and nxt.kind == "punct"
+            and nxt.text == ":"
+            and tok.encloser == "{"
+        ):
+            continue
+        names.add(tok.text)
+    return names
+
+
 def _substitutions(order_by: list, aliases: dict) -> list:
     """Locate alias references inside an ORDER BY body.
 
@@ -219,8 +290,14 @@ def rewrite_order_by_aliases(cypher):
     try:
         toks = _tokenize(cypher)
         subs = []
-        for projection, order_by in _iter_projection_order_by(toks):
+        for kw_index, projection, order_by in _iter_projection_order_by(toks):
             aliases = _alias_map(projection, cypher)
+            if not aliases:
+                continue
+            # An alias that shadows an already-bound variable resolves to
+            # that variable in AGE and works today — leave it alone.
+            bound = _bound_identifiers(toks, kw_index)
+            aliases = {a: e for a, e in aliases.items() if a not in bound}
             if aliases:
                 subs.extend(_substitutions(order_by, aliases))
     except Exception as e:

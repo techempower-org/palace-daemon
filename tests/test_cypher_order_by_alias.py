@@ -38,6 +38,15 @@ _ROOT = os.path.dirname(_HERE)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+# Pin psycopg2 + its dynamically-populated errors module into sys.modules
+# BEFORE any test takes a patch.dict(sys.modules, ...) snapshot. patch.dict
+# restores by clear-then-update, so a module first imported inside the block
+# is purged on exit -- and re-importing the purged psycopg2 C extension
+# yields an errors module without its sqlstate classes, so the *second*
+# endpoint test would fail with AttributeError: ReadOnlySqlTransaction.
+# tests/test_cypher_read_only.py pins it the same way.
+import psycopg2.errors  # noqa: E402,F401
+
 import main  # noqa: E402
 from cypher_rewrite import rewrite_order_by_aliases  # noqa: E402
 
@@ -149,6 +158,96 @@ class TestOrderByAliasRewrite(unittest.TestCase):
 
     def test_asc_desc_keywords_are_not_treated_as_identifiers(self):
         self.assertUnchanged("MATCH (n) RETURN n.a AS desc ORDER BY n.a DESC")
+
+    # ── alias shadowing a bound variable: must NOT be rewritten ───────
+    #
+    # When the alias name is also a variable bound before the projection,
+    # AGE resolves ORDER BY to the BOUND VARIABLE and the query already
+    # works. Rewriting would silently change the sort key. Measured on
+    # production AGE 2026-09-10 with three distinguishable orderings:
+    #
+    #   UNWIND [[2,20],[1,30],[3,10]] AS p WITH p[0] AS a, p[1] AS b ...
+    #     no ORDER BY          -> 20,30,10   (natural)
+    #     ORDER BY a           -> 30,20,10   (by bound a)
+    #     ORDER BY b           -> 10,20,30   (by b)
+    #     RETURN b AS a ORDER BY a -> 30,20,10   <- binds to the VARIABLE
+    #     RETURN b AS a ORDER BY (b) -> 10,20,30 <- what a rewrite would do
+    #
+    # So the rewrite is skipped for any alias whose name is already bound.
+
+    def test_alias_shadowing_bound_match_variable_is_not_rewritten(self):
+        self.assertUnchanged("MATCH (a)-->(b) RETURN b AS a ORDER BY a")
+
+    def test_alias_shadowing_bound_unwind_variable_is_not_rewritten(self):
+        self.assertUnchanged(
+            "UNWIND [[2,20],[1,30],[3,10]] AS p WITH p[0] AS a, p[1] AS b "
+            "RETURN b AS a ORDER BY a"
+        )
+
+    def test_alias_shadowing_own_node_variable_is_not_rewritten(self):
+        self.assertUnchanged("MATCH (n) RETURN n.name AS n ORDER BY n")
+
+    def test_only_the_shadowed_alias_is_skipped(self):
+        """A shadowed alias must not disable the rewrite for its siblings."""
+        self.assertRewrites(
+            "MATCH (n) RETURN n.a AS n, count(*) AS c ORDER BY n, c DESC",
+            "MATCH (n) RETURN n.a AS n, count(*) AS c ORDER BY n, (count(*)) DESC",
+        )
+
+    # ── near-misses that must NOT be mistaken for a bound variable ────
+
+    def test_property_key_matching_alias_does_not_block_rewrite(self):
+        """``x.n`` before the projection is a property key, not a binding."""
+        self.assertRewrites(
+            "MATCH (x) WHERE x.n > 1 RETURN x.n AS n ORDER BY n",
+            "MATCH (x) WHERE x.n > 1 RETURN x.n AS n ORDER BY (x.n)",
+        )
+
+    def test_label_matching_alias_does_not_block_rewrite(self):
+        """A label after ':' is not a binding."""
+        self.assertRewrites(
+            "MATCH (x:total) RETURN count(*) AS total ORDER BY total DESC",
+            "MATCH (x:total) RETURN count(*) AS total ORDER BY (count(*)) DESC",
+        )
+
+    def test_relationship_type_matching_alias_does_not_block_rewrite(self):
+        self.assertRewrites(
+            "MATCH ()-[r:n]->() RETURN r.x AS n ORDER BY n",
+            "MATCH ()-[r:n]->() RETURN r.x AS n ORDER BY (r.x)",
+        )
+
+    def test_map_literal_key_matching_alias_does_not_block_rewrite(self):
+        """``{n: 3}`` is a map key, not a binding — found by probing the
+        guard against live AGE, where this shape was skipped."""
+        self.assertRewrites(
+            "UNWIND [{n:3},{n:1}] AS x RETURN x.n AS n ORDER BY n DESC",
+            "UNWIND [{n:3},{n:1}] AS x RETURN x.n AS n ORDER BY (x.n) DESC",
+        )
+
+    def test_pattern_variable_before_a_label_still_counts_as_bound(self):
+        """The mirror of the above: ``(n:Label)`` looks identical to a map
+        key but ``n`` IS bound, so the rewrite must still be skipped."""
+        self.assertUnchanged("MATCH (n:Person) RETURN n.name AS n ORDER BY n")
+
+    def test_mismatched_bracket_types_are_rejected(self):
+        src = "MATCH (n] RETURN n.a AS a ORDER BY a"
+        self.assertEqual(rewrite_order_by_aliases(src), src)
+
+    def test_function_name_matching_alias_does_not_block_rewrite(self):
+        """``size(...)`` before the projection is a call, not a binding."""
+        self.assertRewrites(
+            "MATCH (x) WHERE size(x.l) > 1 RETURN x.a AS size ORDER BY size",
+            "MATCH (x) WHERE size(x.l) > 1 RETURN x.a AS size ORDER BY (x.a)",
+        )
+
+    def test_issue_209_query_is_still_rewritten_despite_the_guard(self):
+        """The guard must not regress the case the issue is actually about."""
+        self.assertRewrites(
+            "MATCH ()-[r:RELATION]->() RETURN r.relation_type AS rt, "
+            "count(*) AS n ORDER BY n DESC",
+            "MATCH ()-[r:RELATION]->() RETURN r.relation_type AS rt, "
+            "count(*) AS n ORDER BY (count(*)) DESC",
+        )
 
     # ── robustness: never raise, never mangle ─────────────────────────
     def test_unbalanced_input_returns_original(self):
