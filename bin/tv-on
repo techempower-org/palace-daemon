@@ -1,0 +1,80 @@
+#!/bin/bash
+# Bring the TV up on demand, in one command, without background polling.
+#
+# What we learned on 0lympus (2026-07-22): the active DP->HDMI adapter is TV-powered,
+# so with the TV off DP-1 reads disconnected; turning the TV on sends NO hotplug event
+# the box acts on (drm_kms_helper.poll=0, by design, to prevent the poll-hog freezes).
+# A raw `echo detect` marks the connector connected but GNOME/mutter ignores it. The
+# thing that actually lights the TV is GDM re-enumerating outputs. So tv-on does both:
+#   1. force a single DP-1 probe (safe, one-shot — not the poll timer)
+#   2. if the TV is present but not yet driven, restart GDM so mutter enables it
+#
+# Guard: if someone is logged into a LOCAL graphical session on the physical seat,
+# restarting GDM would log them out, so tv-on refuses unless you pass --force.
+# SSH and xrdp sessions are separate and never affected.
+set -euo pipefail
+
+FORCE=0
+for a in "$@"; do
+  case "$a" in
+    -h|--help)
+      cat <<'EOF'
+tv-on — bring the TV up when you've powered it on. One command.
+
+  tv-on            detect the TV and, if needed, have GDM light it up
+  tv-on --force    do it even if a local session is active (it will be logged out)
+  tv-on -h         this help
+
+Normal routine: turn the TV on, run `tv-on`, wait a few seconds for the login
+screen. The adapter gives no hotplug signal, so this is expected each time the
+TV has been off for a while. `tv-off` forces the output off (rarely needed).
+Under the hood it uses the root helper `tv-detect`; you never call that directly.
+EOF
+      exit 0 ;;
+    --force) FORCE=1 ;;
+    *) echo "tv-on: unknown option '$a' (try -h)" >&2; exit 2 ;;
+  esac
+done
+
+CONN=$(ls -d /sys/class/drm/card*-DP-1 2>/dev/null | head -1)   # card0 -> card1 on kernel 7.0
+
+# 1. One-shot probe (cheap pre-check; also refreshes kernel state)
+sudo /home/radu/bin/tv-detect detect
+sleep 1
+STATUS=$(cat "$CONN/status" 2>/dev/null || echo unknown)
+EDID=$(wc -c < "$CONN/edid" 2>/dev/null || echo 0)
+
+if [[ "$STATUS" != "connected" ]]; then
+  echo "📺 DP-1: $STATUS (EDID=${EDID}B) — no TV detected. Is it powered on? Nothing to do."
+  exit 0
+fi
+
+# Already being driven? Then a picture is up; don't bounce anything.
+if [[ "$(cat "$CONN/enabled" 2>/dev/null)" == "enabled" ]]; then
+  echo "📺 DP-1: connected & already active (EDID=${EDID}B). Picture should be up."
+  exit 0
+fi
+
+# 2. Detected but not driven → GDM must re-enumerate. Guard against active local session.
+active_local=""
+for s in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do
+  props=$(loginctl show-session "$s" -p Seat -p Class -p State 2>/dev/null)
+  if grep -q '^Seat=seat0$' <<<"$props" && grep -q '^Class=user$' <<<"$props" && grep -q '^State=active$' <<<"$props"; then
+    active_local=$s
+  fi
+done
+if [[ -n "$active_local" && "$FORCE" -ne 1 ]]; then
+  echo "📺 DP-1 detected but not lit, and a LOCAL session ($active_local) is active on the TV's seat."
+  echo "   Re-enumerating would log it out. If that's fine, run:  tv-on --force"
+  exit 1
+fi
+
+echo "📺 TV detected (EDID=${EDID}B). Re-enumerating outputs via GDM…"
+sudo systemctl restart gdm3
+sleep 6
+EN=$(cat "$CONN/enabled" 2>/dev/null || echo unknown)
+if [[ "$EN" == "enabled" ]]; then
+  echo "✅ DP-1 now active — the login screen should be on the TV."
+else
+  echo "⚠️  DP-1 still enabled=$EN after GDM restart. Re-check the TV/cable and try 'tv-on' again."
+fi

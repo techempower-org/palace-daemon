@@ -1,0 +1,19 @@
+#!/bin/bash
+# Force the DP-1 output off. Run BEFORE powering the TV off (see TV-NOTES.md, 2026-09-16).
+# Reverse with `tv-on`, which re-runs normal detection.
+set -euo pipefail
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+tv-off — force the DP-1 output off. RUN THIS BEFORE POWERING THE TV OFF.
+
+2026-09-16: powering the TV off while DP-1 is still driven froze the box
+(link drop -> hotplug probe on a dying link -> hard hang, watchdog defeated).
+tv-off forces the port off first so the link drop is a no-op. The stick
+long-press does the same (it toggles: lit -> off, dark -> on). Undo with tv-on.
+EOF
+  exit 0
+fi
+
+sudo /home/radu/bin/tv-detect off
+echo "📴 DP-1 forced off. Run 'tv-on' to bring it back."

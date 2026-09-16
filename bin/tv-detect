@@ -1,0 +1,18 @@
+#!/bin/bash
+# On-demand DP-1 connector re-detect for 0lympus (TV-as-monitor).
+#
+# Background DRM polling is disabled system-wide (drm_kms_helper.poll=0) because the
+# i915 poll workers hog the CPU probing the ports and wedge the box (watchdog reset).
+# This performs a SINGLE, on-demand connector probe instead of a forever-timer, so it
+# carries none of that freeze risk. GNOME/mutter enables the output on the resulting
+# uevent. Runs as root (writing the sysfs status node requires it); invoke via `tv-on`.
+#
+# Usage: tv-detect [detect|off]   (default: detect)
+set -euo pipefail
+CONN=$(ls -d /sys/class/drm/card*-DP-1 2>/dev/null | head -1)/status   # card index varies by kernel (card0 -> card1 on 7.0)
+[[ -e "$CONN" ]] || { echo "tv-detect: no DP-1 connector under /sys/class/drm" >&2; exit 1; }
+ACTION="${1:-detect}"
+case "$ACTION" in
+  detect|off) printf '%s\n' "$ACTION" > "$CONN" ;;
+  *) echo "usage: tv-detect [detect|off]" >&2; exit 2 ;;
+esac
