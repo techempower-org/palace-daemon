@@ -20,8 +20,15 @@ attribute writes don't propagate through re-exports.
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
+
+# Same channel main.py and the other submodules log through
+# (palace-daemon.novelty / .watcher / .rerank). The root logger is not
+# it: a record emitted there bypasses the daemon's handlers and
+# formatter, so it never reaches the stream an operator greps.
+_log = logging.getLogger("palace-daemon.rooms")
 
 
 def normalize_wing_slug(s: str) -> str:
@@ -138,8 +145,12 @@ def _read_present_rooms() -> "set[str] | None":
         # Surface it, same rule as canonical_rooms (#157: a silent except
         # hides bugs for weeks) — but NOT the same fallback. ``None`` means
         # "cannot tell", and the caller must not refuse on that.
-        import logging
-        logging.warning("present_rooms: lookup failed, room filters unvalidated: %s", e)
+        #
+        # This is the ONLY signal that room-filter validation has silently
+        # stopped validating, so it has to land in the daemon's own log
+        # stream rather than on the root logger, whose records bypass the
+        # daemon's handlers and formatter entirely.
+        _log.warning("present_rooms: lookup failed, room filters unvalidated: %s", e)
         return None
 
 
