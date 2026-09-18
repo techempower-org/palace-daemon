@@ -2,6 +2,89 @@
 
 ## Unreleased
 
+### Fixed — *#293: drain priority was per-pass, so a small mine waited a full pass*
+
+#261 sorts `projects`-mode entries first, but only when a batch is claimed, and a
+pass is serial and non-preemptible. Measured on the deployed daemon 2026-09-18:
+
+| | |
+|---|---|
+| `.processing` claimed | 05:35:52 — 20 entries (projects 1 · convos 11 · session 8) |
+| 7 `docs/specs` mines POSTed | 07:12–07:17 → **1h37m after the claim** |
+| those entries in flight | **0** |
+| live queue | 178 → 181 in ~37 min (growing) |
+| one transcript mine | ≥ 427 s, still running |
+| one pass (20 serial) | **≥ 2.2 h** — a floor, not a mean |
+
+The claim is now a **bounded rolling priority queue**: after each mine, newly
+queued entries are merged into the remaining claim, re-sorted, and the best
+`cap − mines_consumed` kept. A priority-1 arrival waits **at most one mine**.
+
+**Absorb by replacement, never by addition.** A boundary may swap a not-yet-run
+entry for a better arrival; it may never grow the pass. #261's cap still bounds a
+pass, and that has its own test rather than being assumed — if a boundary could
+add, "at most one pass" would become unbounded.
+
+**Deferrals are written once, at the end of the pass.** Writing them at the
+boundary looked equivalent and was not: a deferred entry is re-absorbed by the
+next boundary and re-deferred at every one after, so its `drain_deferrals`
+counter climbs several times within a single pass and it reaches #261's escape
+threshold — at which point the backlog outranks the very `projects` mines this
+change exists to promote. #260's own tests caught it.
+
+**Holding them in memory is only safe if the disk holds them too.** The first
+cut said `.processing` carried the held deferrals and did not: each boundary
+rewrote it to the remainder plus *that boundary's* displaced, so the initial
+over-cap set and every earlier boundary's displaced existed only in a Python
+list until pass end. Review reproduced it — cap 2, six queued, a
+`CancelledError` during mine 2 (what a systemd stop is): **four of five lost on
+the head, zero on the base.** On the deployed daemon that is 26–160
+already-202'd mines gone on any restart inside a ≥ 2.2 h pass, and
+`/mine/status` under-reporting by that many for the whole pass. `.processing`
+is now rewritten at every boundary — the budget-exhausted one included — to the
+remainder **plus everything the pass holds**, so a restart recovers all of it
+(#244). Consequently `processing` in `/mine/status` legitimately **exceeds the
+cap** mid-pass: it is the remainder plus every deferral the pass will write
+back. The test that let this through asserted only "never lists a completed
+mine" — a check built to catch WRONG is blind to MISSING. It is now two-sided:
+`{pending} ∪ {.processing} == {not yet run}` at every boundary, plus a
+cancel-mid-pass test with `LOST == ∅` that is green on the base.
+
+**The rename never protected an append that was already open.** `/mine`
+appends from a worker thread; a thread that opened `pending` before the
+boundary's rename and wrote after the read+remove lost its line — reproduced by
+deterministic interleaving. The base ran that window once per pass; the
+rolling claim runs it `cap` times per pass. One `flock` (`pending.lock`) is
+now shared by the appender and both renames; a boundary waits for an in-flight
+append instead of orphaning it. Held for microseconds.
+
+Two smaller hardenings from the same review: valid JSON that is not an object
+(`42`, `null`, `[]`) is skipped at a boundary instead of raising inside the
+merge after the merge file was already removed (which discarded every valid
+arrival with it), and quarantined at pass start instead of ending the pass
+with `.processing` in place (which recovery re-queued, stalling the drainer on
+the same line forever).
+
+`/mine/status` gains `last_boundary_merge_at`, `arrivals_absorbed_this_pass`
+and `arrivals_absorbed_last_pass`, so the mechanism is visible without reading
+code. Two counters, not one: the drainer loops back-to-back on a never-empty
+queue, so a single counter zeroed at pass start only ever read "this pass so
+far" and a finished pass's total was never observable. `last` is a snapshot
+taken when the pass ends.
+
+Measured: the boundary merge costs **2.5–3.6 ms** with a 500-line pending file
+and 20 owned entries — against a transcript mine's ≥ 427 s floor, i.e. ~0.0008%
+of one mine.
+
+`tests/test_drain_rolling_claim.py` (16) asserts the **order of targets handed to
+the mine runner**, never timing. On the unmodified base the headline test fails
+with the arrival never running at all — `['/d0','/d1','/d2','/d3','/d4','/d5']`
+— which is the reported symptom exactly.
+
+**Out of scope, deliberately:** de-duplicating transcript re-mines (#414), a
+separate small-mode lane, and shrinking the batch. This fixes **latency**, not
+throughput — the queue still grows faster than it drains.
+
 ### Performance — *#290: `mempalace_kg_stats` cost ~9.6 s in a "sub-millisecond" fast path*
 
 The fast intercept ran three exact `count(*)` queries over the AGE backing
