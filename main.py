@@ -93,7 +93,7 @@ import rooms as _rooms
 
 # ── Config (env vars override CLI defaults) ───────────────────────────────────
 
-VERSION = "1.9.1"
+VERSION = "1.10.0"
 DEFAULT_HOST = os.getenv("PALACE_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.getenv("PALACE_PORT", "8085"))
 DEFAULT_PALACE = os.getenv("PALACE_PATH", "")
@@ -2043,6 +2043,14 @@ def _load_age_extractor():
             ex = None
     _AGE_EXTRACTOR_CACHE = ex
     return ex
+
+
+# /window + /source: time-ordered and by-source listings (mempalace#500,
+# #502). Kept in their own module so /list's "approximates insertion
+# order" contract and its chunk-group cache stay untouched.
+import window_routes as _window_routes  # noqa: E402
+
+app.include_router(_window_routes.router)
 
 
 @app.get("/list")
