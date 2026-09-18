@@ -3627,8 +3627,7 @@ async def mine(
     # Check both streams before declaring "no output".
     combined = (out.strip() or "") + (err.strip() or "")
     if proc.returncode == 0 and not combined:
-        import logging
-        logging.warning(
+        _log.warning(
             "POST /mine produced no output for dir=%s wing=%s mode=%s — "
             "directory may be empty or contain no mineable files",
             directory, wing, mode,

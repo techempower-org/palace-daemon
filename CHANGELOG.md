@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Fixed — *#289: two warnings wrote to the root logger, not the daemon's*
+
+The daemon logs through `palace-daemon` (`main._log`) and `palace-daemon.rooms`
+(`rooms._log`). Two sites still called `logging.warning(...)` on the **root**
+logger: `main.py`'s "POST /mine produced no output" and `rooms.py`'s
+`canonical_rooms` fallback — the sole signal that room validation has silently
+stopped validating. #288 fixed the sibling at `rooms.present_rooms`; these are
+the two that remained, and `rooms.py` already had `_log` at module scope, so
+both were one line each.
+
+Nothing was lost: with no root handler these fall to `lastResort` → stderr →
+the journal under systemd. But they bypass the daemon's handlers and formatter
+and are **absent from the stream anyone greps for daemon messages**, which is
+where you look when room validation has quietly degraded.
+
+`tests/test_daemon_logger_routing.py` (5 tests) attaches a capture to
+`palace-daemon` **only** and drives each warning through its real path — the
+rooms fallback with the backend forced to postgres and `psycopg2.connect`
+raising, and `POST /mine` through the real handler with an empty-output
+subprocess, mirroring `test_mine_tunnels_flag.py`.
+
+The negative control is the load-bearing half: one test asserts a **root**
+`logging.warning` does **not** reach that handler. A capture that sees
+everything would make "the record arrived" true wherever it was logged, and
+every other assertion here would be vacuous. Mutation-verified in both
+directions — reverting either site to `logging.warning` turns exactly its own
+assertion red and no other.
+
+Records are matched by message content, never by line number: #289 cites
+`main.py:3631`, and the fix moves it.
+
+
 ### Fixed — *#285: a `room` filter may name any room that EXISTS, not only a canonical one*
 
 `GET /list?wing=2g&room=diary` answered **400 "room 'diary' is not in the
