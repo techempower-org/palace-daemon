@@ -2,6 +2,62 @@
 
 ## Unreleased
 
+### Fixed — *#285: a `room` filter may name any room that EXISTS, not only a canonical one*
+
+`GET /list?wing=2g&room=diary` answered **400 "room 'diary' is not in the
+canonical set"** while the daemon was serving those very drawers: the same
+request without the filter returned 200 with all 50 rows `room=diary`.
+Measured against production: **79,889 drawers — 8.6% of 924,568, across 8
+non-canonical rooms — were unreachable by room filter**, `diary` alone 38,781
+(12,274 of them in `2g`). The refused path was also the cheap one: the 400
+came back in 0.011 s while the unfiltered fallback an operator is pushed
+toward took 57.6 s for 50 rows.
+
+The cause is structural rather than a wrong constant. `rooms.py` already
+splits read from write for **wings** — `normalize_wing_slug` (write) vs
+`normalize_wing_filter` (read) — and its docstring explains why a filter and
+a write cannot share one rule. **Rooms never got that split.**
+`validate_room_or_raise` is the write rule, and `#179` generalized it into
+`room_validator_dep` and wired it into the read endpoints, so "only canonical
+rooms may be CREATED" started being enforced on reads, where it means "data
+that exists may not be read".
+
+`validate_room_filter_or_raise` is the read counterpart: canonical passes, a
+room that holds drawers passes, and a room that exists nowhere still raises
+400 — which is what the check was built for ("fast-feedback room validation
+vs an empty-result silent surprise from a typo"). `room=diaryy` still fails
+fast; `room=diary` no longer does. The 400's `valid_rooms` now lists what is
+actually queryable rather than the canonical seven, which had been
+advertising a list that excluded the largest room in the palace.
+
+Existence is corpus-wide, not per-wing: per-wing would 400
+`?wing=2g&room=references` when `2g` merely holds none, turning a legitimate
+empty result into an error — the same defect in a new coat.
+
+**Writes are untouched.** `POST /memory` and `PATCH /memory/{id}` keep the
+canonical-only rule, which is what stops the non-canonical set from growing,
+and a test pins it. `search_models._canon_room` was shared by all four body
+models, so loosening that one helper — the tempting one-line fix — would have
+opened the write path and converted a read bug into a data-quality bug; the
+three search bodies now use `_canon_room_filter` and `MemoryBody` does not.
+
+The lookup (`SELECT DISTINCT room`, 152 ms for 15 rows over 924,568 drawers)
+is cached, consulted only on the non-canonical path, and **re-read once on a
+miss before refusing** — the present set grows when mempalace's miner writes
+straight to postgres, so there is no write hook to invalidate on and any TTL
+would be a window in which real data is refused.
+
+It **fails open**: when the corpus cannot be read, the filter passes. The
+costs are asymmetric — a false pass returns an empty page, a false refusal
+makes existing data unreachable, which is the bug. This is deliberately
+unlike `canonical_rooms()`, which falls back to the spec's seven: refusing
+when unsure is right for a write guard and wrong for a read filter. For the
+same reason the lookup keys on `MEMPALACE_POSTGRES_DSN` alone, as the
+daemon's other postgres readers do, rather than on mempalace's
+`_config.backend` — that resolves a backend from a palace path and answers
+"chroma" in any process lacking the daemon's own environment, which would
+have silently deleted the typo protection instead of failing loudly.
+
 ### Added — *#474: `POST /mine` `tunnels` field — skip the whole-wing derived-graph rebuild on small targets*
 
 Every projects-mode mine recomputes the wing's derived graph after the drawers

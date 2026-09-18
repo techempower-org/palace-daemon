@@ -117,13 +117,21 @@ class TestFastAPIDependencies(unittest.TestCase):
     happens at request-parse time. Filed as palace-daemon#179.
 
     These tests call the deps directly (the FastAPI machinery just passes
-    the raw query-param value as the first positional arg)."""
+    the raw query-param value as the first positional arg).
+
+    Since #285 the room dep wraps ``validate_room_filter_or_raise`` (read)
+    rather than ``validate_room_or_raise`` (write)."""
 
     def setUp(self):
         rooms._canonical_rooms_cache = None
+        # The room dep consults the corpus since #285; an empty set means
+        # "we CAN tell, and it holds nothing" — distinct from None, which
+        # means "cannot tell" and deliberately passes.
+        rooms._present_rooms_cache = set()
 
     def tearDown(self):
         rooms._canonical_rooms_cache = None
+        rooms._present_rooms_cache = None
 
     def test_wing_filter_dep_canonicalizes(self):
         """The dep returns the same value normalize_wing_filter would."""
@@ -139,9 +147,16 @@ class TestFastAPIDependencies(unittest.TestCase):
 
     def test_room_validator_dep_raises_400_on_invalid(self):
         """The dep raises HTTPException 400 — FastAPI machinery converts
-        that to the response shape automatically. Same contract as the
-        previous inline validate_room_or_raise calls."""
+        that to the response shape automatically.
+
+        Contract narrowed by #285: the dep is the READ filter, so it now
+        refuses a room only when it is neither canonical NOR present in the
+        corpus. 'bogus' is both, hence still a 400. A room that HOLDS
+        drawers is no longer refused — that was the bug (79,889 drawers,
+        8.6% of the corpus, unreachable by filter).
+        """
         rooms._canonical_rooms_cache = {"planning"}
+        rooms._present_rooms_cache = {"diary"}
         with self.assertRaises(HTTPException) as ctx:
             rooms.room_validator_dep("bogus")
         self.assertEqual(ctx.exception.status_code, 400)

@@ -34,11 +34,30 @@ def _canon_wing(value):
 
 
 def _canon_room(value):
-    """Pydantic field validator: validate room, raise HTTPException on bad."""
-    # rooms.validate_room_or_raise returns None on None/canonical, raises
-    # 400 on non-canonical. Return the normalized value (which is just the
-    # input since rooms are not case-folded — only validated).
+    """Pydantic field validator for a WRITE body: canonical rooms only.
+
+    Used by MemoryBody. ``rooms.validate_room_or_raise`` returns None on
+    None/canonical and raises 400 on anything else. Returns the input
+    unchanged (rooms are validated, never case-folded).
+
+    ⚠️ Not for search bodies — see ``_canon_room_filter``. This helper was
+    shared by all four models until #285, so loosening it to fix the read
+    filters would have opened the write path and let the non-canonical set
+    grow: a read bug converted into a data-quality bug.
+    """
     rooms.validate_room_or_raise(value)
+    return value
+
+
+def _canon_room_filter(value):
+    """Pydantic field validator for a READ body: any room that EXISTS.
+
+    Used by the POST /search/* bodies, whose ``room`` is a filter over
+    drawers that already exist — the same contract the GET endpoints get
+    from ``rooms.room_validator_dep``. A room present nowhere still raises
+    400, so typo protection survives (#285).
+    """
+    rooms.validate_room_filter_or_raise(value)
     return value
 
 
@@ -70,7 +89,7 @@ class SearchKeywordBody(BaseModel):
     @field_validator("room")
     @classmethod
     def _validate_room(cls, v):
-        return _canon_room(v)
+        return _canon_room_filter(v)
 
 
 class SearchHybridBody(BaseModel):
@@ -111,7 +130,7 @@ class SearchHybridBody(BaseModel):
     @field_validator("room")
     @classmethod
     def _validate_room(cls, v):
-        return _canon_room(v)
+        return _canon_room_filter(v)
 
     @field_validator("fusion_mode")
     @classmethod
@@ -265,9 +284,12 @@ class MemoryBody(BaseModel):
         # produces the structured 400 with valid_rooms + hint.
         if not v or not v.strip():
             v = "discoveries"
-        # _canon_room is the shared helper at the top of this module;
-        # it raises HTTPException(400, detail={...}) on a non-canonical
-        # value. The HTTPException propagates cleanly through pydantic.
+        # _canon_room is the WRITE helper at the top of this module; it
+        # raises HTTPException(400, detail={...}) on a non-canonical value
+        # and the HTTPException propagates cleanly through pydantic. The
+        # search bodies deliberately use _canon_room_filter instead (#285) —
+        # a write may only CREATE canonical rooms, a filter may name any
+        # room that exists.
         return _canon_room(v)
 
 
@@ -368,4 +390,4 @@ class SearchAgeFusedBody(BaseModel):
     @field_validator("room")
     @classmethod
     def _validate_room(cls, v):
-        return _canon_room(v)
+        return _canon_room_filter(v)
