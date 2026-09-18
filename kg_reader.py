@@ -73,6 +73,11 @@ DECLARED_ONTOLOGY = {
 }
 
 
+
+# Only this module's new/reworked warnings use it; the other 14 root-logger
+# sites in this file are #292's to route, not this PR's.
+_log = logging.getLogger("palace-daemon.kg_reader")
+
 def _config():
     """Lazy mempalace config accessor — avoids importing mempalace at module
     load time (matches the postgres.py / db_errors.py pattern)."""
@@ -481,6 +486,7 @@ def read_kg_postgres_stats(exact_mentions: bool = True) -> dict | None:
         triples = 0
         mentions = 0
         mentions_present = False
+        degraded = False
         try:
             with kg._conn.cursor() as cur:
                 cur.execute(f'SELECT count(*) FROM {graph}."Entity"')
@@ -502,7 +508,14 @@ def read_kg_postgres_stats(exact_mentions: bool = True) -> dict | None:
                     row = cur.fetchone()
                     mentions_present = bool(row[0]) if row else False
         except Exception as e:
-            logging.warning("read_kg_postgres_stats: count queries failed: %s", e)
+            # DEGRADED, not merely logged. The counts stay 0 below, and a
+            # zeroed payload is indistinguishable from a real empty graph —
+            # which is exactly what must not be cached for a TTL, nor served
+            # as a confident answer. Mark it, and say so on the daemon's own
+            # logger rather than the root one (#292's class; this one site is
+            # routed here because #290 requires the failure to surface).
+            degraded = True
+            _log.warning("read_kg_postgres_stats: count queries failed: %s", e)
             try:
                 kg._conn.rollback()
             except Exception:
@@ -523,6 +536,10 @@ def read_kg_postgres_stats(exact_mentions: bool = True) -> dict | None:
         "triples": triples,
         "relationship_types": rel_types,
     }
+    if degraded:
+        # Consumers that tolerate zeros (/graph) are unaffected — this is an
+        # extra key, not a changed one. The fast intercept refuses it.
+        out["degraded"] = True
     if exact_mentions:
         # Only present when it was actually counted. Omitted rather than 0 on
         # the cheap path: a consumer that needs the number should raise a

@@ -47,8 +47,22 @@ poked the cold result, which is already a copy — and was rewritten to poke wha
 
 Three existing suites now reset the cache in `setUp`: it is process-global, so a
 payload cached by an earlier test stayed warm and their patched payloads were
-never consulted. The same is true in production for the TTL window — a payload
-that starts failing is not retried until the entry expires.
+never consulted.
+
+**Only successful payloads are cached**, and the dangerous case is not an
+exception. A failed count query is *swallowed* inside `read_kg_postgres_stats`,
+which returns **zeros** — indistinguishable from a genuinely empty graph. Cached,
+that would be served as a confident `entities: 0` for the whole TTL. The read now
+marks itself `degraded`, the fast intercept **refuses** a degraded payload (raising
+falls through to the `/mcp` slow path, the existing contract for "the fast path
+could not answer"), and a raised failure **invalidates** any previously cached
+success rather than hiding behind it. A genuinely empty graph, with no marker, is
+still a valid cacheable answer — that is the negative control.
+
+The count failure now logs on `palace-daemon.kg_reader` instead of the root
+logger, so it is visible in the daemon's own stream. That is one of #292's 19
+sites, routed here because #290 requires the failure to surface; the other 14 in
+this file remain #292's.
 
 
 ### Fixed — *#289: two warnings wrote to the root logger, not the daemon's*

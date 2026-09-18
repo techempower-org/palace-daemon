@@ -177,6 +177,100 @@ class _Capture(logging.Handler):
         self.messages.append(record.getMessage())
 
 
+class TestOnlySuccessesAreCached(unittest.TestCase):
+    """A failure must not be served for a TTL, and must not hide behind one.
+
+    The dangerous case is NOT an exception. `read_kg_postgres_stats` swallows a
+    count failure and returns ZEROS — indistinguishable from a real empty
+    graph — so without a marker the cache would store `entities: 0` and serve
+    it confidently for 120 s. That is the shape this class pins.
+    """
+
+    def setUp(self):
+        fast_intercept.kg_stats_cache_clear()
+        self._env = patch.dict(os.environ, {"PALACE_KG_STATS_TTL": "120"})
+        self._env.start()
+
+    def tearDown(self):
+        self._env.stop()
+        fast_intercept.kg_stats_cache_clear()
+
+    def test_a_failing_payload_is_retried_on_the_very_next_call(self):
+        spy = MagicMock(side_effect=RuntimeError("AGE unreachable"))
+        with patch.object(main, "_read_kg_postgres_stats", spy):
+            for _ in range(3):
+                with self.assertRaises(RuntimeError):
+                    fast_intercept.fast_mcp_kg_stats_cached()
+        self.assertEqual(spy.call_count, 3, "a failure must not be cached")
+
+    def test_a_failure_invalidates_a_previously_cached_success(self):
+        ok = MagicMock(return_value=_stats())
+        with patch.object(main, "_read_kg_postgres_stats", ok):
+            fast_intercept.fast_mcp_kg_stats_cached()          # cache a success
+        # TTL has not expired, but the next real call fails: the stale success
+        # must not be what the caller gets once we have learned it is stale.
+        with patch.object(main, "_read_kg_postgres_stats",
+                          MagicMock(side_effect=RuntimeError("AGE down"))), \
+             patch.dict(os.environ, {"PALACE_KG_STATS_TTL": "0"}):
+            with self.assertRaises(RuntimeError):
+                fast_intercept.fast_mcp_kg_stats_cached()
+        self.assertIsNone(fast_intercept._kg_stats_cached,
+                          "the failure must clear the cached success")
+
+    def test_a_DEGRADED_read_is_refused_and_never_cached(self):
+        """Zeros from a failed count must not be served as a real answer."""
+        degraded = {"entities": 0, "triples": 0, "relationship_types": [], "degraded": True}
+        spy = MagicMock(return_value=degraded)
+        with patch.object(main, "_read_kg_postgres_stats", spy):
+            with self.assertRaises(RuntimeError):
+                fast_intercept.fast_mcp_kg_stats_cached()
+            with self.assertRaises(RuntimeError):
+                fast_intercept.fast_mcp_kg_stats_cached()
+        self.assertEqual(spy.call_count, 2, "a degraded read must not be cached")
+        self.assertIsNone(fast_intercept._kg_stats_cached)
+
+    def test_a_genuinely_empty_graph_is_still_a_valid_cacheable_answer(self):
+        """The negative control: zeros WITHOUT the marker are a real result."""
+        empty = {"entities": 0, "triples": 0, "relationship_types": []}
+        spy = MagicMock(return_value=empty)
+        with patch.object(main, "_read_kg_postgres_stats", spy):
+            first, c1 = fast_intercept.fast_mcp_kg_stats_cached()
+            _second, c2 = fast_intercept.fast_mcp_kg_stats_cached()
+        self.assertFalse(c1)
+        self.assertTrue(c2, "an empty graph is an answer, not a failure")
+        self.assertEqual(first["entities"], 0)
+        self.assertEqual(spy.call_count, 1)
+
+
+class TestDegradedReadIsVisible(unittest.TestCase):
+    """The count failure must reach the daemon's logger, not the root one."""
+
+    def test_count_failure_logs_on_palace_daemon_and_marks_the_payload(self):
+        cap = _Capture()
+        logger = logging.getLogger("palace-daemon")
+        logger.addHandler(cap)
+        lvl = logger.level
+        logger.setLevel(logging.DEBUG)
+        try:
+            cur = MagicMock()
+            cur.__enter__ = lambda s: s
+            cur.__exit__ = lambda s, *a: False
+            cur.execute.side_effect = RuntimeError("statement timeout")
+            conn = MagicMock(); conn.cursor.return_value = cur
+            kg = MagicMock(GRAPH_NAME="mempalace_kg", _conn=conn)
+            with patch.object(kg_reader, "_config",
+                              lambda: MagicMock(postgres_dsn="postgresql://x/y")), \
+                 patch.dict(os.environ, {"MEMPALACE_POSTGRES_DSN": "postgresql://x/y"}), \
+                 patch("mempalace.knowledge_graph_age.KnowledgeGraphAGE", return_value=kg):
+                out = kg_reader.read_kg_postgres_stats(exact_mentions=False)
+        finally:
+            logger.removeHandler(cap)
+            logger.setLevel(lvl)
+        self.assertTrue(out.get("degraded"), "a failed count must mark the payload")
+        self.assertTrue([m for m in cap.messages if "count queries failed" in m],
+                        f"not on the daemon logger: {cap.messages}")
+
+
 class TestMcpRouteLogsWhichPathItTook(unittest.IsolatedAsyncioTestCase):
     """The consumer half: the envelope AND the log line, through the real route.
 

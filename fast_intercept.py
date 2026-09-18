@@ -178,6 +178,12 @@ def fast_mcp_kg_stats_payload() -> dict:
     stats = main._read_kg_postgres_stats(exact_mentions=False)
     if not stats:
         raise RuntimeError("AGE knowledge graph unreachable")
+    if stats.get("degraded"):
+        # A count query failed, so the numbers are zeros that look like a real
+        # empty graph. Raising falls through to the /mcp slow path — the
+        # existing contract for "the fast path could not answer" — instead of
+        # serving a confident wrong answer, and keeps it out of the cache.
+        raise RuntimeError("AGE counts degraded (a count query failed)")
     triples = int(stats.get("triples", 0))
     return {
         "entities": int(stats.get("entities", 0)),
@@ -248,7 +254,16 @@ def fast_mcp_kg_stats_cached() -> tuple[dict, bool]:
         # coverage among them). Calling the local function would silently
         # bypass every one of those patches.
         import main
-        payload = main._fast_mcp_kg_stats_payload()
+        try:
+            payload = main._fast_mcp_kg_stats_payload()
+        except Exception:
+            # Only SUCCESSFUL payloads are cached, and a failure INVALIDATES a
+            # previously cached success rather than hiding behind it for the
+            # rest of the TTL. The exception propagates to /mcp, which falls
+            # through to the slow path and logs it.
+            _kg_stats_cached = None
+            _kg_stats_at = 0.0
+            raise
         _kg_stats_queries += 1
         if ttl > 0:
             _kg_stats_cached = dict(payload)
