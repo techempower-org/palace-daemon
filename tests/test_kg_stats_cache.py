@@ -217,17 +217,43 @@ class TestOnlySuccessesAreCached(unittest.TestCase):
         self.assertIsNone(fast_intercept._kg_stats_cached,
                           "the failure must clear the cached success")
 
-    def test_a_DEGRADED_read_is_refused_and_never_cached(self):
-        """Zeros from a failed count must not be served as a real answer."""
-        degraded = {"entities": 0, "triples": 0, "relationship_types": [], "degraded": True}
-        spy = MagicMock(return_value=degraded)
+    def test_a_failed_count_query_yields_None_and_is_never_cached(self):
+        """The mechanism #290 removed the trigger for, but not the mechanism.
+
+        A statement_timeout used to be swallowed and a payload built from the
+        initialised zeros — plausible, wrong, and cached for a TTL. The read
+        returns None now; the intercept raises; /mcp falls to the slow path.
+        """
+        spy = MagicMock(return_value=None)
         with patch.object(main, "_read_kg_postgres_stats", spy):
-            with self.assertRaises(RuntimeError):
-                fast_intercept.fast_mcp_kg_stats_cached()
-            with self.assertRaises(RuntimeError):
-                fast_intercept.fast_mcp_kg_stats_cached()
-        self.assertEqual(spy.call_count, 2, "a degraded read must not be cached")
+            for _ in range(2):
+                with self.assertRaises(RuntimeError):
+                    fast_intercept.fast_mcp_kg_stats_cached()
+        self.assertEqual(spy.call_count, 2, "a failed read must be retried, not cached")
         self.assertIsNone(fast_intercept._kg_stats_cached)
+
+    def test_zeros_are_never_what_a_failed_count_returns(self):
+        """Driven through the REAL reader: a raising count must not become 0s."""
+        cur = MagicMock()
+        cur.__enter__ = lambda s: s
+        cur.__exit__ = lambda s, *a: False
+        calls = {"n": 0}
+
+        def _exec(sql, *a, **k):
+            calls["n"] += 1
+            if "RELATION" in str(sql):
+                raise RuntimeError("canceling statement due to statement timeout")
+
+        cur.execute.side_effect = _exec
+        cur.fetchone.side_effect = lambda: (10,)
+        conn = MagicMock(); conn.cursor.return_value = cur
+        kg = MagicMock(GRAPH_NAME="mempalace_kg", _conn=conn)
+        with patch.object(kg_reader, "_config",
+                          lambda: MagicMock(postgres_dsn="postgresql://x/y")), \
+             patch.dict(os.environ, {"MEMPALACE_POSTGRES_DSN": "postgresql://x/y"}), \
+             patch("mempalace.knowledge_graph_age.KnowledgeGraphAGE", return_value=kg):
+            out = kg_reader.read_kg_postgres_stats(exact_mentions=False)
+        self.assertIsNone(out, "a failed count must not be reported as a count")
 
     def test_a_genuinely_empty_graph_is_still_a_valid_cacheable_answer(self):
         """The negative control: zeros WITHOUT the marker are a real result."""
@@ -266,7 +292,7 @@ class TestDegradedReadIsVisible(unittest.TestCase):
         finally:
             logger.removeHandler(cap)
             logger.setLevel(lvl)
-        self.assertTrue(out.get("degraded"), "a failed count must mark the payload")
+        self.assertIsNone(out, "a failed count must return None, never zeros")
         self.assertTrue([m for m in cap.messages if "count queries failed" in m],
                         f"not on the daemon logger: {cap.messages}")
 

@@ -178,12 +178,6 @@ def fast_mcp_kg_stats_payload() -> dict:
     stats = main._read_kg_postgres_stats(exact_mentions=False)
     if not stats:
         raise RuntimeError("AGE knowledge graph unreachable")
-    if stats.get("degraded"):
-        # A count query failed, so the numbers are zeros that look like a real
-        # empty graph. Raising falls through to the /mcp slow path — the
-        # existing contract for "the fast path could not answer" — instead of
-        # serving a confident wrong answer, and keeps it out of the cache.
-        raise RuntimeError("AGE counts degraded (a count query failed)")
     triples = int(stats.get("triples", 0))
     return {
         "entities": int(stats.get("entities", 0)),

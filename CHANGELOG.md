@@ -49,15 +49,22 @@ Three existing suites now reset the cache in `setUp`: it is process-global, so a
 payload cached by an earlier test stayed warm and their patched payloads were
 never consulted.
 
-**Only successful payloads are cached**, and the dangerous case is not an
-exception. A failed count query is *swallowed* inside `read_kg_postgres_stats`,
-which returns **zeros** — indistinguishable from a genuinely empty graph. Cached,
-that would be served as a confident `entities: 0` for the whole TTL. The read now
-marks itself `degraded`, the fast intercept **refuses** a degraded payload (raising
-falls through to the `/mcp` slow path, the existing contract for "the fast path
-could not answer"), and a raised failure **invalidates** any previously cached
-success rather than hiding behind it. A genuinely empty graph, with no marker, is
-still a valid cacheable answer — that is the negative control.
+**Only successful payloads are cached — and a failed count no longer produces a
+payload at all.** Removing the 27.6 s trigger did not remove the mechanism:
+`read_kg_postgres_stats` caught a count failure, logged to the **root** logger,
+and fell through to build a result from the initialised zeros. A
+`statement_timeout` therefore returned `entities: 10, triples: 0, mentions: 0` —
+indistinguishable from a real graph that looks like that — and once cached, that
+was served for the whole TTL.
+
+It returns **`None`** now, which is already this function's signal for "could not
+answer": the fast intercept raises, `/mcp` falls to the slow path, `/graph` falls
+back to the MCP-derived payload. **Partial truth is deliberately no longer
+preserved** — the old result had no way to say which of its counts were real, and
+a confident wrong number is worse than an honest gap. A raised failure also
+**invalidates** a previously cached success rather than hiding behind it, and a
+genuinely empty graph (zeros with no failure) remains a valid cacheable answer —
+that is the negative control.
 
 The count failure now logs on `palace-daemon.kg_reader` instead of the root
 logger, so it is visible in the daemon's own stream. That is one of #292's 19

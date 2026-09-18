@@ -486,7 +486,6 @@ def read_kg_postgres_stats(exact_mentions: bool = True) -> dict | None:
         triples = 0
         mentions = 0
         mentions_present = False
-        degraded = False
         try:
             with kg._conn.cursor() as cur:
                 cur.execute(f'SELECT count(*) FROM {graph}."Entity"')
@@ -508,18 +507,30 @@ def read_kg_postgres_stats(exact_mentions: bool = True) -> dict | None:
                     row = cur.fetchone()
                     mentions_present = bool(row[0]) if row else False
         except Exception as e:
-            # DEGRADED, not merely logged. The counts stay 0 below, and a
-            # zeroed payload is indistinguishable from a real empty graph —
-            # which is exactly what must not be cached for a TTL, nor served
-            # as a confident answer. Mark it, and say so on the daemon's own
-            # logger rather than the root one (#292's class; this one site is
-            # routed here because #290 requires the failure to surface).
-            degraded = True
-            _log.warning("read_kg_postgres_stats: count queries failed: %s", e)
+            # RETURN None — do not fall through and build a payload from the
+            # initialised zeros. A statement_timeout here used to produce
+            # `entities: 10, triples: 0, mentions: 0`, which is
+            # indistinguishable from a real graph that happens to look like
+            # that, and #290 then cached it for a TTL. Removing the 27.6 s
+            # trigger did not remove this mechanism.
+            #
+            # None is already this function's contract for "could not answer"
+            # (see the docstring), and every caller handles it: the fast
+            # intercept raises and /mcp falls to the slow path, /graph falls
+            # back to the MCP-derived payload. Partial truth is NOT preserved
+            # here any more, deliberately — a confident wrong number is worse
+            # than an honest gap, and the previous behaviour had no way to say
+            # which of its counts were real.
+            #
+            # Logged on the daemon's own logger, not root: this failure being
+            # invisible in the stream anyone greps is why it survived. One of
+            # #292's 19 sites, routed here because #290 needs it to surface.
+            _log.warning("read_kg_postgres_stats: count queries failed, returning None: %s", e)
             try:
                 kg._conn.rollback()
             except Exception:
                 pass
+            return None
     finally:
         try:
             kg.close()
@@ -536,10 +547,6 @@ def read_kg_postgres_stats(exact_mentions: bool = True) -> dict | None:
         "triples": triples,
         "relationship_types": rel_types,
     }
-    if degraded:
-        # Consumers that tolerate zeros (/graph) are unaffected — this is an
-        # extra key, not a changed one. The fast intercept refuses it.
-        out["degraded"] = True
     if exact_mentions:
         # Only present when it was actually counted. Omitted rather than 0 on
         # the cheap path: a consumer that needs the number should raise a

@@ -427,13 +427,17 @@ class TestReadKgStatsAGE(unittest.TestCase):
         with patch.dict(sys.modules, {"mempalace.knowledge_graph_age": stub_mod}), \
              patch.object(kg_reader, "_config", return_value=cfg):
             stats = main._read_kg_postgres_stats()
-        self.assertEqual(stats, {
-            "entities": 10,
-            "triples": 0,
-            "mentions": 0,
-            "relationship_types": [],
-        })
-        self.assertIn("ROLLBACK", captured["sql"])
+        # #290 CONTRACT CHANGE. This used to assert partial truth —
+        # {entities: 10, triples: 0, mentions: 0} — which is indistinguishable
+        # from a real graph that looks like that. A statement_timeout therefore
+        # produced confident wrong counts, and once #290 cached the payload
+        # they were served for a TTL. A count failure now returns None, the
+        # function's existing signal for "could not answer": /mcp falls to the
+        # slow path and /graph to the MCP-derived payload. An honest gap beats
+        # a plausible number that nothing downstream can question.
+        self.assertIsNone(stats)
+        self.assertIn("ROLLBACK", captured["sql"],
+                      "rollback must still fire — an aborted txn would poison /graph")
 
 
 class TestReadKgStatsDirectDispatch(unittest.TestCase):
