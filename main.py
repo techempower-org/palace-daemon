@@ -23,6 +23,7 @@ import os
 import tempfile
 import sqlite3
 import sys
+import concurrent.futures as _futures
 import fcntl
 import fnmatch
 import signal
@@ -111,6 +112,32 @@ PALACE_MCP_TOOL_TIMEOUT_SECONDS = float(os.getenv("PALACE_MCP_TOOL_TIMEOUT_SECON
 # Python-side aggregations at our production scale). Set to 0 to fall through to
 # the slow path — useful when you need the full relationship_types list that the
 # fast kg_stats can't enumerate cheaply. Issue #49.
+# ── Thread pools (#286) ──────────────────────────────────────────────────────
+# The 2026-09-17 outage: seven queued `mempalace_kg_stats` calls sat on the
+# SHARED default executor waiting on the KG lock, and /health, /status/fast,
+# /search/fast and the systemd watchdog probe all reach that same pool via
+# `run_in_executor(None, ...)`. Every one of them blocked for 40 minutes while
+# /mine/status — which uses no executor — answered instantly.
+#
+# /health already carried the comment "Bypass semaphores — health must respond
+# even when all slots are busy". It did bypass the semaphores. The executor was
+# the resource that ran out, and nothing bypassed that.
+#
+# Two pools, so tool execution physically cannot starve the liveness paths.
+# The watchdog one matters most: a starved pool means systemd stops receiving
+# WATCHDOG=1 and SIGABRTs a daemon whose only problem is a slow query.
+PALACE_FAST_EXECUTOR_WORKERS = int(os.getenv("PALACE_FAST_EXECUTOR_WORKERS", "4"))
+PALACE_TOOL_EXECUTOR_WORKERS = int(os.getenv("PALACE_TOOL_EXECUTOR_WORKERS", "8"))
+
+_FAST_EXECUTOR = _futures.ThreadPoolExecutor(
+    max_workers=max(1, PALACE_FAST_EXECUTOR_WORKERS),
+    thread_name_prefix="palace-fast",
+)
+_TOOL_EXECUTOR = _futures.ThreadPoolExecutor(
+    max_workers=max(1, PALACE_TOOL_EXECUTOR_WORKERS),
+    thread_name_prefix="palace-tool",
+)
+
 PALACE_MCP_FAST_INTERCEPT = os.getenv("PALACE_MCP_FAST_INTERCEPT", "1") not in ("0", "false", "False", "")
 
 # Canonical topic for Stop-hook auto-save checkpoint diary entries.
@@ -1879,11 +1906,11 @@ async def mcp_proxy(request: Request, x_api_key: str | None = Header(default=Non
 async def health():
     # Bypass semaphores — health must respond even when all slots are busy.
     loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, _mp.handle_request, {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}}) or {}
+    result = await loop.run_in_executor(_FAST_EXECUTOR, _mp.handle_request, {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}}) or {}
     # Test actual collection access so /health reflects true palace state.
     palace_ok = False
     try:
-        col = await loop.run_in_executor(None, _mp._get_collection)
+        col = await loop.run_in_executor(_FAST_EXECUTOR, _mp._get_collection)
         palace_ok = col is not None
     except Exception as e:
         # /health degrades to "degraded" (503) when the collection can't
@@ -1904,7 +1931,7 @@ async def health():
     # If the memcg probe fails (docker down, container missing) we omit
     # the field rather than degrading /health's status.
     db_errors = _db_errors_summary(window_s=300.0)
-    memcg = await loop.run_in_executor(None, _postgres_memcg_status)
+    memcg = await loop.run_in_executor(_FAST_EXECUTOR, _postgres_memcg_status)
     payload = {
         "status": status, "daemon": "palace-daemon", "version": VERSION,
         "palace": result, **cl,
@@ -2406,7 +2433,7 @@ async def status_fast(x_api_key: str | None = Header(default=None)):
         raise HTTPException(status_code=503, detail="postgres backend not configured")
     loop = asyncio.get_running_loop()
     try:
-        return await loop.run_in_executor(None, _fast_status_payload)
+        return await loop.run_in_executor(_FAST_EXECUTOR, _fast_status_payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2493,7 +2520,7 @@ async def search_fast(
                 return results
 
     try:
-        return await loop.run_in_executor(None, _query)
+        return await loop.run_in_executor(_FAST_EXECUTOR, _query)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
