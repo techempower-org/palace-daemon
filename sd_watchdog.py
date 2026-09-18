@@ -93,7 +93,10 @@ async def watchdog_loop(interval_secs: int) -> None:
             continue
         try:
             loop = asyncio.get_running_loop()
-            col = await loop.run_in_executor(None, main._mp._get_collection)
+            # #286: the FAST pool, never the default one. A default pool
+            # starved by MCP tool execution would stop WATCHDOG=1 and let
+            # systemd SIGABRT a daemon whose only problem is a slow query.
+            col = await loop.run_in_executor(main._FAST_EXECUTOR, main._mp._get_collection)
             if col is not None:
                 main._sd_notify("WATCHDOG=1\n")
             else:
