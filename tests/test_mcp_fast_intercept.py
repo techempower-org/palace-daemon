@@ -30,6 +30,7 @@ _ROOT = os.path.dirname(_HERE)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+import fast_intercept
 import main  # noqa: E402
 
 
@@ -154,6 +155,15 @@ class TestFastInterceptKgStats(unittest.TestCase):
 
 
 class TestMcpProxyInterception(unittest.IsolatedAsyncioTestCase):
+
+    def setUp(self):
+        # #290 put a module-level TTL cache behind mempalace_kg_stats. It is
+        # process-global, so a payload cached by an earlier test is still warm
+        # here and this class's patched payloads would never be consulted.
+        # (The same is true in production for the TTL window — a payload that
+        # starts failing is not retried until the entry expires.)
+        fast_intercept.kg_stats_cache_clear()
+
     """``/mcp`` should route the two slow tools through the fast helpers
     when ``PALACE_MCP_FAST_INTERCEPT`` is on, and fall through otherwise."""
 

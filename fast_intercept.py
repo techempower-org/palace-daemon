@@ -29,6 +29,10 @@ helpers stay where the tests expect them.
 """
 from __future__ import annotations
 
+import os
+import threading
+import time
+
 
 def fast_status_payload() -> dict:
     """Per-wing / per-room counts via direct SQL — no MCP, no AGE, no locks.
@@ -171,7 +175,7 @@ def fast_mcp_kg_stats_payload() -> dict:
     Raises if AGE isn't reachable — the caller falls back to the slow path.
     """
     import main  # lazy — preserves `patch.object(main, "_read_kg_postgres_stats")`
-    stats = main._read_kg_postgres_stats()
+    stats = main._read_kg_postgres_stats(exact_mentions=False)
     if not stats:
         raise RuntimeError("AGE knowledge graph unreachable")
     triples = int(stats.get("triples", 0))
@@ -182,6 +186,83 @@ def fast_mcp_kg_stats_payload() -> dict:
         "expired_facts": 0,
         "relationship_types": list(stats.get("relationship_types", [])),
     }
+
+
+# ── kg_stats cache + single flight (#290) ────────────────────────────────────
+#
+# Even at ~290 ms the payload is not the "sub-millisecond" this module promises,
+# and N concurrent callers each pay it. The cache makes a repeat free and the
+# lock makes N concurrent cold callers cost ONE query rather than N.
+#
+# EXACTNESS IS PRESERVED — this caches the real counts, it does not estimate
+# them. `pg_class.reltuples` was the alternative in #290 and is not used: the
+# cold query was made cheap instead (EXISTS for MENTIONS), so there is nothing
+# to trade accuracy for.
+#
+# TTL default 120 s: kg_stats is an operator-facing summary of a graph that
+# changes by mining, and a two-minute-old entity count answers every question
+# anyone asks of it. `PALACE_KG_STATS_TTL=0` disables the cache entirely.
+_kg_stats_lock = threading.Lock()
+_kg_stats_cached: dict | None = None
+_kg_stats_at: float = 0.0
+_kg_stats_queries = 0          # test seam: counts real computations, not calls
+
+
+def _kg_stats_ttl() -> float:
+    try:
+        return float(os.environ.get("PALACE_KG_STATS_TTL", "120"))
+    except (TypeError, ValueError):
+        return 120.0
+
+
+def kg_stats_cache_clear() -> None:
+    """Drop the cached payload (tests, and any future explicit invalidation)."""
+    global _kg_stats_cached, _kg_stats_at
+    with _kg_stats_lock:
+        _kg_stats_cached = None
+        _kg_stats_at = 0.0
+
+
+def fast_mcp_kg_stats_cached() -> tuple[dict, bool]:
+    """``(payload, was_cached)`` — the payload above, memoised with single flight.
+
+    Returns ``was_cached`` so the caller can log "intercepted, cached" apart
+    from "intercepted, cold"; #290's complaint was that the journal showed only
+    ``/mcp slow path:`` and so read as "not intercepted at all".
+    """
+    global _kg_stats_cached, _kg_stats_at, _kg_stats_queries
+    ttl = _kg_stats_ttl()
+    now = time.monotonic()
+    if ttl > 0 and _kg_stats_cached is not None and (now - _kg_stats_at) < ttl:
+        return dict(_kg_stats_cached), True
+    # Single flight: the second caller blocks here, then the re-check below
+    # sees the first caller's result and returns it without querying.
+    with _kg_stats_lock:
+        now = time.monotonic()
+        if ttl > 0 and _kg_stats_cached is not None and (now - _kg_stats_at) < ttl:
+            return dict(_kg_stats_cached), True
+        # Through main's namespace, NOT the local symbol — the same reason
+        # fast_mcp_kg_stats_payload reaches for `main._read_kg_postgres_stats`:
+        # `patch.object(main, "_fast_mcp_kg_stats_payload")` is the seam three
+        # existing suites use to control what /mcp returns (#286's regression
+        # coverage among them). Calling the local function would silently
+        # bypass every one of those patches.
+        import main
+        try:
+            payload = main._fast_mcp_kg_stats_payload()
+        except Exception:
+            # Only SUCCESSFUL payloads are cached, and a failure INVALIDATES a
+            # previously cached success rather than hiding behind it for the
+            # rest of the TTL. The exception propagates to /mcp, which falls
+            # through to the slow path and logs it.
+            _kg_stats_cached = None
+            _kg_stats_at = 0.0
+            raise
+        _kg_stats_queries += 1
+        if ttl > 0:
+            _kg_stats_cached = dict(payload)
+            _kg_stats_at = time.monotonic()
+        return dict(payload), False
 
 
 # ── /list fast path (#231) ───────────────────────────────────────────────────

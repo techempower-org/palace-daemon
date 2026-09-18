@@ -37,6 +37,7 @@ _ROOT = os.path.dirname(_HERE)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+import fast_intercept
 import main  # noqa: E402
 
 

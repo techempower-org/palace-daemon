@@ -73,6 +73,11 @@ DECLARED_ONTOLOGY = {
 }
 
 
+
+# Only this module's new/reworked warnings use it; the other 14 root-logger
+# sites in this file are #292's to route, not this PR's.
+_log = logging.getLogger("palace-daemon.kg_reader")
+
 def _config():
     """Lazy mempalace config accessor — avoids importing mempalace at module
     load time (matches the postgres.py / db_errors.py pattern)."""
@@ -426,7 +431,7 @@ def read_kg_postgres(
     return entities, triples, mentions
 
 
-def read_kg_postgres_stats() -> dict | None:
+def read_kg_postgres_stats(exact_mentions: bool = True) -> dict | None:
     """Live KG stats from Apache AGE — entity, RELATION, MENTIONS counts.
 
     Three counts straight off the AGE backing label tables (avoiding
@@ -443,6 +448,17 @@ def read_kg_postgres_stats() -> dict | None:
 
     Pre-1.8.2 this field was named ``triples`` but counted MENTIONS,
     masking the fact that we have entities but ~zero semantic facts.
+
+    ``exact_mentions=False`` replaces the MENTIONS ``count(*)`` with an
+    ``EXISTS`` probe and omits the ``mentions`` key. Measured on the live
+    palace 2026-09-18: that count is **51,539,744 rows and 27.6 s**, against
+    40.7 ms for Entity and 247.5 ms for RELATION — it IS the cost of this
+    function, and it exceeds the 30 s statement timeout under load, in which
+    case the whole call fails and every count is lost. ``EXISTS`` is 0.5 ms.
+    Callers that only need to know WHICH edge labels are populated (the
+    ``relationship_types`` list) never needed the number. The key is omitted
+    rather than zeroed so a caller that does need it fails loudly instead of
+    reading a wrong count.
 
     Returns ``None`` when AGE is unreachable so the caller falls back to
     the MCP-derived payload (which is still correct under the chroma
@@ -469,6 +485,7 @@ def read_kg_postgres_stats() -> dict | None:
         entities = 0
         triples = 0
         mentions = 0
+        mentions_present = False
         try:
             with kg._conn.cursor() as cur:
                 cur.execute(f'SELECT count(*) FROM {graph}."Entity"')
@@ -477,15 +494,43 @@ def read_kg_postgres_stats() -> dict | None:
                 cur.execute(f'SELECT count(*) FROM {graph}."RELATION"')
                 row = cur.fetchone()
                 triples = int(row[0]) if row else 0
-                cur.execute(f'SELECT count(*) FROM {graph}."MENTIONS"')
-                row = cur.fetchone()
-                mentions = int(row[0]) if row else 0
+                if exact_mentions:
+                    cur.execute(f'SELECT count(*) FROM {graph}."MENTIONS"')
+                    row = cur.fetchone()
+                    mentions = int(row[0]) if row else 0
+                    mentions_present = mentions > 0
+                else:
+                    # 0.5 ms vs 27.6 s — see the docstring. EXISTS stops at the
+                    # first row; count(*) walks 51.5M of them to answer a
+                    # question no caller on this path asks.
+                    cur.execute(f'SELECT EXISTS(SELECT 1 FROM {graph}."MENTIONS")')
+                    row = cur.fetchone()
+                    mentions_present = bool(row[0]) if row else False
         except Exception as e:
-            logging.warning("read_kg_postgres_stats: count queries failed: %s", e)
+            # RETURN None — do not fall through and build a payload from the
+            # initialised zeros. A statement_timeout here used to produce
+            # `entities: 10, triples: 0, mentions: 0`, which is
+            # indistinguishable from a real graph that happens to look like
+            # that, and #290 then cached it for a TTL. Removing the 27.6 s
+            # trigger did not remove this mechanism.
+            #
+            # None is already this function's contract for "could not answer"
+            # (see the docstring), and every caller handles it: the fast
+            # intercept raises and /mcp falls to the slow path, /graph falls
+            # back to the MCP-derived payload. Partial truth is NOT preserved
+            # here any more, deliberately — a confident wrong number is worse
+            # than an honest gap, and the previous behaviour had no way to say
+            # which of its counts were real.
+            #
+            # Logged on the daemon's own logger, not root: this failure being
+            # invisible in the stream anyone greps is why it survived. One of
+            # #292's 19 sites, routed here because #290 needs it to surface.
+            _log.warning("read_kg_postgres_stats: count queries failed, returning None: %s", e)
             try:
                 kg._conn.rollback()
             except Exception:
                 pass
+            return None
     finally:
         try:
             kg.close()
@@ -494,13 +539,20 @@ def read_kg_postgres_stats() -> dict | None:
     # relationship_types reports only edge labels with nonzero rows so
     # consumers can branch on what's actually populated. RELATION is
     # excluded until/unless triple extraction lands.
-    rel_types = [name for name, n in (("RELATION", triples), ("MENTIONS", mentions)) if n]
-    return {
+    rel_types = [
+        name for name, present in (("RELATION", triples > 0), ("MENTIONS", mentions_present)) if present
+    ]
+    out = {
         "entities": entities,
         "triples": triples,
-        "mentions": mentions,
         "relationship_types": rel_types,
     }
+    if exact_mentions:
+        # Only present when it was actually counted. Omitted rather than 0 on
+        # the cheap path: a consumer that needs the number should raise a
+        # KeyError, not silently read a wrong one (/ontology asserts it).
+        out["mentions"] = mentions
+    return out
 
 
 # ── Full-graph structural stats (SME Cat 5/8) ────────────────────────────────
