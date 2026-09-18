@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+### Fixed — *#293: drain priority was per-pass, so a small mine waited a full pass*
+
+#261 sorts `projects`-mode entries first, but only when a batch is claimed, and a
+pass is serial and non-preemptible. Measured on the deployed daemon 2026-09-18:
+
+| | |
+|---|---|
+| `.processing` claimed | 05:35:52 — 20 entries (projects 1 · convos 11 · session 8) |
+| 7 `docs/specs` mines POSTed | 07:12–07:17 → **1h37m after the claim** |
+| those entries in flight | **0** |
+| live queue | 178 → 181 in ~37 min (growing) |
+| one transcript mine | ≥ 427 s, still running |
+| one pass (20 serial) | **≥ 2.2 h** — a floor, not a mean |
+
+The claim is now a **bounded rolling priority queue**: after each mine, newly
+queued entries are merged into the remaining claim, re-sorted, and the best
+`cap − mines_consumed` kept. A priority-1 arrival waits **at most one mine**.
+
+**Absorb by replacement, never by addition.** A boundary may swap a not-yet-run
+entry for a better arrival; it may never grow the pass. #261's cap still bounds a
+pass, and that has its own test rather than being assumed — if a boundary could
+add, "at most one pass" would become unbounded.
+
+**Deferrals are written once, at the end of the pass.** Writing them at the
+boundary looked equivalent and was not: a deferred entry is re-absorbed by the
+next boundary and re-deferred at every one after, so its `drain_deferrals`
+counter climbs several times within a single pass and it reaches #261's escape
+threshold — at which point the backlog outranks the very `projects` mines this
+change exists to promote. #260's own tests caught it. `.processing` carries the
+held deferrals meanwhile, so #244's recovery still folds back everything the
+pass owes and nothing it has already run.
+
+`/mine/status` gains `last_boundary_merge_at` and `arrivals_absorbed_last_pass`,
+so the mechanism is visible without reading code.
+
+Measured: the boundary merge costs **2.5–3.6 ms** with a 500-line pending file
+and 20 owned entries — against a transcript mine's ≥ 427 s floor, i.e. ~0.0008%
+of one mine.
+
+`tests/test_drain_rolling_claim.py` (9) asserts the **order of targets handed to
+the mine runner**, never timing. On the unmodified base the headline test fails
+with the arrival never running at all — `['/d0','/d1','/d2','/d3','/d4','/d5']`
+— which is the reported symptom exactly.
+
+**Out of scope, deliberately:** de-duplicating transcript re-mines (#414), a
+separate small-mode lane, and shrinking the batch. This fixes **latency**, not
+throughput — the queue still grows faster than it drains.
+
 ### Performance — *#290: `mempalace_kg_stats` cost ~9.6 s in a "sub-millisecond" fast path*
 
 The fast intercept ran three exact `count(*)` queries over the AGE backing

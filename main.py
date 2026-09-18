@@ -922,6 +922,138 @@ def _drain_should_skip_unchanged(directory: str, mode: str, state: dict) -> bool
     )
 
 
+# ── #293: the claim is a bounded ROLLING priority queue, not a frozen batch ──
+#
+# #261 sorts projects-mode entries first, but only at the moment a batch is
+# claimed, and a pass is serial and non-preemptible. Measured 2026-09-18 on the
+# deployed daemon: a claim of 20 at 05:35, seven `docs/specs` mines POSTed at
+# 07:12 (1h37m later), zero of them in flight, one transcript mine still running
+# at 427 s, and the queue growing 178 -> 181 in 37 min. A priority-1 arrival
+# waited a FULL PASS — a ≥2.2 h floor — behind re-mines it outranks.
+#
+# So priority is re-evaluated at every mine boundary instead of once per pass.
+#
+# ABSORB BY REPLACEMENT, NEVER BY ADDITION. The budget for a pass is still
+# `_drain_batch_size()` entries total; a boundary may only swap a not-yet-run
+# entry for a better arrival, never grow the pass. Without that the cap stops
+# bounding anything and "at most one pass" becomes unbounded.
+_DRAIN_BOUNDARY_STATE = {"last_boundary_merge_at": None, "arrivals_absorbed_last_pass": 0}
+
+
+def _dedup_key(entry: dict) -> tuple:
+    payload = entry.get("payload") or {}
+    return (payload.get("dir"), payload.get("wing"), payload.get("mode", "convos"))
+
+
+def _rebalance_claim(owned: list, budget: int, path: str, proc_path: str) -> tuple:
+    """Merge newly queued entries into the remaining claim and re-sort.
+
+    ``owned`` is the not-yet-run remainder, in run order. Returns
+    ``(new_owned, absorbed, displaced)``. Displaced entries are handed to the
+    caller to defer ONCE at the end of the pass — see the note below on why
+    writing them here corrupts #261's starvation accounting.
+
+    ``.processing`` is rewritten to everything the pass still HOLDS — the
+    remainder plus anything displaced and not yet written back — so #244's
+    recovery folds back what is still owed and nothing already run.
+    """
+    if budget <= 0:
+        _write_processing(proc_path, owned)
+        return [], 0, list(owned)
+
+    arrivals: list = []
+    merge_path = proc_path + ".merge"
+    try:
+        # Atomic: a /mine POST landing mid-merge goes to a fresh `path` and is
+        # picked up by the NEXT boundary rather than being read and lost.
+        os.rename(path, merge_path)
+    except OSError:
+        merge_path = None
+    if merge_path:
+        try:
+            with open(merge_path, encoding="utf-8") as f:
+                for ln in f:
+                    if not ln.strip():
+                        continue
+                    try:
+                        arrivals.append((ln, json.loads(ln)))
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            arrivals = []
+        finally:
+            try:
+                os.remove(merge_path)
+            except OSError:
+                pass
+
+    # Dedup arrivals against the claim and against each other, newest wins but
+    # the HIGHEST deferral count survives — same rule the pass-level dedup uses,
+    # so a target that keeps being reposted while being deferred still escapes.
+    by_key: dict = {}
+    for _ln, e in owned:
+        by_key[_dedup_key(e)] = e
+    unique_arrivals: list = []
+    for ln, e in reversed(arrivals):
+        k = _dedup_key(e)
+        prior = by_key.get(k)
+        if prior is not None:
+            d = int(e.get("drain_deferrals", 0) or 0)
+            if d > int(prior.get("drain_deferrals", 0) or 0):
+                prior["drain_deferrals"] = d
+            continue
+        by_key[k] = e
+        unique_arrivals.append((ln, e))
+    unique_arrivals.reverse()
+
+    combined = list(owned) + unique_arrivals
+    order = sorted(
+        range(len(combined)),
+        key=lambda i: (_drain_entry_priority(combined[i][1]), i),
+    )
+    keep_idx = order[:budget]
+    keep = [combined[i] for i in keep_idx]
+    displaced = [combined[i] for i in range(len(combined)) if i not in set(keep_idx)]
+    # NOT written back here. A deferral written mid-pass is re-absorbed by the
+    # NEXT boundary — which re-increments its counter every boundary, so a
+    # backlog entry reaches #261's escape threshold within one pass and starts
+    # outranking the very projects mines this change exists to promote. Caught
+    # by #260's own tests. Deferrals are accumulated and written ONCE, at the
+    # end of the pass; `.processing` carries them meanwhile so a crash still
+    # recovers them (#244).
+    _write_processing(proc_path, keep + displaced)
+
+    owned_ids = {id(e) for _ln, e in owned}
+    absorbed = sum(1 for _ln, e in keep if id(e) not in owned_ids)
+    _DRAIN_BOUNDARY_STATE["last_boundary_merge_at"] = datetime.now().isoformat(timespec="seconds")
+    _DRAIN_BOUNDARY_STATE["arrivals_absorbed_last_pass"] += absorbed
+    return keep, absorbed, displaced
+
+
+def _defer_entries(entries: list, path: str) -> None:
+    """Hand entries back to the live queue with the deferral counter bumped."""
+    if not entries:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            for _ln, entry in entries:
+                carried = dict(entry)
+                carried["drain_deferrals"] = int(carried.get("drain_deferrals", 0) or 0) + 1
+                f.write(json.dumps(carried) + "\n")
+    except OSError:
+        _log.warning("drain-mine: could not defer %d entr(ies) back to the queue", len(entries))
+
+
+def _write_processing(proc_path: str, entries: list) -> None:
+    """``.processing`` must describe exactly what the pass still owes (#244)."""
+    try:
+        with open(proc_path, "w", encoding="utf-8") as f:
+            for ln, _entry in entries:
+                f.write(ln if ln.endswith("\n") else ln + "\n")
+    except OSError:
+        _log.warning("drain-mine: could not rewrite %s", proc_path)
+
+
 def _recover_orphaned_processing(path: str, proc_path: str) -> int:
     """Fold a leftover ``.processing`` batch back into the live queue.
 
@@ -974,6 +1106,7 @@ async def _drain_pending_mines() -> int:
     except OSError:
         return 0
     count = 0
+    _DRAIN_BOUNDARY_STATE["arrivals_absorbed_last_pass"] = 0
     failed_lines: list[str] = []
     requeue_lines: list[str] = []
     # Only rc==0 replays write into this, so a failed mine never suppresses
@@ -1015,18 +1148,13 @@ async def _drain_pending_mines() -> int:
         # the live queue so /mine posts landing during this pass share the
         # next one instead of waiting out the whole backlog (daemon#260).
         unique_entries, deferred_entries = _split_drain_batch(unique_entries)
+        # Held, not written (#293): a deferral written now is re-absorbed by the
+        # first boundary merge and re-deferred at every one after, inflating its
+        # counter until it escapes. Written once when the pass ends; carried in
+        # .processing until then so a crash recovers it.
+        pass_deferred: list = list(deferred_entries)
         if deferred_entries:
-            with open(path, "a", encoding="utf-8") as f:
-                for _line, deferred_entry in deferred_entries:
-                    carried = dict(deferred_entry)
-                    carried["drain_deferrals"] = int(carried.get("drain_deferrals", 0) or 0) + 1
-                    f.write(json.dumps(carried) + "\n")
-            # Leave .processing describing only what this pass owns, so a
-            # crash mid-pass recovers the in-flight batch and nothing else
-            # (_recover_orphaned_processing folds it back).
-            with open(proc_path, "w", encoding="utf-8") as f:
-                for batch_line, _entry in unique_entries:
-                    f.write(batch_line if batch_line.endswith("\n") else batch_line + "\n")
+            _write_processing(proc_path, unique_entries + deferred_entries)
             _log.info(
                 "drain-mine: replaying %d of %d queued target(s); %d deferred to the next pass",
                 len(unique_entries),
@@ -1037,7 +1165,15 @@ async def _drain_pending_mines() -> int:
         # endpoint — apply them on replay too so a queue entry can't smuggle
         # through a value the live endpoint would reject, and the two paths
         # can't drift (Copilot findings on jphein/palace-daemon#4 and #5).
-        for line, entry in unique_entries:
+        # #293: rolling claim. `finally` (not the loop tail) because the body
+        # below `continue`s on several validation paths, and a boundary merge
+        # they skipped would let a priority-1 arrival wait behind them.
+        owned = list(unique_entries)
+        _cap = _drain_batch_size()
+        consumed = 0
+        while owned:
+            line, entry = owned.pop(0)
+            consumed += 1
             try:
                 payload = entry["payload"]
                 raw_dir = payload.get("dir")
@@ -1178,6 +1314,26 @@ async def _drain_pending_mines() -> int:
             except Exception:
                 _log.exception("drain-mine: entry replay raised")
                 failed_lines.append(line)
+            finally:
+                # Budget is entries CONSUMED, matching #261's "deduped targets
+                # per drain pass" — a boundary may swap what is left, never add
+                # to it, so a pass still runs at most `_cap` entries.
+                owned, _absorbed, _displaced = _rebalance_claim(
+                    owned, _cap - consumed, path, proc_path
+                )
+                pass_deferred.extend(_displaced)
+                if _absorbed:
+                    _log.info(
+                        "drain-mine: boundary absorbed %d higher-priority arrival(s); "
+                        "%d entr(ies) still owed this pass",
+                        _absorbed,
+                        len(owned),
+                    )
+        if pass_deferred:
+            _defer_entries(pass_deferred, path)
+            _log.info(
+                "drain-mine: %d entr(ies) deferred to the next pass", len(pass_deferred)
+            )
         if failed_lines:
             qpath = proc_path + ".failed-" + datetime.now().strftime("%Y%m%d%H%M%S")
             with open(qpath, "w", encoding="utf-8") as f:
@@ -2542,6 +2698,12 @@ async def mine_status(x_api_key: str | None = Header(default=None)):
         "processing": processing,
         "active_mines": len(active) if active is not None else 0,
         "drainer_running": bool(task is not None and not task.done()),
+        # #293: so the next auditor can see the rolling claim working without
+        # reading code. The measured symptom was "priority is applied but a
+        # priority-1 entry still waits a full pass"; these two say whether a
+        # boundary has run recently and whether it absorbed anything.
+        "last_boundary_merge_at": _DRAIN_BOUNDARY_STATE.get("last_boundary_merge_at"),
+        "arrivals_absorbed_last_pass": _DRAIN_BOUNDARY_STATE.get("arrivals_absorbed_last_pass", 0),
         "repair_in_progress": bool(_repair_state.get("in_progress")),
         "next": _peek(path) + _peek(proc_path),
     }
