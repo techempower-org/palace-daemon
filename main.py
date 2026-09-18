@@ -1732,15 +1732,25 @@ async def mcp_proxy(request: Request, x_api_key: str | None = Header(default=Non
     # Fast-intercepts that have an upstream MCP equivalent — failures fall
     # through to the slow path so behaviour matches the upstream MCP server.
     fast_fn = None
-    if PALACE_MCP_FAST_INTERCEPT and tool in (
-        "mempalace_status",
-        "mempalace_kg_stats",
-        "mempalace_list_wings",
-        "mempalace_get_taxonomy",
-    ) and not arguments:
-        # list_wings / get_taxonomy take no arguments; the MCP tools sweep the
-        # whole drawer set and time out at 700K+ drawers (#239). Only intercept
-        # the no-argument call so any future filtered variant falls through.
+    if PALACE_MCP_FAST_INTERCEPT and (
+        # status / kg_stats are intercepted REGARDLESS of arguments (#286).
+        # Their fast SQL payloads ignore arguments already, and the
+        # no-argument condition was a live outage: a `kg_stats` call carrying
+        # any argument fell through to the real tool, took the KG lock, and
+        # ran a 10-20 s full-graph Cypher walk. Seven of those chained on the
+        # shared executor and took /health, /status/fast, /search/fast and the
+        # systemd watchdog probe down with them for 40 minutes, while the
+        # clients that issued them had already timed out. Answering from the
+        # fast counts is strictly better than answering slowly, and both
+        # payloads are argument-independent, so an unknown argument is ignored
+        # rather than being a reason to do 20 s of work.
+        tool in ("mempalace_status", "mempalace_kg_stats")
+        # list_wings / get_taxonomy keep the no-argument condition: the MCP
+        # tools sweep the whole drawer set and time out at 700K+ drawers
+        # (#239), and a future FILTERED variant of either must fall through
+        # rather than be answered from an unfiltered fast payload.
+        or (tool in ("mempalace_list_wings", "mempalace_get_taxonomy") and not arguments)
+    ):
         fast_fn = {
             "mempalace_status": _fast_mcp_status_payload,
             "mempalace_kg_stats": _fast_mcp_kg_stats_payload,
