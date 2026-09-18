@@ -126,8 +126,47 @@ PALACE_MCP_TOOL_TIMEOUT_SECONDS = float(os.getenv("PALACE_MCP_TOOL_TIMEOUT_SECON
 # Two pools, so tool execution physically cannot starve the liveness paths.
 # The watchdog one matters most: a starved pool means systemd stops receiving
 # WATCHDOG=1 and SIGABRTs a daemon whose only problem is a slow query.
+# Hard ceiling on MCP tool calls in flight. The existing
+# PALACE_MCP_TOOL_TIMEOUT_SECONDS bounds the CALLER's wait, not the daemon's
+# work: asyncio.wait_for cancels the awaitable while the thread keeps running
+# (its own comment says so), so a timed-out call still holds its slot. During
+# the 2026-09-17 outage the access log showed no /mcp traffic for the final
+# 20 minutes — every caller had gone and the daemon was still executing their
+# queued walks. Queueing work for a caller that is already gone is never
+# right; past the bound, say "busy" immediately and let the client decide.
+PALACE_MCP_TOOL_MAX_INFLIGHT = int(os.getenv("PALACE_MCP_TOOL_MAX_INFLIGHT", "8"))
+
 PALACE_FAST_EXECUTOR_WORKERS = int(os.getenv("PALACE_FAST_EXECUTOR_WORKERS", "4"))
 PALACE_TOOL_EXECUTOR_WORKERS = int(os.getenv("PALACE_TOOL_EXECUTOR_WORKERS", "8"))
+
+# Mutated only from the event loop, so increments and decrements between
+# awaits are atomic without a lock.
+_tool_inflight = 0
+
+
+def _release_tool_slot() -> None:
+    """Give back one in-flight slot. Called from the loop thread only."""
+    global _tool_inflight
+    _tool_inflight = max(0, _tool_inflight - 1)
+
+
+def _args_hash(arguments) -> str:
+    """Short stable digest of a tool call's arguments.
+
+    The daemon log carried nothing that pointed at the outage — py-spy did.
+    A tool name alone would not have distinguished one client retrying from
+    many clients asking different questions; the hash makes a repeat caller
+    visible without logging argument VALUES, which can carry search text.
+    Key order is normalized so the same call hashes the same way.
+    """
+    import hashlib
+
+    try:
+        blob = json.dumps(arguments or {}, sort_keys=True, default=str)
+    except Exception:
+        blob = repr(arguments)
+    return hashlib.sha256(blob.encode("utf-8", "replace")).hexdigest()[:8]
+
 
 _FAST_EXECUTOR = _futures.ThreadPoolExecutor(
     max_workers=max(1, PALACE_FAST_EXECUTOR_WORKERS),
@@ -1315,8 +1354,62 @@ async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
             if PALACE_MCP_TOOL_TIMEOUT_SECONDS <= 0 or tool_name in _MCP_TIMEOUT_EXEMPT
             else PALACE_MCP_TOOL_TIMEOUT_SECONDS
         )
+        global _tool_inflight
+        if _tool_inflight >= PALACE_MCP_TOOL_MAX_INFLIGHT:
+            # Refuse rather than queue. A queued call whose caller has already
+            # timed out is pure harm: it still takes the KG lock and still runs
+            # the full walk, for nobody.
+            _log.warning(
+                "/mcp busy: %d in flight >= PALACE_MCP_TOOL_MAX_INFLIGHT=%d; "
+                "refusing tool=%s args=%s",
+                _tool_inflight, PALACE_MCP_TOOL_MAX_INFLIGHT, tool_name or "<none>",
+                _args_hash(params.get("arguments") if isinstance(params, dict) else None),
+            )
+            return {
+                "jsonrpc": "2.0",
+                "id": request_dict.get("id"),
+                "error": {
+                    "code": -32003,
+                    "message": (
+                        f"daemon busy: {_tool_inflight} MCP tool call(s) in flight "
+                        f"(PALACE_MCP_TOOL_MAX_INFLIGHT={PALACE_MCP_TOOL_MAX_INFLIGHT}). "
+                        "Retry shortly."
+                    ),
+                },
+            }
+        # Every slow-path call is logged with tool + args hash: the incident
+        # was invisible in the daemon log and only py-spy found it.
+        _log.info(
+            "/mcp slow path: tool=%s args=%s inflight=%d",
+            tool_name or "<none>",
+            _args_hash(params.get("arguments") if isinstance(params, dict) else None),
+            _tool_inflight + 1,
+        )
+        # Hold the slot until the THREAD finishes, not until the await returns.
+        # This is the whole mechanism of the outage: asyncio.wait_for cancels
+        # the awaitable and releases the read semaphore, but the worker thread
+        # keeps running. Each timeout therefore freed a concurrency slot while
+        # leaving a live thread parked on the KG lock, so threads grew without
+        # bound even though the semaphore said 4. py-spy counted SEVEN threads
+        # in stats() against a read limit of 4 — that gap is this bug.
+        #
+        # So the callback goes on the concurrent.futures future (completes when
+        # the callable returns) rather than the asyncio one (completes on
+        # cancellation), and it hops back to the loop thread to mutate.
+        _tool_inflight += 1
+        cfut = _TOOL_EXECUTOR.submit(_mp.handle_request, request_dict)
+        def _on_done(_f, _loop=loop):
+            # The worker can outlive the loop (shutdown, or a test's loop
+            # closing under a still-parked thread). A slot on a dead loop is
+            # meaningless; never let bookkeeping raise inside a worker thread.
+            try:
+                _loop.call_soon_threadsafe(_release_tool_slot)
+            except RuntimeError:
+                pass
+
+        cfut.add_done_callback(_on_done)
         try:
-            fut = loop.run_in_executor(None, _mp.handle_request, request_dict)
+            fut = asyncio.wrap_future(cfut)
             result = await (asyncio.wait_for(fut, timeout) if timeout else fut)
         except asyncio.TimeoutError:
             return {
@@ -1906,7 +1999,8 @@ async def mcp_proxy(request: Request, x_api_key: str | None = Header(default=Non
 async def health():
     # Bypass semaphores — health must respond even when all slots are busy.
     loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(_FAST_EXECUTOR, _mp.handle_request, {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}}) or {}
+    _ping = {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}}
+    result = await loop.run_in_executor(_FAST_EXECUTOR, _mp.handle_request, _ping) or {}
     # Test actual collection access so /health reflects true palace state.
     palace_ok = False
     try:
