@@ -2,6 +2,55 @@
 
 ## Unreleased
 
+### Performance — *#290: `mempalace_kg_stats` cost ~9.6 s in a "sub-millisecond" fast path*
+
+The fast intercept ran three exact `count(*)` queries over the AGE backing
+tables. Measured on the live palace 2026-09-18 (read-only):
+
+| query | time | rows |
+|---|---:|---:|
+| `count(*) "Entity"` | 40.7 ms | 1,461,223 |
+| `count(*) "RELATION"` | 247.5 ms | 2,060,900 |
+| **`count(*) "MENTIONS"`** | **27,622 ms** | **51,539,744** |
+| `EXISTS "MENTIONS"` | **0.5 ms** | — |
+
+**The MENTIONS count was the entire cost, and the payload never returns it.** It
+is used for one thing: deciding whether `"MENTIONS"` belongs in
+`relationship_types`. `read_kg_postgres_stats(exact_mentions=False)` answers that
+with `EXISTS` and omits the `mentions` key — omitted rather than zeroed, so a
+consumer that needs the number (`/ontology` asserts it) raises instead of reading
+a wrong one. The default is unchanged for every existing caller.
+
+That count also exceeds the 30 s `statement_timeout` under load, and the failure
+is swallowed inside `read_kg_postgres_stats` — so the call could return with
+**all three counts lost** and only a root-logger warning to show for it (one of
+the 19 sites in #292, invisible in the daemon's own stream).
+
+On top of the cheap query, a **TTL cache behind a single-flight lock**
+(`PALACE_KG_STATS_TTL`, default 120 s, `0` disables): a repeat call is free and N
+concurrent cold callers cost **one** query, verified by counting at the seam with
+8 threads rather than inferring from wall clock. **Exactness is preserved** — the
+cache stores the real counts. `pg_class.reltuples` was #290's other suggestion and
+is deliberately not used: the cold query was made cheap instead, so there is
+nothing to trade accuracy for.
+
+`/mcp` now logs which path it took — `"/mcp fast path: tool=… cold|cached in N ms"`.
+#290's complaint was that the journal carried only `/mcp slow path:` lines, so an
+intercepted-but-slow call was indistinguishable from one never intercepted.
+
+`tests/test_kg_stats_cache.py` (10) drives the producer and the consumer
+together: the SQL actually issued on both paths, the cache and its single flight,
+and the real `/mcp` route for the envelope *and* the log line. All four guards are
+mutation-verified. The copy guard initially **survived** its mutant — the test
+poked the cold result, which is already a copy — and was rewritten to poke what a
+*cached* read returned.
+
+Three existing suites now reset the cache in `setUp`: it is process-global, so a
+payload cached by an earlier test stayed warm and their patched payloads were
+never consulted. The same is true in production for the TTL window — a payload
+that starts failing is not retried until the entry expires.
+
+
 ### Fixed — *#289: two warnings wrote to the root logger, not the daemon's*
 
 The daemon logs through `palace-daemon` (`main._log`) and `palace-daemon.rooms`

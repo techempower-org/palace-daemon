@@ -1873,7 +1873,10 @@ async def mcp_proxy(request: Request, x_api_key: str | None = Header(default=Non
     ):
         fast_fn = {
             "mempalace_status": _fast_mcp_status_payload,
-            "mempalace_kg_stats": _fast_mcp_kg_stats_payload,
+            # #290: through the single-flight TTL cache. The uncached
+            # `_fast_mcp_kg_stats_payload` is still exported and still the
+            # thing the cache calls, so tests that patch it keep working.
+            "mempalace_kg_stats": _fast_mcp_kg_stats_cached,
             "mempalace_list_wings": _fast_mcp_list_wings_payload,
             "mempalace_get_taxonomy": _fast_mcp_get_taxonomy_payload,
         }[tool]
@@ -1891,7 +1894,24 @@ async def mcp_proxy(request: Request, x_api_key: str | None = Header(default=Non
     if fast_fn is not None:
         loop = asyncio.get_running_loop()
         try:
+            _fast_t0 = _time.monotonic()
             payload = await loop.run_in_executor(None, fast_fn)
+            _fast_ms = (_time.monotonic() - _fast_t0) * 1000.0
+            # `fast_mcp_kg_stats_cached` returns (payload, was_cached); the
+            # other fast payloads return a bare dict.
+            _cached = None
+            if isinstance(payload, tuple) and len(payload) == 2:
+                payload, _cached = payload
+            # #290: the ONLY /mcp line in the journal was "slow path", so an
+            # intercepted-but-slow call was indistinguishable from one that was
+            # never intercepted. Say which happened, and how long it took.
+            if _cached is None:
+                _log.info("/mcp fast path: tool=%s in %.0f ms", tool, _fast_ms)
+            else:
+                _log.info(
+                    "/mcp fast path: tool=%s %s in %.0f ms",
+                    tool, "cached" if _cached else "cold", _fast_ms,
+                )
             envelope = {
                 "jsonrpc": "2.0",
                 "id": body.get("id"),
@@ -2548,6 +2568,7 @@ async def status_fast(x_api_key: str | None = Header(default=None)):
 from fast_intercept import (  # noqa: E402
     fast_list_payload as _fast_list_payload,
     fast_mcp_get_taxonomy_payload as _fast_mcp_get_taxonomy_payload,
+    fast_mcp_kg_stats_cached as _fast_mcp_kg_stats_cached,
     fast_mcp_kg_stats_payload as _fast_mcp_kg_stats_payload,
     fast_mcp_list_wings_payload as _fast_mcp_list_wings_payload,
     fast_mcp_status_payload as _fast_mcp_status_payload,
