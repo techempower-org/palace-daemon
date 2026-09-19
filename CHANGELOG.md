@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+### Fixed — *#299: `GET /stats` reached `tool_kg_stats` through `_call`, bypassing the fast intercept*
+
+Found on the deployed daemon 2026-09-18 (1d9e351e, `/health` 1.0 s, `/status/fast`
+0.34 s): `GET /stats` did not answer within 30 s under mine load. py-spy showed six
+`palace-tool_N` threads parked in `knowledge_graph_age.stats` via
+`mcp_server.tool_kg_stats`, reached through `handle_request` directly — the day's
+six `mempalace stats` / `GET /stats` probes. #287's intercept lived only in the
+`/mcp` HTTP handler; `/stats` fans out three **internal** `_call`s and `/graph`
+one, and `_call` went straight to the tool executor. #286's mechanism, second door.
+#287 held — `/health`, `/status/fast` and the watchdog were unaffected and the pool
+stayed bounded — so the blast radius was "stats hangs", not an outage.
+
+**Fixed in `_call`, not in `handle_request`.** `handle_request` is upstream
+mempalace code and the fast payloads are daemon SQL; `_call` is the lowest
+daemon-side point every internal tool call passes through, so the intercept there
+covers `/stats`, `/graph` and any future caller. The `/mcp` handler's inline rule and
+runner are factored into `_fast_intercept_fn` (the ONE eligibility rule, #286's
+"regardless of arguments" included) and `_run_fast_intercept` (off-loop run, cold/
+cached log line, #108 db-error recording, fall-through on failure), and both doors
+use them — so the HTTP door and the internal door cannot disagree about which tools
+are answered from SQL. The intercept runs BEFORE `_sem_for`, the in-flight ceiling
+and the tool executor: none of them is needed for a SQL count, and all of them are
+what a parked `tool_kg_stats` exhausts. The log line now names its door
+(`/mcp fast path:` / `_call fast path:`).
+
+`tests/test_stats_intercept.py` (13) models `handle_request` as parked on the KG
+lock for the two interceptable tools and asserts on which code RUNS, never on wall
+clock: `/stats` completes and `handle_request` is handed `mempalace_graph_stats`
+only (the py-spy assertion at the seam); `/graph`'s exact `kg_stats` request is
+intercepted; arguments do not send `kg_stats` to the lock from the internal door
+either; `/mcp` and `/stats` return the same payload; failure falls through; the flag
+off means slow path for all; an intercepted call takes no in-flight slot and logs
+no `slow path` line. Four AST tests close the door for good: every
+`handle_request` site in the repo is `_call` or a `ping`, `_call` consults the rule
+before the semaphore, `mcp_proxy` uses the same rule, and the tool→payload table
+exists in exactly one place. On the unmodified base the five behavioural tests time
+out and the AST tests fail for the missing rule.
+
 ### Fixed — *#293: drain priority was per-pass, so a small mine waited a full pass*
 
 #261 sorts `projects`-mode entries first, but only when a batch is claimed, and a
