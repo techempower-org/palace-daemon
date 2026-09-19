@@ -1556,7 +1556,124 @@ async def _do_silent_save_write(payload: dict) -> dict:
         return {"success": False, "error": str(e)}
 
 
+def _fast_intercept_fn(tool, arguments):
+    """The ONE eligibility rule for the fast intercept — return the zero-arg
+    fast callable for ``(tool, arguments)``, or ``None`` for the slow path.
+
+    Shared by ``/mcp`` and ``_call`` so there is a single rule rather than two
+    that drift. #299: the rule lived only in the ``/mcp`` HTTP handler, so an
+    INTERNAL ``_call`` — ``/stats`` fans out three of them, ``/graph`` one —
+    went straight to ``handle_request`` and ``tool_kg_stats`` took the KG
+    lock for a full-graph walk. Six ``palace-tool`` threads were parked in
+    ``knowledge_graph_age.stats`` for ``GET /stats`` probes while ``/mcp``
+    callers of the same tool were answered in milliseconds: #286's mechanism
+    through a second door. The dispatch table is built per call so the
+    helpers may be imported further down the module.
+    """
+    if not PALACE_MCP_FAST_INTERCEPT:
+        return None
+    if not isinstance(arguments, dict):
+        arguments = {}
+    if (
+        # status / kg_stats are intercepted REGARDLESS of arguments (#286).
+        # Their fast SQL payloads ignore arguments already, and the
+        # no-argument condition was a live outage: a `kg_stats` call carrying
+        # any argument fell through to the real tool, took the KG lock, and
+        # ran a 10-20 s full-graph Cypher walk. Seven of those chained on the
+        # shared executor and took /health, /status/fast, /search/fast and the
+        # systemd watchdog probe down with them for 40 minutes, while the
+        # clients that issued them had already timed out. Answering from the
+        # fast counts is strictly better than answering slowly, and both
+        # payloads are argument-independent, so an unknown argument is ignored
+        # rather than being a reason to do 20 s of work.
+        tool in ("mempalace_status", "mempalace_kg_stats")
+        # list_wings / get_taxonomy keep the no-argument condition: the MCP
+        # tools sweep the whole drawer set and time out at 700K+ drawers
+        # (#239), and a future FILTERED variant of either must fall through
+        # rather than be answered from an unfiltered fast payload.
+        or (tool in ("mempalace_list_wings", "mempalace_get_taxonomy") and not arguments)
+    ):
+        return {
+            "mempalace_status": _fast_mcp_status_payload,
+            # #290: through the single-flight TTL cache. The uncached
+            # `_fast_mcp_kg_stats_payload` is still exported and still the
+            # thing the cache calls, so tests that patch it keep working.
+            "mempalace_kg_stats": _fast_mcp_kg_stats_cached,
+            "mempalace_list_wings": _fast_mcp_list_wings_payload,
+            "mempalace_get_taxonomy": _fast_mcp_get_taxonomy_payload,
+        }[tool]
+    if tool == "mempalace_list_drawers" and set(arguments) <= {"wing", "room", "limit", "offset"}:
+        # #231: fast-intercept the unfiltered/wing-scoped listing (the
+        # upstream tool sweeps every drawer before paginating). since/
+        # before/tags arguments are Python-side filters the fast path
+        # doesn't implement — those requests fall through to the tool.
+        list_args = dict(arguments)
+        return lambda: _fast_list_payload(**list_args)
+    return None
+
+
+async def _run_fast_intercept(tool, fast_fn, origin: str):
+    """Run a fast payload off-loop. Returns the payload dict, or ``None`` when
+    it failed — the caller then falls through to the slow path, so behaviour
+    matches the upstream MCP server. ``origin`` names the door in the log."""
+    loop = asyncio.get_running_loop()
+    try:
+        _fast_t0 = _time.monotonic()
+        payload = await loop.run_in_executor(None, fast_fn)
+        _fast_ms = (_time.monotonic() - _fast_t0) * 1000.0
+        # `fast_mcp_kg_stats_cached` returns (payload, was_cached); the
+        # other fast payloads return a bare dict.
+        _cached = None
+        if isinstance(payload, tuple) and len(payload) == 2:
+            payload, _cached = payload
+        # #290: the ONLY /mcp line in the journal was "slow path", so an
+        # intercepted-but-slow call was indistinguishable from one that was
+        # never intercepted. Say which happened, and how long it took.
+        if _cached is None:
+            _log.info("%s fast path: tool=%s in %.0f ms", origin, tool, _fast_ms)
+        else:
+            _log.info(
+                "%s fast path: tool=%s %s in %.0f ms",
+                origin, tool, "cached" if _cached else "cold", _fast_ms,
+            )
+        return payload
+    except Exception as e:
+        # #108: if the fast-path failed because postgres bounced, record
+        # it on the observability ring buffer so /health.db_errors
+        # reflects the failure. The fall-through to the slow path
+        # is unchanged — behavioural parity with upstream is preserved.
+        try:
+            import psycopg2 as _ps2
+            if isinstance(e, _ps2.OperationalError):
+                _record_db_error(e)
+        except Exception:
+            pass
+        _log.warning("fast-intercept %s failed (%s); falling back to %s slow path", tool, e, origin)
+        return None
+
+
+def _fast_result_envelope(request_id, payload: dict) -> dict:
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "result": {"content": [{"type": "text", "text": json.dumps(payload)}]},
+    }
+
+
 async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
+    # #299: intercept BEFORE the semaphore, the in-flight ceiling and the
+    # tool executor — none of which the fast SQL payloads need, and all of
+    # which are what a parked `tool_kg_stats` exhausts. Every internal caller
+    # (/stats, /graph, /mcp's fall-through) now gets the same answer /mcp's
+    # own intercept gives, from the same rule.
+    _params = request_dict.get("params")
+    if request_dict.get("method") == "tools/call" and isinstance(_params, dict):
+        _tool = _params.get("name")
+        _fast_fn = _fast_intercept_fn(_tool, _params.get("arguments"))
+        if _fast_fn is not None:
+            _payload = await _run_fast_intercept(_tool, _fast_fn, origin="_call")
+            if _payload is not None:
+                return _fast_result_envelope(request_dict.get("id"), _payload)
     async with _sem_for(request_dict):
         loop = asyncio.get_running_loop()
         # JSON-RPC params can be a dict, an array, or null; only the dict
@@ -2072,88 +2189,14 @@ async def mcp_proxy(request: Request, x_api_key: str | None = Header(default=Non
 
     # Fast-intercepts that have an upstream MCP equivalent — failures fall
     # through to the slow path so behaviour matches the upstream MCP server.
-    fast_fn = None
-    if PALACE_MCP_FAST_INTERCEPT and (
-        # status / kg_stats are intercepted REGARDLESS of arguments (#286).
-        # Their fast SQL payloads ignore arguments already, and the
-        # no-argument condition was a live outage: a `kg_stats` call carrying
-        # any argument fell through to the real tool, took the KG lock, and
-        # ran a 10-20 s full-graph Cypher walk. Seven of those chained on the
-        # shared executor and took /health, /status/fast, /search/fast and the
-        # systemd watchdog probe down with them for 40 minutes, while the
-        # clients that issued them had already timed out. Answering from the
-        # fast counts is strictly better than answering slowly, and both
-        # payloads are argument-independent, so an unknown argument is ignored
-        # rather than being a reason to do 20 s of work.
-        tool in ("mempalace_status", "mempalace_kg_stats")
-        # list_wings / get_taxonomy keep the no-argument condition: the MCP
-        # tools sweep the whole drawer set and time out at 700K+ drawers
-        # (#239), and a future FILTERED variant of either must fall through
-        # rather than be answered from an unfiltered fast payload.
-        or (tool in ("mempalace_list_wings", "mempalace_get_taxonomy") and not arguments)
-    ):
-        fast_fn = {
-            "mempalace_status": _fast_mcp_status_payload,
-            # #290: through the single-flight TTL cache. The uncached
-            # `_fast_mcp_kg_stats_payload` is still exported and still the
-            # thing the cache calls, so tests that patch it keep working.
-            "mempalace_kg_stats": _fast_mcp_kg_stats_cached,
-            "mempalace_list_wings": _fast_mcp_list_wings_payload,
-            "mempalace_get_taxonomy": _fast_mcp_get_taxonomy_payload,
-        }[tool]
-    elif (
-        PALACE_MCP_FAST_INTERCEPT
-        and tool == "mempalace_list_drawers"
-        and set(arguments) <= {"wing", "room", "limit", "offset"}
-    ):
-        # #231: fast-intercept the unfiltered/wing-scoped listing (the
-        # upstream tool sweeps every drawer before paginating). since/
-        # before/tags arguments are Python-side filters the fast path
-        # doesn't implement — those requests fall through to the tool.
-        list_args = dict(arguments)
-        fast_fn = lambda: _fast_list_payload(**list_args)  # noqa: E731
+    # The eligibility rule and the runner are shared with `_call` (#299), so
+    # the HTTP door and the internal door cannot disagree about which tools
+    # are answered from SQL.
+    fast_fn = _fast_intercept_fn(tool, arguments)
     if fast_fn is not None:
-        loop = asyncio.get_running_loop()
-        try:
-            _fast_t0 = _time.monotonic()
-            payload = await loop.run_in_executor(None, fast_fn)
-            _fast_ms = (_time.monotonic() - _fast_t0) * 1000.0
-            # `fast_mcp_kg_stats_cached` returns (payload, was_cached); the
-            # other fast payloads return a bare dict.
-            _cached = None
-            if isinstance(payload, tuple) and len(payload) == 2:
-                payload, _cached = payload
-            # #290: the ONLY /mcp line in the journal was "slow path", so an
-            # intercepted-but-slow call was indistinguishable from one that was
-            # never intercepted. Say which happened, and how long it took.
-            if _cached is None:
-                _log.info("/mcp fast path: tool=%s in %.0f ms", tool, _fast_ms)
-            else:
-                _log.info(
-                    "/mcp fast path: tool=%s %s in %.0f ms",
-                    tool, "cached" if _cached else "cold", _fast_ms,
-                )
-            envelope = {
-                "jsonrpc": "2.0",
-                "id": body.get("id"),
-                "result": {
-                    "content": [{"type": "text", "text": json.dumps(payload)}]
-                },
-            }
-            return JSONResponse(content=envelope)
-        except Exception as e:
-            # #108: if the fast-path failed because postgres bounced, record
-            # it on the observability ring buffer so /health.db_errors
-            # reflects the failure. The fall-through to the slow path
-            # below is unchanged — behavioural parity with upstream is
-            # preserved.
-            try:
-                import psycopg2 as _ps2
-                if isinstance(e, _ps2.OperationalError):
-                    _record_db_error(e)
-            except Exception:
-                pass
-            _log.warning("fast-intercept %s failed (%s); falling back to /mcp slow path", tool, e)
+        payload = await _run_fast_intercept(tool, fast_fn, origin="/mcp")
+        if payload is not None:
+            return JSONResponse(content=_fast_result_envelope(body.get("id"), payload))
 
     # Daemon-native tools (#93): rooms CRUD + wakeup + mined. These have no
     # upstream MCP equivalent — the CLI commands they replace open a local
