@@ -768,6 +768,88 @@ def _decode_project_id(project_id: str) -> str:
     return s
 
 
+def _encode_like_claude(path: str) -> str:
+    """Claude Code's ~/.claude/projects/<id> encoding: every non-alphanumeric becomes '-'."""
+    return re.sub(r"[^A-Za-z0-9]", "-", path)
+
+
+def _longest_dir_match(rest: str, parent: Path) -> str:
+    """The longest child of ``parent`` whose encoded name equals ``rest`` or prefixes it at a '-'.
+
+    The encoding is lossy: ``familiar.realm.watch`` and a sub-directory launch
+    ``tapstone/scratch/x`` both become dash runs. Matching against the real
+    directory names resolves the ambiguity. The longest match wins, so
+    ``palace-daemon`` beats ``palace``.
+    """
+    best, best_len = "", 0
+    try:
+        names = [c.name for c in parent.iterdir() if c.is_dir()]
+    except OSError:
+        return ""
+    for name in names:
+        enc = _encode_like_claude(name)
+        if enc and (rest == enc or rest.startswith(enc + "-")) and len(enc) > best_len:
+            best, best_len = name, len(enc)
+    return best
+
+
+def _launch_wing(transcript_path: str) -> str:
+    """Wing from the session's LAUNCH directory, read from the transcript's folder.
+
+    Claude Code stores every transcript under ``~/.claude/projects/<encoded
+    launch dir>/``, and that folder never changes for the life of the
+    session. ``data["cwd"]``, by contrast, is wherever the session happens to
+    be ``cd``'d when a Stop or PreCompact hook fires. Using it filed one
+    transcript under a new wing at almost every checkpoint. On the palace host
+    the fleet-lead transcript (launched in $HOME) was queued as candela,
+    projects, memorypalace and goals_2026_09_28_overnight. 61 transcripts
+    ended up split across 2+ wings, and each wing change re-filed the whole
+    file.
+
+    Resolution, for ``~/.claude/projects/<id>/…`` (subagent transcripts nested
+    deeper included):
+
+    - ``<id>`` is $HOME itself → the home directory's name (``jp``).
+    - under ``~/Projects/`` → the project directory matched against the real
+      names (the longest match). This maps a sub-directory or a
+      ``.claude/worktrees/<wt>`` launch back to its project, and
+      ``familiar-realm-watch`` back to ``familiar.realm.watch``. With no
+      matching directory, the old decode applies (everything after
+      ``Projects-``).
+    - elsewhere under $HOME → the matching top-level directory, or the home
+      name for hidden dirs such as ``~/.claude``.
+    - outside $HOME → the old best-effort decode.
+
+    Returns "" when ``transcript_path`` is not a Claude Code transcript path.
+    """
+    if not transcript_path:
+        return ""
+    m = re.search(r"/\.claude/projects/(-[^/]+)/", transcript_path.replace("\\", "/"))
+    if not m:
+        return ""
+    encoded = m.group(1)
+    try:
+        home = Path.home()
+    except (OSError, RuntimeError):
+        return _slugify_project(_decode_project_id(encoded))
+    home_enc = _encode_like_claude(str(home))
+    if encoded == home_enc:
+        return _slugify_project(home.name)
+    projects = home / "Projects"
+    projects_enc = _encode_like_claude(str(projects))
+    if encoded.startswith(projects_enc + "-"):
+        rest = encoded[len(projects_enc) + 1 :]
+        name = _longest_dir_match(rest, projects)
+        return _slugify_project(name or _decode_project_id(encoded))
+    if encoded.startswith(home_enc + "-"):
+        rest = encoded[len(home_enc) + 1 :]
+        if rest.startswith("-"):  # a hidden directory: '.' encodes to '-'
+            return _slugify_project(home.name)
+        name = _longest_dir_match(rest, home)
+        return _slugify_project(name or rest.split("-", 1)[0])
+    return _slugify_project(_decode_project_id(encoded))
+
+
 def _project_wing(data: dict, transcript_path: str) -> str:
     """Resolve the wing slug for this session's writes.
 
@@ -775,9 +857,13 @@ def _project_wing(data: dict, transcript_path: str) -> str:
     not agent. The hook discovers the project by walking these sources
     in order:
 
-      1. data["cwd"] — Claude Code 2.1+ passes the session cwd on stdin.
-      2. transcript_path filename — Claude Code encodes the project root
-         in the parent directory name under ~/.claude/projects/.
+      1. transcript_path — the session's LAUNCH directory, which Claude
+         Code encodes in the folder name under ~/.claude/projects/. It is
+         stable for the session's life (see _launch_wing).
+      2. data["cwd"] — the session's CURRENT cwd at hook time. This is only
+         used when there is no transcript path, because a session that cd's
+         around would otherwise be filed under a different wing at each
+         checkpoint.
       3. os.getcwd() — last resort, may be wherever the hook was spawned.
 
     Returns the bare project slug (e.g. ``familiar_realm_watch``), NO
@@ -790,6 +876,10 @@ def _project_wing(data: dict, transcript_path: str) -> str:
 
     Fallback: ``personal`` if no project can be detected.
     """
+    launch = _launch_wing(transcript_path)
+    if launch:
+        return launch
+
     cwd = (data or {}).get("cwd", "")
     if cwd:
         try:
