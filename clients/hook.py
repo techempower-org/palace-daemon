@@ -793,6 +793,27 @@ def _longest_dir_match(rest: str, parent: Path) -> str:
     return best
 
 
+def _resolve_project_alias(projects: Path, name: str) -> str:
+    """The real project directory behind a symlinked ``~/Projects/<name>`` (#302).
+
+    ``~/Projects/storyvox -> candela`` is an alias whose palace wing was renamed
+    to ``candela``. Matching the link name re-created the retired ``storyvox``
+    wing. The link is resolved with ``os.path.realpath``; a target inside
+    ``~/Projects`` maps to its top-level project (``microcell -> 2g/microcell``
+    gives ``2g``). A link that leaves ``~/Projects`` keeps its own name.
+    """
+    link = projects / name
+    if not link.is_symlink():
+        return name
+    try:
+        real = Path(os.path.realpath(link))
+        root = Path(os.path.realpath(projects))
+        rel = real.relative_to(root)
+    except (OSError, ValueError):
+        return name
+    return rel.parts[0] if rel.parts else name
+
+
 def _launch_wing(transcript_path: str) -> str:
     """Wing from the session's LAUNCH directory, read from the transcript's folder.
 
@@ -813,7 +834,8 @@ def _launch_wing(transcript_path: str) -> str:
     - under ``~/Projects/`` → the project directory matched against the real
       names (the longest match). This maps a sub-directory or a
       ``.claude/worktrees/<wt>`` launch back to its project, and
-      ``familiar-realm-watch`` back to ``familiar.realm.watch``. With no
+      ``familiar-realm-watch`` back to ``familiar.realm.watch``. A symlinked
+      project dir resolves to its target (``storyvox -> candela``, #302). With no
       matching directory, the old decode applies (everything after
       ``Projects-``).
     - elsewhere under $HOME → the matching top-level directory, or the home
@@ -840,6 +862,8 @@ def _launch_wing(transcript_path: str) -> str:
     if encoded.startswith(projects_enc + "-"):
         rest = encoded[len(projects_enc) + 1 :]
         name = _longest_dir_match(rest, projects)
+        if name:
+            name = _resolve_project_alias(projects, name)
         return _slugify_project(name or _decode_project_id(encoded))
     if encoded.startswith(home_enc + "-"):
         rest = encoded[len(home_enc) + 1 :]
