@@ -80,6 +80,32 @@ class LaunchIdentityWing(unittest.TestCase):
         self.assertEqual(hook._project_wing({}, self._transcript(self.home / "dotfiles")), "dotfiles")
         self.assertEqual(hook._project_wing({}, self._transcript(self.home / ".claude" / "x")), "jp")
 
+    def test_symlinked_project_maps_to_its_target(self):
+        """~/Projects/storyvox -> candela: the palace wing was renamed to candela (#302).
+
+        Matching the link name re-created the retired ``storyvox`` wing and split the project.
+        """
+        (self.home / "Projects" / "storyvox").symlink_to(self.home / "Projects" / "candela")
+        for launch in ("storyvox", "storyvox/app/src"):
+            with self.subTest(launch=launch):
+                t = self._transcript(self.home / "Projects" / launch)
+                self.assertEqual(hook._project_wing({}, t), "candela")
+
+    def test_relative_and_nested_symlink_targets(self):
+        projects = self.home / "Projects"
+        (projects / "2g" / "microcell").mkdir(parents=True)
+        (projects / "3g").symlink_to("2g")  # relative link, as on katana
+        (projects / "microcell").symlink_to(projects / "2g" / "microcell")
+        self.assertEqual(hook._project_wing({}, self._transcript(projects / "3g")), "2g")
+        self.assertEqual(hook._project_wing({}, self._transcript(projects / "microcell")), "2g")
+
+    def test_symlink_leaving_projects_keeps_the_link_name(self):
+        outside = Path(self._tmp.name) / "elsewhere" / "thing"
+        outside.mkdir(parents=True)
+        (self.home / "Projects" / "thing-link").symlink_to(outside)
+        t = self._transcript(self.home / "Projects" / "thing-link")
+        self.assertEqual(hook._project_wing({}, t), "thing_link")
+
     def test_no_transcript_path_still_uses_cwd(self):
         """Unchanged fallback: without a transcript path the cwd rule applies."""
         data = {"cwd": str(self.home / "Projects" / "candela" / "src")}
