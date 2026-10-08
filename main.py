@@ -974,6 +974,93 @@ _DRAIN_BOUNDARY_STATE = {
 }
 
 
+# Drain-mine heartbeat (techempower-org/mempalace#548). On 2026-09-18 a
+# drainer-spawned transcript mine sat for 11 h 26 m at ~0 % CPU, 3 GB RSS and
+# idle DB connections, held the drainer's only slot all night, and left no log
+# line anywhere: the mine logs nothing until it exits, and the drainer only
+# waited on communicate(). This makes a running mine observable. It never kills
+# anything: the wait is not understood yet, and killing a mine mid-write is
+# worse than waiting for it.
+#   * every MEMPALACE_DRAIN_HEARTBEAT_S (default 300) an INFO line: target,
+#     elapsed, CPU seconds since the previous beat. A mine whose elapsed climbs
+#     while its CPU delta stays near zero is the #548 idle class.
+#   * once, past MEMPALACE_DRAIN_MINE_BUDGET_S (default 3600), a WARNING.
+#   * /mine/status reports the live mine as `active_mine`.
+_ACTIVE_MINE_STATE: dict = {}
+
+
+def _env_seconds(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        _log.warning("drain-mine: ignoring non-numeric %s=%r", name, raw)
+        return default
+    if value <= 0:
+        _log.warning("drain-mine: ignoring non-positive %s=%r", name, raw)
+        return default
+    return value
+
+
+def _proc_cpu_seconds(pid: int) -> float | None:
+    """utime + stime of a live process from /proc, or None if unreadable."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii") as f:
+            stat = f.read()
+        fields = stat[stat.rindex(")") + 2:].split()
+        return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+async def _communicate_with_heartbeat(proc, target: str):
+    """proc.communicate(), plus a heartbeat and a one-shot budget warning."""
+    beat = _env_seconds("MEMPALACE_DRAIN_HEARTBEAT_S", 300.0)
+    budget = _env_seconds("MEMPALACE_DRAIN_MINE_BUDGET_S", 3600.0)
+    started = _time.monotonic()
+    started_at = datetime.now().isoformat(timespec="seconds")
+    _ACTIVE_MINE_STATE.clear()
+    _ACTIVE_MINE_STATE.update(
+        {"target": target, "pid": proc.pid, "started_at": started_at,
+         "elapsed_s": 0, "cpu_s": None, "over_budget": False}
+    )
+    communicate = asyncio.ensure_future(proc.communicate())
+    last_cpu = _proc_cpu_seconds(proc.pid)
+    warned = False
+    try:
+        while True:
+            done, _ = await asyncio.wait({communicate}, timeout=beat)
+            if done:
+                return communicate.result()
+            elapsed = _time.monotonic() - started
+            cpu = _proc_cpu_seconds(proc.pid)
+            delta = None if cpu is None or last_cpu is None else cpu - last_cpu
+            last_cpu = cpu if cpu is not None else last_cpu
+            _ACTIVE_MINE_STATE.update(
+                {"elapsed_s": int(elapsed), "cpu_s": None if cpu is None else round(cpu, 1)}
+            )
+            _log.info(
+                "drain-mine: still running %s (pid %s) after %dm; %s CPU s since last beat",
+                target, proc.pid, int(elapsed // 60),
+                "?" if delta is None else f"{delta:.1f}",
+            )
+            if not warned and elapsed >= budget:
+                warned = True
+                _ACTIVE_MINE_STATE["over_budget"] = True
+                _log.warning(
+                    "drain-mine: %s (pid %s) is over its %dm budget at %dm, %s CPU s in total; "
+                    "not killed: dump it with `py-spy dump --pid %s` (#548)",
+                    target, proc.pid, int(budget // 60), int(elapsed // 60),
+                    "?" if cpu is None else f"{cpu:.0f}", proc.pid,
+                )
+    finally:
+        if not communicate.done():
+            communicate.cancel()
+        _ACTIVE_MINE_STATE.clear()
+
+
 def _dedup_key(entry: dict) -> tuple:
     payload = entry.get("payload") or {}
     return (payload.get("dir"), payload.get("wing"), payload.get("mode", "convos"))
@@ -1323,7 +1410,7 @@ async def _drain_pending_mines() -> int:
                     if active_mines is not None:
                         active_mines.add(proc)
                     try:
-                        stdout, stderr = await proc.communicate()
+                        stdout, stderr = await _communicate_with_heartbeat(proc, directory)
                     finally:
                         if active_mines is not None:
                             active_mines.discard(proc)
@@ -2816,6 +2903,9 @@ async def mine_status(x_api_key: str | None = Header(default=None)):
         "last_boundary_merge_at": _DRAIN_BOUNDARY_STATE.get("last_boundary_merge_at"),
         "arrivals_absorbed_this_pass": _DRAIN_BOUNDARY_STATE.get("arrivals_absorbed_this_pass", 0),
         "arrivals_absorbed_last_pass": _DRAIN_BOUNDARY_STATE.get("arrivals_absorbed_last_pass", 0),
+        # #548: the live drain mine, with elapsed and CPU seconds, so an idle
+        # mine is visible without reading /proc. None when nothing is running.
+        "active_mine": dict(_ACTIVE_MINE_STATE) or None,
         "repair_in_progress": bool(_repair_state.get("in_progress")),
         "next": _peek(path) + _peek(proc_path),
     }
