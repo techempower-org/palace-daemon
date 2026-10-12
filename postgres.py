@@ -64,7 +64,12 @@ def postgres_dsn(_config_provider=None) -> "str | None":
         # initialized, was it corrupted? Log so operators can triage.
         # Same lesson as #157 (silent except: pass hides bugs for weeks).
         import logging
-        logging.warning("postgres_dsn: config lookup failed (BACKEND_DOWN): %s", e)
+
+        # #292: a named logger, never the root one, so this lands in the
+        # palace-daemon stream. The import stays local, as before.
+        logging.getLogger("palace-daemon.postgres").warning(
+            "postgres_dsn: config lookup failed (BACKEND_DOWN): %s", e
+        )
         return None
 
 

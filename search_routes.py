@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+
+_log = logging.getLogger("palace-daemon.search_routes")  # #292: never the root logger
 import os
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -429,7 +431,7 @@ async def search_age_fused(
                     # Don't swallow silently — log so future Cypher-syntax
                     # regressions are visible. The original per-entity try/
                     # except was hiding #157 for weeks.
-                    logging.warning(
+                    _log.warning(
                         "/search/age-fused: AGE Cypher failed for entity %r: %s",
                         getattr(qe, "name", qe), e,
                     )
@@ -448,7 +450,7 @@ async def search_age_fused(
         query_entities, graph_hits_by_drawer = await asyncio.to_thread(_age_lookup)
     except Exception as e:
         # AGE not available — log + fall through.
-        logging.warning("/search/age-fused: AGE lookup failed: %s — falling back to vector-only", e)
+        _log.warning("/search/age-fused: AGE lookup failed: %s — falling back to vector-only", e)
 
     # Step 3: RRF fusion. Vector rank by position; graph rank by overlap count.
     # Vector hits from mempalace_search expose the drawer id as `drawer_id`
@@ -510,7 +512,7 @@ async def search_age_fused(
                             for r in cur.fetchall()
                         }
             except Exception as e:
-                logging.warning("/search/age-fused: graph-only hydration failed: %s", e)
+                _log.warning("/search/age-fused: graph-only hydration failed: %s", e)
                 return {}
         hydrated = await asyncio.to_thread(_hydrate_drawers, graph_only_ids)
 
