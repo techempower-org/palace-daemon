@@ -151,7 +151,7 @@ def read_wings_rooms_postgres() -> tuple[dict[str, int], list[dict]]:
         # degrade to empty rather than 500 the /graph request. Log so
         # the underlying failure is visible to journalctl (lesson from
         # palace-daemon#157 — silent swallows hide bugs for weeks).
-        logging.warning("read_wings_rooms_postgres: query failed: %s", e)
+        _log.warning("read_wings_rooms_postgres: query failed: %s", e)
         return {}, []
 
     all_wings = set(wings) | set(rooms_by_wing)
@@ -285,7 +285,7 @@ def read_kg_postgres(
 
         kg = KnowledgeGraphAGE(dsn=dsn)
     except Exception as e:
-        logging.warning("read_kg_postgres: KnowledgeGraphAGE init failed: %s", e)
+        _log.warning("read_kg_postgres: KnowledgeGraphAGE init failed: %s", e)
         return [], [], []
 
     entities: list[dict] = []
@@ -308,7 +308,7 @@ def read_kg_postgres(
     try:
         conn = _psycopg2.connect(dsn, connect_timeout=3)
     except Exception as e:
-        logging.warning("read_kg_postgres: connect failed, falling back to empty: %s", e)
+        _log.warning("read_kg_postgres: connect failed, falling back to empty: %s", e)
         try:
             kg.close()
         except Exception:
@@ -338,7 +338,7 @@ def read_kg_postgres(
                                 "properties": {},
                             })
                 except Exception as e:
-                    logging.warning("read_kg_postgres: Entity scan failed: %s", e)
+                    _log.warning("read_kg_postgres: Entity scan failed: %s", e)
                     conn.rollback()
 
                 try:
@@ -377,7 +377,7 @@ def read_kg_postgres(
                             "source_file": None,
                         })
                 except Exception as e:
-                    logging.warning("read_kg_postgres: RELATION scan failed: %s", e)
+                    _log.warning("read_kg_postgres: RELATION scan failed: %s", e)
                     conn.rollback()
 
                 try:
@@ -416,7 +416,7 @@ def read_kg_postgres(
                             "source_file": etype,
                         })
                 except Exception as e:
-                    logging.warning("read_kg_postgres: MENTIONS scan failed: %s", e)
+                    _log.warning("read_kg_postgres: MENTIONS scan failed: %s", e)
                     conn.rollback()
     finally:
         try:
@@ -478,7 +478,7 @@ def read_kg_postgres_stats(exact_mentions: bool = True) -> dict | None:
     except Exception as e:
         # Same lesson as #160 — silent None hides KG init failures
         # behind /graph's empty kg_stats response.
-        logging.warning("read_kg_postgres_stats: KnowledgeGraphAGE init failed: %s", e)
+        _log.warning("read_kg_postgres_stats: KnowledgeGraphAGE init failed: %s", e)
         return None
     try:
         graph = getattr(kg, "GRAPH_NAME", "mempalace_kg")
@@ -675,7 +675,7 @@ def compute_structural_stats(
             stats["modularity_communities"] = len(communities)
         except Exception as e:  # pragma: no cover - networkx variance
             stats["modularity_note"] = f"modularity computation failed: {e}"
-            logging.warning("compute_structural_stats: modularity failed: %s", e)
+            _log.warning("compute_structural_stats: modularity failed: %s", e)
 
     return stats
 
@@ -713,14 +713,14 @@ def read_structural_stats(*, with_modularity: bool = True) -> dict | None:
         except Exception:
             pass
     except Exception as e:
-        logging.warning("read_structural_stats: KG init failed: %s", e)
+        _log.warning("read_structural_stats: KG init failed: %s", e)
         return None
 
     import psycopg2 as _psycopg2
     try:
         conn = _psycopg2.connect(dsn, connect_timeout=3)
     except Exception as e:
-        logging.warning("read_structural_stats: connect failed: %s", e)
+        _log.warning("read_structural_stats: connect failed: %s", e)
         return None
 
     edges: list[tuple] = []
@@ -741,7 +741,7 @@ def read_structural_stats(*, with_modularity: bool = True) -> dict | None:
                 )
                 edges = [(r[0], r[1]) for r in cur.fetchall()]
     except Exception as e:
-        logging.warning("read_structural_stats: RELATION scan failed: %s", e)
+        _log.warning("read_structural_stats: RELATION scan failed: %s", e)
         try:
             conn.rollback()
         except Exception:
@@ -786,7 +786,7 @@ def _read_effective_entity_kinds(sample_limit: int = 20000) -> dict[str, int] | 
 
         kg = KnowledgeGraphAGE(dsn=dsn)
     except Exception as e:
-        logging.warning("_read_effective_entity_kinds: KG init failed: %s", e)
+        _log.warning("_read_effective_entity_kinds: KG init failed: %s", e)
         return None
     graph = getattr(kg, "GRAPH_NAME", "mempalace_kg")
     kinds: dict[str, int] = {}
@@ -794,7 +794,7 @@ def _read_effective_entity_kinds(sample_limit: int = 20000) -> dict[str, int] | 
     try:
         conn = _psycopg2.connect(dsn, connect_timeout=3)
     except Exception as e:
-        logging.warning("_read_effective_entity_kinds: connect failed: %s", e)
+        _log.warning("_read_effective_entity_kinds: connect failed: %s", e)
         try:
             kg.close()
         except Exception:
@@ -823,7 +823,7 @@ def _read_effective_entity_kinds(sample_limit: int = 20000) -> dict[str, int] | 
                 for etype, n in cur.fetchall():
                     kinds[etype or "UNTAGGED"] = int(n)
     except Exception as e:
-        logging.warning("_read_effective_entity_kinds: query failed: %s", e)
+        _log.warning("_read_effective_entity_kinds: query failed: %s", e)
         try:
             conn.rollback()
         except Exception:
