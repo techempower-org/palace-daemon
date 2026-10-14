@@ -1038,7 +1038,7 @@ def _describe_mine_phase(rec: dict | None) -> str:
     text = f"phase {rec['phase']}"
     try:
         text += f" for {int(_time.time() - float(rec['since']))}s"
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
         pass
     if "file" in rec and "files_total" in rec:
         text += f", file {rec['file']}/{rec['files_total']}"
@@ -1460,12 +1460,18 @@ async def _drain_pending_mines() -> int:
                     )
                 async with _mine_sem:
                     phase_file = _new_mine_phase_file()
-                    proc = await asyncio.create_subprocess_exec(
-                        *cmd,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                        env={**os.environ, _MINE_PHASE_ENV: phase_file},
-                    )
+                    try:
+                        proc = await asyncio.create_subprocess_exec(
+                            *cmd,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                            env={**os.environ, _MINE_PHASE_ENV: phase_file},
+                        )
+                    except BaseException:
+                        # A failed spawn (missing binary, ENOMEM) would
+                        # otherwise leak the private directory.
+                        _drop_mine_phase_file(phase_file)
+                        raise
                     # Track for lifespan shutdown cleanup (#136 problem B).
                     # active_mines may be None during the at-startup drain
                     # call (before lifespan startup completes); the post-

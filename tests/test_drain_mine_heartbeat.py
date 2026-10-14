@@ -98,6 +98,9 @@ class DrainMineHeartbeat(unittest.TestCase):
             src = f.read()
         self.assertIn("env={**os.environ, _MINE_PHASE_ENV: phase_file}", src)
         self.assertIn("_drop_mine_phase_file(phase_file)", src)
+        spawn = src.index("env={**os.environ, _MINE_PHASE_ENV: phase_file}")
+        self.assertIn("except BaseException:", src[spawn:spawn + 400],
+                      "a failed spawn must drop the private directory")
 
     def test_phase_file_lives_in_a_private_directory(self):
         path = main._new_mine_phase_file()
@@ -202,6 +205,10 @@ class DrainMinePhase(unittest.TestCase):
             main._drop_mine_phase_file(path)
         self.assertIsNone(main._read_mine_phase(None))
         self.assertEqual(main._describe_mine_phase({"phase": "open"}), "phase open")
+        # json.load accepts Infinity; int(inf) raises OverflowError, which
+        # must not escape into the heartbeat loop and cancel communicate().
+        for since in (float("inf"), float("nan"), "soon"):
+            self.assertEqual(main._describe_mine_phase({"phase": "file", "since": since}), "phase file")
 
 
 if __name__ == "__main__":
