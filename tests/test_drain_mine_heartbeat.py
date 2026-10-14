@@ -13,7 +13,9 @@ heartbeat and budget shrunk to fractions of a second. They check that it:
 """
 import asyncio
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -95,7 +97,33 @@ class DrainMineHeartbeat(unittest.TestCase):
         with open(main.__file__, encoding="utf-8") as f:
             src = f.read()
         self.assertIn("env={**os.environ, _MINE_PHASE_ENV: phase_file}", src)
-        self.assertIn("os.unlink(phase_file)", src)
+        self.assertIn("_drop_mine_phase_file(phase_file)", src)
+
+    def test_phase_file_lives_in_a_private_directory(self):
+        path = main._new_mine_phase_file()
+        parent = os.path.dirname(path)
+        try:
+            self.assertEqual(os.stat(parent).st_mode & 0o777, 0o700)
+            self.assertNotEqual(parent, tempfile.gettempdir())
+            self.assertFalse(os.path.exists(path), "the mine, not the daemon, creates the file")
+            with open(path, "w") as f:
+                f.write("{}")
+            with open(path + ".99.tmp", "w") as f:  # a write the mine left half-done
+                f.write("{")
+        finally:
+            main._drop_mine_phase_file(path)
+        self.assertFalse(os.path.exists(parent), "the whole directory is removed")
+
+    def test_drop_never_removes_a_directory_it_did_not_make(self):
+        shared = tempfile.mkdtemp(prefix="not-ours-")
+        bystander = os.path.join(shared, "someone-elses.log")
+        with open(bystander, "w") as f:
+            f.write("keep me")
+        try:
+            main._drop_mine_phase_file(os.path.join(shared, "phase.json"))
+            self.assertTrue(os.path.exists(bystander), "a foreign directory must survive")
+        finally:
+            shutil.rmtree(shared, ignore_errors=True)
         self.assertEqual(main._MINE_PHASE_ENV, "MEMPALACE_MINE_PHASE_FILE")
 
 
@@ -142,8 +170,7 @@ class DrainMinePhase(unittest.TestCase):
         try:
             out, seen = self.run_mine(_PHASE_WRITER, path, args=(path,))
         finally:
-            if os.path.exists(path):
-                os.unlink(path)
+            main._drop_mine_phase_file(path)
         beats = [line for line in out if "still running" in line]
         self.assertTrue(beats, out)
         self.assertIn("phase file for 4", beats[-1])  # since = now - 42 s
@@ -156,7 +183,10 @@ class DrainMinePhase(unittest.TestCase):
     def test_absent_phase_file_reads_as_unknown(self):
         path = main._new_mine_phase_file()
         self.assertFalse(os.path.exists(path), "the mine, not the daemon, creates the file")
-        out, seen = self.run_mine("import time; time.sleep(0.7)", path)
+        try:
+            out, seen = self.run_mine("import time; time.sleep(0.7)", path)
+        finally:
+            main._drop_mine_phase_file(path)
         beats = [line for line in out if "still running" in line]
         self.assertTrue(beats and all(b.endswith("phase ?") for b in beats), out)
         self.assertIsNone(seen.get("phase"))
@@ -169,7 +199,7 @@ class DrainMinePhase(unittest.TestCase):
                     f.write(body)
                 self.assertIsNone(main._read_mine_phase(path), body)
         finally:
-            os.unlink(path)
+            main._drop_mine_phase_file(path)
         self.assertIsNone(main._read_mine_phase(None))
         self.assertEqual(main._describe_mine_phase({"phase": "open"}), "phase open")
 

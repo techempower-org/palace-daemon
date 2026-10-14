@@ -26,6 +26,7 @@ import sys
 import concurrent.futures as _futures
 import fcntl
 import fnmatch
+import shutil
 import signal
 import time as _time
 from contextlib import asynccontextmanager
@@ -996,11 +997,27 @@ _MINE_PHASE_ENV = "MEMPALACE_MINE_PHASE_FILE"
 
 
 def _new_mine_phase_file() -> str:
-    """A fresh, empty path for one mine's phase file (the mine creates it)."""
-    fd, path = tempfile.mkstemp(prefix="drain-mine-phase-", suffix=".json")
-    os.close(fd)
-    os.unlink(path)
-    return path
+    """A path for one mine's phase file, inside a fresh private directory.
+
+    The directory is mkdtemp's (0700, unpredictable name), so no other local
+    user can pre-plant a symlink at the file or at the mine's ``.tmp`` sibling
+    -- a bare name in the shared tmpdir could be raced. The mine creates the
+    file; :func:`_drop_mine_phase_file` removes the whole directory.
+    """
+    return os.path.join(tempfile.mkdtemp(prefix="drain-mine-phase-"), "phase.json")
+
+
+def _drop_mine_phase_file(path: str) -> None:
+    """Remove the private directory :func:`_new_mine_phase_file` made.
+
+    Only a directory carrying that prefix is removed: given any other path
+    this touches nothing. Without the check, a path whose parent is a shared
+    directory would rmtree that directory -- a test perturbation that put
+    the file straight in the tmpdir did exactly that to /tmp (2026-10-14).
+    """
+    parent = os.path.dirname(path)
+    if os.path.basename(parent).startswith("drain-mine-phase-"):
+        shutil.rmtree(parent, ignore_errors=True)
 
 
 def _read_mine_phase(path: str | None) -> dict | None:
@@ -1463,8 +1480,7 @@ async def _drain_pending_mines() -> int:
                     finally:
                         if active_mines is not None:
                             active_mines.discard(proc)
-                        with contextlib.suppress(OSError):
-                            os.unlink(phase_file)
+                        _drop_mine_phase_file(phase_file)
                 if proc.returncode == 0:
                     count += 1
                     if pre_mine_witness is not None:
