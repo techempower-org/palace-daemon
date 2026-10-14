@@ -87,7 +87,91 @@ class DrainMineHeartbeat(unittest.TestCase):
         """The call site, not just the helper: a revert to bare communicate() fails here."""
         with open(main.__file__, encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("await _communicate_with_heartbeat(proc, directory)", src)
+        self.assertIn("await _communicate_with_heartbeat(\n", src)
+        self.assertIn("proc, directory, phase_file", src)
+
+    def test_drainer_hands_the_mine_a_phase_file(self):
+        """The spawn passes MEMPALACE_MINE_PHASE_FILE, and the file is removed afterwards."""
+        with open(main.__file__, encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("env={**os.environ, _MINE_PHASE_ENV: phase_file}", src)
+        self.assertIn("os.unlink(phase_file)", src)
+        self.assertEqual(main._MINE_PHASE_ENV, "MEMPALACE_MINE_PHASE_FILE")
+
+
+# A stand-in mine that writes its phase file the way mempalace.mine_phase does.
+_PHASE_WRITER = """
+import json, os, sys, time
+path = sys.argv[1]
+def put(rec):
+    with open(path + ".tmp", "w") as f:
+        json.dump(rec, f)
+    os.replace(path + ".tmp", path)
+now = time.time()
+put({"phase": "file", "since": now - 42, "updated": now, "pid": os.getpid(),
+     "file": 3, "files_total": 7, "chunks": 120})
+time.sleep(0.9)
+"""
+
+
+class DrainMinePhase(unittest.TestCase):
+    def run_mine(self, code, phase_file, args=()):
+        env = {"MEMPALACE_DRAIN_HEARTBEAT_S": "0.25", "MEMPALACE_DRAIN_MINE_BUDGET_S": "0.4"}
+        seen = {}
+
+        async def go():
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-c", code, *args,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+
+            async def peek():
+                await asyncio.sleep(0.6)
+                seen.update(dict(main._ACTIVE_MINE_STATE))
+
+            peeker = asyncio.ensure_future(peek())
+            await main._communicate_with_heartbeat(proc, "/t/target.jsonl", phase_file)
+            await peeker
+
+        with patch.dict(os.environ, env), self.assertLogs(main._log.name, level="INFO") as logs:
+            asyncio.run(go())
+        return logs.output, seen
+
+    def test_beat_and_budget_warning_name_the_phase(self):
+        path = main._new_mine_phase_file()
+        try:
+            out, seen = self.run_mine(_PHASE_WRITER, path, args=(path,))
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+        beats = [line for line in out if "still running" in line]
+        self.assertTrue(beats, out)
+        self.assertIn("phase file for 4", beats[-1])  # since = now - 42 s
+        self.assertIn("file 3/7, 120 chunks", beats[-1])
+        warnings = [line for line in out if line.startswith("WARNING")]
+        self.assertEqual(len(warnings), 1, out)
+        self.assertIn("phase file", warnings[0])
+        self.assertEqual((seen.get("phase") or {}).get("phase"), "file", seen)
+
+    def test_absent_phase_file_reads_as_unknown(self):
+        path = main._new_mine_phase_file()
+        self.assertFalse(os.path.exists(path), "the mine, not the daemon, creates the file")
+        out, seen = self.run_mine("import time; time.sleep(0.7)", path)
+        beats = [line for line in out if "still running" in line]
+        self.assertTrue(beats and all(b.endswith("phase ?") for b in beats), out)
+        self.assertIsNone(seen.get("phase"))
+
+    def test_unreadable_or_foreign_records_are_ignored(self):
+        path = main._new_mine_phase_file()
+        try:
+            for body in ("{not json", "[1, 2]", '{"phase": 7}'):
+                with open(path, "w") as f:
+                    f.write(body)
+                self.assertIsNone(main._read_mine_phase(path), body)
+        finally:
+            os.unlink(path)
+        self.assertIsNone(main._read_mine_phase(None))
+        self.assertEqual(main._describe_mine_phase({"phase": "open"}), "phase open")
 
 
 if __name__ == "__main__":

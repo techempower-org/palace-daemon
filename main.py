@@ -986,7 +986,48 @@ _DRAIN_BOUNDARY_STATE = {
 #     while its CPU delta stays near zero is the #548 idle class.
 #   * once, past MEMPALACE_DRAIN_MINE_BUDGET_S (default 3600), a WARNING.
 #   * /mine/status reports the live mine as `active_mine`.
+#   * the mine is spawned with MEMPALACE_MINE_PHASE_FILE pointing at a private
+#     file it rewrites with its current phase and counts (mempalace#548 ask 1).
+#     Each beat reads it, so the line says WHERE an idle mine is waiting
+#     (normalize, chunk, file, hallways ...), not just that it is. A mempalace
+#     too old to write the file leaves it absent and the beat says "phase ?".
 _ACTIVE_MINE_STATE: dict = {}
+_MINE_PHASE_ENV = "MEMPALACE_MINE_PHASE_FILE"
+
+
+def _new_mine_phase_file() -> str:
+    """A fresh, empty path for one mine's phase file (the mine creates it)."""
+    fd, path = tempfile.mkstemp(prefix="drain-mine-phase-", suffix=".json")
+    os.close(fd)
+    os.unlink(path)
+    return path
+
+
+def _read_mine_phase(path: str | None) -> dict | None:
+    """The mine's last phase record, or None when absent or unreadable."""
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            rec = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) and isinstance(rec.get("phase"), str) else None
+
+
+def _describe_mine_phase(rec: dict | None) -> str:
+    if rec is None:
+        return "phase ?"
+    text = f"phase {rec['phase']}"
+    try:
+        text += f" for {int(_time.time() - float(rec['since']))}s"
+    except (KeyError, TypeError, ValueError):
+        pass
+    if "file" in rec and "files_total" in rec:
+        text += f", file {rec['file']}/{rec['files_total']}"
+    if "chunks" in rec:
+        text += f", {rec['chunks']} chunks"
+    return text
 
 
 def _env_seconds(name: str, default: float) -> float:
@@ -1015,7 +1056,7 @@ def _proc_cpu_seconds(pid: int) -> float | None:
         return None
 
 
-async def _communicate_with_heartbeat(proc, target: str):
+async def _communicate_with_heartbeat(proc, target: str, phase_file: str | None = None):
     """proc.communicate(), plus a heartbeat and a one-shot budget warning."""
     beat = _env_seconds("MEMPALACE_DRAIN_HEARTBEAT_S", 300.0)
     budget = _env_seconds("MEMPALACE_DRAIN_MINE_BUDGET_S", 3600.0)
@@ -1038,22 +1079,26 @@ async def _communicate_with_heartbeat(proc, target: str):
             cpu = _proc_cpu_seconds(proc.pid)
             delta = None if cpu is None or last_cpu is None else cpu - last_cpu
             last_cpu = cpu if cpu is not None else last_cpu
+            phase = _read_mine_phase(phase_file)
             _ACTIVE_MINE_STATE.update(
-                {"elapsed_s": int(elapsed), "cpu_s": None if cpu is None else round(cpu, 1)}
+                {"elapsed_s": int(elapsed), "cpu_s": None if cpu is None else round(cpu, 1),
+                 "phase": phase}
             )
             _log.info(
-                "drain-mine: still running %s (pid %s) after %dm; %s CPU s since last beat",
+                "drain-mine: still running %s (pid %s) after %dm; %s CPU s since last beat; %s",
                 target, proc.pid, int(elapsed // 60),
                 "?" if delta is None else f"{delta:.1f}",
+                _describe_mine_phase(phase),
             )
             if not warned and elapsed >= budget:
                 warned = True
                 _ACTIVE_MINE_STATE["over_budget"] = True
                 _log.warning(
                     "drain-mine: %s (pid %s) is over its %dm budget at %dm, %s CPU s in total; "
-                    "not killed: dump it with `py-spy dump --pid %s` (#548)",
+                    "%s; not killed: dump it with `py-spy dump --pid %s` (#548)",
                     target, proc.pid, int(budget // 60), int(elapsed // 60),
-                    "?" if cpu is None else f"{cpu:.0f}", proc.pid,
+                    "?" if cpu is None else f"{cpu:.0f}",
+                    _describe_mine_phase(phase), proc.pid,
                 )
     finally:
         if not communicate.done():
@@ -1397,10 +1442,12 @@ async def _drain_pending_mines() -> int:
                         "(tunnels=%r)", directory, payload.get("tunnels"),
                     )
                 async with _mine_sem:
+                    phase_file = _new_mine_phase_file()
                     proc = await asyncio.create_subprocess_exec(
                         *cmd,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
+                        env={**os.environ, _MINE_PHASE_ENV: phase_file},
                     )
                     # Track for lifespan shutdown cleanup (#136 problem B).
                     # active_mines may be None during the at-startup drain
@@ -1410,10 +1457,14 @@ async def _drain_pending_mines() -> int:
                     if active_mines is not None:
                         active_mines.add(proc)
                     try:
-                        stdout, stderr = await _communicate_with_heartbeat(proc, directory)
+                        stdout, stderr = await _communicate_with_heartbeat(
+                            proc, directory, phase_file
+                        )
                     finally:
                         if active_mines is not None:
                             active_mines.discard(proc)
+                        with contextlib.suppress(OSError):
+                            os.unlink(phase_file)
                 if proc.returncode == 0:
                     count += 1
                     if pre_mine_witness is not None:
