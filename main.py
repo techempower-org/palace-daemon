@@ -604,6 +604,29 @@ def _stderr_excerpt(stderr: "bytes | None", limit: int = 600) -> str:
     return text[-limit:]
 
 
+def _low_priority(cmd: list[str]) -> list[str]:
+    """Prefix a mine argv with ``ionice -c2 -n7 nice -n 10``.
+
+    Mines are background bookkeeping. On familiar (2026-10-20 22:40) a drain
+    mine of a 20k-chunk transcript ran while the NVMe was 80-90% busy, and
+    realm.db on the same disk held a write lock for 16.7 s. Both tools exec
+    the command, so the child pid (the one the drainer tracks and terminates)
+    stays the mine's. Most of a mine's I/O happens inside postgres, which this
+    doesn't reach; it covers the mine's own reads, writes and CPU.
+    ``PALACE_MINE_LOW_PRIORITY=0`` turns it off. A missing tool is skipped.
+    """
+    if os.environ.get("PALACE_MINE_LOW_PRIORITY", "1").strip() == "0":
+        return cmd
+    prefix: list[str] = []
+    ionice = shutil.which("ionice")
+    if ionice:
+        prefix += [ionice, "-c2", "-n7"]
+    nice = shutil.which("nice")
+    if nice:
+        prefix += [nice, "-n", "10"]
+    return prefix + cmd
+
+
 def _tunnels_for_target(path: Path, requested: "bool | None" = None) -> bool:
     """Whether this mine should rebuild the wing's derived graph.
 
@@ -1462,7 +1485,7 @@ async def _drain_pending_mines() -> int:
                     phase_file = _new_mine_phase_file()
                     try:
                         proc = await asyncio.create_subprocess_exec(
-                            *cmd,
+                            *_low_priority(cmd),
                             stdout=asyncio.subprocess.PIPE,
                             stderr=asyncio.subprocess.PIPE,
                             env={**os.environ, _MINE_PHASE_ENV: phase_file},
@@ -2171,7 +2194,7 @@ async def lifespan(app: FastAPI):
             # Same pattern as /mine endpoint: list-form argv, no shell.
             async with _mine_sem:
                 proc = await asyncio.create_subprocess_exec(
-                    *argv,
+                    *_low_priority(argv),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
@@ -4011,7 +4034,7 @@ async def mine(
 
     async def _run_mine_subprocess():
         proc = await asyncio.create_subprocess_exec(
-            *cmd,
+            *_low_priority(cmd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

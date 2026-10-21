@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Changed — *spawned mines run at low I/O and CPU priority*
+
+Found on familiar 2026-10-20 22:40: a drain mine of a 20,569-chunk transcript ran
+while the NVMe was 80–90% busy, and realm.db on the same disk held a write lock
+for 16.7 s (realmwatch-e5). All three mine spawn sites (drain replay, startup
+auto-mine, `/mine`) now prefix the argv with `ionice -c2 -n7 nice -n 10`. Both
+tools exec the command, so the tracked pid is still the mine's. Most of a
+mine's I/O happens inside postgres, which this doesn't reach; it covers the
+mine's own reads, writes and embedding CPU. `PALACE_MINE_LOW_PRIORITY=0` turns
+it off, and a missing tool is skipped. The suite runs with it off
+(`tests/__init__.py`) because many tests read the target from a fixed argv
+position; `tests/test_mine_low_priority.py` covers the prefix.
+
 ### Fixed — *#299: `GET /stats` reached `tool_kg_stats` through `_call`, bypassing the fast intercept*
 
 Found on the deployed daemon 2026-09-18 (1d9e351e, `/health` 1.0 s, `/status/fast`
