@@ -9,3 +9,7 @@ _os.environ.setdefault("PALACE_MINE_LOW_PRIORITY", "0")
 # The mining disk floor reads the test host's real free space; off for the
 # suite, and tests/test_mine_disk_floor.py turns it on itself.
 _os.environ.setdefault("PALACE_MINE_MIN_FREE_GB", "0")
+
+# The re-mine debounce reads wall-clock mine times; off for the suite, and
+# tests/test_drain_remine_debounce.py turns it on itself.
+_os.environ.setdefault("PALACE_MINE_MIN_INTERVAL_S", "0")

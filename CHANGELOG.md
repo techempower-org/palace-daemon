@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Changed — *a transcript is re-mined at most every 30 min*
+
+On familiar on 2026-10-21 the drainer spawned 381 mines in 13 h. 45 of them were of one
+33,443-chunk transcript, some only 20–30 s apart. Each re-mine refreshes every chunk's metadata
+with a non-HOT UPDATE that writes all eight drawer indexes, HNSW included (mempalace#575).
+Measured that afternoon, that was most of the NVMe read and WAL load.
+
+A `convos`/`session` target mined successfully less than `PALACE_MINE_MIN_INTERVAL_S` ago
+(default 1800) is now requeued instead of mined:
+- it isn't dropped, so the newest exchanges land at most one interval late;
+- `projects` mines (memory dirs) are never deferred;
+- a success records `mined_at` beside the witness;
+- `0` turns it off;
+- the deferral log is limited to one line per target per 10 min.
+
+The suite runs with it off (`tests/__init__.py`), and `tests/test_drain_remine_debounce.py`
+covers it. This is the bandage; the fix at the source is mempalace#575.
+
 ### Added — *mining waits for disk space*
 
 On familiar on 2026-10-21 02:50, root was at 95% with 13 GB free, and the files
