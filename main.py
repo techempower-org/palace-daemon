@@ -990,6 +990,46 @@ def _source_witness(directory: str) -> "dict | None":
     return {"mtime": stat.st_mtime, "size": stat.st_size}
 
 
+_TRANSCRIPT_MODES = frozenset({"convos", "session"})
+_deferral_logged_at: dict = {}  # target key -> monotonic time of its last "deferring" log line
+
+
+def _mine_min_interval_s() -> float:
+    """``PALACE_MINE_MIN_INTERVAL_S`` (default 1800); 0 turns the debounce off."""
+    raw = os.environ.get("PALACE_MINE_MIN_INTERVAL_S", "1800").strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 1800.0
+
+
+def _drain_recently_mined(directory: str, mode: str, state: dict) -> "float | None":
+    """Seconds until this transcript may be re-mined, or ``None`` when it can run now.
+
+    A live session appends to its transcript all day, and every checkpoint re-queues it.
+    On familiar (2026-10-21) the drainer spawned 381 mines in 13 h, 45 of them of one
+    33,443-chunk transcript, a few 20-30 s apart. Each re-mine refreshes every chunk's
+    metadata with a non-HOT UPDATE that writes all eight drawer indexes (HNSW included),
+    which was most of the NVMe load (mempalace#575). So a transcript mined less than
+    ``PALACE_MINE_MIN_INTERVAL_S`` ago waits; it is requeued, never dropped, so the
+    newest exchanges land at most one interval late. ``projects`` mines (memory dirs)
+    are small and high priority, and are never deferred.
+    """
+    if mode not in _TRANSCRIPT_MODES:
+        return None
+    interval = _mine_min_interval_s()
+    if interval <= 0:
+        return None
+    recorded = state.get(_mined_state_key(directory, mode))
+    if not isinstance(recorded, dict):
+        return None
+    at = recorded.get("mined_at")
+    if not isinstance(at, (int, float)) or isinstance(at, bool):
+        return None
+    wait = interval - (_time.time() - at)
+    return wait if wait > 0 else None
+
+
 def _drain_should_skip_unchanged(directory: str, mode: str, state: dict) -> bool:
     """True when this exact source was already mined successfully, unchanged."""
     witness = _source_witness(directory)
@@ -1488,6 +1528,17 @@ async def _drain_pending_mines() -> int:
                         mode,
                     )
                     continue
+                wait = _drain_recently_mined(directory, mode, mined_state)
+                if wait is not None:
+                    requeue_lines.append(json.dumps(entry))
+                    key = _mined_state_key(directory, mode)
+                    if _time.monotonic() - _deferral_logged_at.get(key, -1e9) >= 600:
+                        _deferral_logged_at[key] = _time.monotonic()
+                        _log.info(
+                            "drain-mine: deferring %s (%s): mined recently, next in %ds",
+                            directory, mode, int(wait),
+                        )
+                    continue
                 extract = payload.get("extract")
                 if extract is not None and extract not in _MINE_VALID_EXTRACTS:
                     _log.warning(
@@ -1557,7 +1608,9 @@ async def _drain_pending_mines() -> int:
                 if proc.returncode == 0:
                     count += 1
                     if pre_mine_witness is not None:
-                        mined_state[_mined_state_key(directory, mode)] = pre_mine_witness
+                        mined_state[_mined_state_key(directory, mode)] = {
+                            **pre_mine_witness, "mined_at": _time.time(),
+                        }
                         # Flushed HERE, after each successful mine, not once
                         # at the end of the pass. The end-of-pass version was
                         # sized against a pass I assumed took seconds; a real
