@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Added — *mining waits for disk space*
+
+On familiar on 2026-10-21 02:50, root was at 95% with 13 GB free, and the files
+growing were the palace DB's (a mine was running). Below `PALACE_MINE_MIN_FREE_GB`
+(default 8) free on `PALACE_MINE_FREE_PATH` (default `/var/lib/mempalace-db`,
+falling back to `/`):
+- the drain requeues each entry instead of spawning it. Entries aren't
+  quarantined, and they run once space is freed. One warning per 5 min.
+- a blocking `POST /mine` returns `skipped` with the reason. Background (hook)
+  mines are still queued.
+- the watcher's auto-mine skips the tick.
+
+A mine already running finishes. A floor of `0` turns the check off. The suite
+runs with it off (`tests/__init__.py`), and `tests/test_mine_disk_floor.py`
+covers it.
+
 ### Changed — *spawned mines run at low I/O and CPU priority*
 
 Found on familiar 2026-10-20 22:40: a drain mine of a 20,569-chunk transcript ran
