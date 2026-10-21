@@ -627,6 +627,39 @@ def _low_priority(cmd: list[str]) -> list[str]:
     return prefix + cmd
 
 
+_floor_warned_at = [0.0]  # monotonic time of the last low-disk drain warning
+
+
+def _mine_disk_floor_problem() -> "str | None":
+    """Why mining should wait for disk space, or ``None`` when it can go ahead.
+
+    Mines grow the palace's postgres on the host disk. On familiar
+    (2026-10-21 02:50) root was at 95% with 13 GB free, and the files changing
+    were the palace DB's. Below ``PALACE_MINE_MIN_FREE_GB`` (default 8) free on
+    ``PALACE_MINE_FREE_PATH`` (default the DB's host mount, else ``/``), the
+    drain requeues instead of spawning, and a blocking ``/mine`` is skipped.
+    A floor of 0 turns the check off. If neither path can be stat'ed, mining
+    goes ahead.
+    """
+    raw = os.environ.get("PALACE_MINE_MIN_FREE_GB", "8").strip()
+    try:
+        floor = float(raw)
+    except ValueError:
+        floor = 8.0
+    if floor <= 0:
+        return None
+    for path in (os.environ.get("PALACE_MINE_FREE_PATH", "/var/lib/mempalace-db"), "/"):
+        try:
+            st = os.statvfs(path)
+        except OSError:
+            continue
+        free_gb = st.f_bavail * st.f_frsize / 1024**3
+        if free_gb < floor:
+            return f"{free_gb:.1f} GB free on {path} is under the {floor:g} GB mining floor"
+        return None
+    return None
+
+
 def _tunnels_for_target(path: Path, requested: "bool | None" = None) -> bool:
     """Whether this mine should rebuild the wing's derived graph.
 
@@ -1404,10 +1437,21 @@ async def _drain_pending_mines() -> int:
         owned = list(unique_entries)
         _cap = _drain_batch_size()
         consumed = 0
+        floor_logged = _time.monotonic() - _floor_warned_at[0] < 300  # one line per 5 min
         while owned:
             line, entry = owned.pop(0)
             consumed += 1
             try:
+                # Low disk: put the entry back for a later pass instead of
+                # spawning. Not quarantined; it runs once space is freed.
+                floor_problem = _mine_disk_floor_problem()
+                if floor_problem:
+                    requeue_lines.append(json.dumps(entry))
+                    if not floor_logged:
+                        _log.warning("drain-mine: pausing, %s; entries requeued", floor_problem)
+                        floor_logged = True
+                        _floor_warned_at[0] = _time.monotonic()
+                    continue
                 payload = entry["payload"]
                 raw_dir = payload.get("dir")
                 if not isinstance(raw_dir, str) or not raw_dir:
@@ -2180,6 +2224,13 @@ async def lifespan(app: FastAPI):
                 logger.info(
                     "watcher: auto_mine_paused (reason=bench-active.lock present, %s, path=%s, wing=%s)",
                     reason, path, wing,
+                )
+                return
+            # Low disk: skip this tick; the watcher fires again on the next change.
+            floor_problem = _mine_disk_floor_problem()
+            if floor_problem:
+                logger.warning(
+                    "watcher: auto_mine_paused (%s, path=%s, wing=%s)", floor_problem, path, wing
                 )
                 return
             # Wing is already canonical here — parse_watch_dirs normalizes
@@ -4022,6 +4073,17 @@ async def mine(
                 "systemMessage": "Mine queued — running in the background on the palace host.",
             },
         )
+
+    # A blocking mine is skipped on low disk; background (hook) mines were
+    # queued above, and the drain holds them until space is freed.
+    _floor = _mine_disk_floor_problem()
+    if _floor:
+        _log.warning("POST /mine skipped: %s (dir=%s, wing=%s)", _floor, raw_dir, wing)
+        return {
+            "skipped": True,
+            "reason": _floor,
+            "systemMessage": f"Mine skipped: {_floor}. No subprocess spawned.",
+        }
 
     mempalace_bin = os.path.join(os.path.dirname(sys.executable), "mempalace")
     cmd = [mempalace_bin, "mine", directory, "--mode", mode, "--wing", wing]
