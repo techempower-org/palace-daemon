@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Changed — *mempalace-db on PG 16.15, port 5433 bound to loopback only*
+
+`mempalace-db:0.2` (#310) is now live: PostgreSQL 16.10 → 16.15, pgvector 0.8.7, AGE 1.6.0. Port 5433 is bound to
+`127.0.0.1` and `[::1]` only. Docker's port publishing bypassed ufw, so postgres had been reachable from the LAN.
+A 6.5 h conntrack sample found no LAN client apart from a test connection. Runbook, before/after table and
+rollback: docs/ops/mempalace-db-0.2-and-loopback.md.
+
 ### Changed — *a transcript is re-mined at most every 30 min*
 
 On familiar on 2026-10-21 the drainer spawned 381 mines in 13 h. 45 of them were of one
