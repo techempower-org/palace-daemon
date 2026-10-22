@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Changed — *upstream rboarescu/palace-daemon is archived; this fork is canonical*
+
+Upstream's README marks it **archived on 2026-09-05** ("superseded by upstream MemPalace… kept for reference only;
+final tag `v1.8.2-final`"). Its last 44 commits fall into three groups:
+- our own PRs, upstreamed from this fork (#7–#14 and #16–#18, by jphein);
+- ChromaDB/HNSW workarounds that don't apply to this fork's postgres backend;
+- an unrelated TV feature.
+The backend-independent fixes are already here: constant-time auth (`hmac`), detached Stop/PreCompact hooks
+(`setsid`), and the `tool_result` filter.
+
+A trial merge gave 16 conflicted files (33 hunks in `main.py` alone), for no functional gain. So upstream/main
+(4c473c8) is recorded as merged with `git merge -s ours`: upstream's history becomes an ancestor and **this tree
+is unchanged**. If upstream ever revives, revert that merge commit and merge for real.
+
 ### Changed — *mempalace-db on PG 16.15, port 5433 bound to loopback only*
 
 `mempalace-db:0.2` (#310) is now live: PostgreSQL 16.10 → 16.15, pgvector 0.8.7, AGE 1.6.0. Port 5433 is bound to
