@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: mempalace-db:0.1
+    image: mempalace-db:0.2
     container_name: mempalace-db
     restart: unless-stopped
     # cgroup memory ceiling.
@@ -25,9 +25,13 @@ services:
     mem_limit: 6g
     memswap_limit: 6g
     ports:
-      # Bind on 0.0.0.0:5433 to allow palace-daemon (host network) and dev clients
-      # on the LAN. mempalace_test on a separate host port for CI fixtures.
-      - "5433:5432"
+      # Loopback only (2026-10-21). palace-daemon and the CLI run on this host (DSN localhost:5433).
+      # A plain "5433:5432" published postgres on 0.0.0.0 and [::], and Docker's port publishing bypasses ufw,
+      # so it was LAN-reachable. A 6.5 h conntrack sample (16:21–22:53) saw no LAN client besides a
+      # test connection. To give a remote host access, add a specific bind (e.g. its Tailscale IP) here.
+      # mempalace_test on a separate host port for CI fixtures.
+      - "127.0.0.1:5433:5432"
+      - "[::1]:5433:5432"
     # Postgres parallel-query workers allocate dynamic shared memory segments
     # in /dev/shm; docker's default is 64MB, and AGE graph traversals at the
     # 2M-triple scale exhaust it ("could not resize shared memory segment ...
