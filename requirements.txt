@@ -35,3 +35,8 @@ flashrank==0.2.10
 # so this is a soft dep — but the structural-stats endpoint can't report Cat 8
 # modularity without it. Only imported on demand by that one gated route.
 networkx>=3.0
+# HNSW index persistence for ChromaDB. main.py hard-fails at import without it
+# (see #10), so a fresh venv built from this file must not start without it.
+# Installed by hand until now; a scratch daemon on 2026-10-24 refused to start
+# from a requirements-only venv. 0.7.6 is what the production venv runs.
+chroma-hnswlib>=0.7.6
