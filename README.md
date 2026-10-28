@@ -276,6 +276,27 @@ This installs `mempal-fast.py` as the Stop/PreCompact hook handler and `palace-m
 
 All endpoints honor `X-Api-Key` when `PALACE_API_KEY` is set.
 
+### The private collection
+
+No route above reads `mempalace_private_drawers`. That table holds drawers of RFC 002 privacy class `sensitive`:
+- phone calls filed by mempalace's `livekit-calls` adapter;
+- session-transcript passages the convo miner marks as sensitive (mempalace #589, #590, #591; issue #588).
+
+To read it, name it explicitly: `get_collection(palace, collection_name="mempalace_private_drawers")` in mempalace, or
+SQL on familiar. On familiar, `palace-calls-mine.timer` (an hourly user unit) files new call records into it.
+
+**What marks a passage sensitive:** the code defaults (a private-directory path, a call record's path or raw turn shape,
+the transcription script's listening markers), plus `sensitive_markers` in `~/.mempalace/config.json`. Site-specific
+names and the call-record signatures (`script_source`, `scripts_sha256`, the agent's disclosure line) live in the config,
+not in either repo.
+
+**What does not:** a bare call id such as `out-…` or `req-…`. Reports cite calls by id, so the id alone is not
+sensitive; the record body is.
+
+**How long a mark lasts:** a marked passage stays private until the next tool call rendered at column 0. A `>` turn
+doesn't end it, because tool output can contain quoted lines. In a stretch of prose with no tool calls, everything
+after a marker is filed privately. A passage once private stays private on every re-mine.
+
 ## Development
 
 ```bash
