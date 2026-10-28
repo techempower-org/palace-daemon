@@ -35,3 +35,16 @@ Measured on familiar on 2026-10-27 from the running daemon (pid 115558,
 | MCP (search-only) | live | `clients/mempalace-mcp.py` via `mempalace-mcp-wrapper.sh` |
 | HTTP API | live | `X-API-Key`, key in `~/.config/palace-daemon/env` |
 | `mempal-fast.py` | not measured | stdlib-only Stop hook client (skips the mempalace import); no live caller found in `~/.claude/hooks` on 2026-10-27 |
+
+## Backups
+
+Measured 2026-10-27 23:2x. Each copy has its own retention; none is managed by this repo.
+
+| Copy | Where | Schedule | Retention | Size now |
+| --- | --- | --- | --- | --- |
+| `pg_dump` (gzip `--rsyncable`) | familiar `/srv/backups/databases` (`/mnt/archive`, sdb1, 24% used) | `mempalace-backup.timer` 02:15 (`/usr/local/bin/mempalace-backup.sh`, from familiar.realm.watch `ops/familiar/`) | 7 days by mtime (8 dumps) | 27 GB, ~3.5 GB each |
+| NFS copy of that dump | disks `/mnt/raid/backups/databases` | `database-backup.timer` 02:30 (`/usr/local/bin/backup_databases.sh`) | newest 2 by filename date (`MEMPALACE_KEEP=2`, since 2026-10-13) | 7.1 GB |
+| Borg snapshot of the RAID | disks `/mnt/storage/backups/borg-raid` (not on `/mnt/raid`) | 03:00 | 7 daily, 4 weekly, 6 monthly | not measured |
+
+The RAID copy is capped by count, so mempalace adds a fixed ~7 GB to `/mnt/raid`, not a growing share. Raising the
+cap would add ~3.5 GB per dump kept. Older restore points live in Borg and, for 7 days, on familiar.
