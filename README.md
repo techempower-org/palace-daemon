@@ -283,7 +283,7 @@ No route above reads `mempalace_private_drawers`. That table holds drawers of RF
 - session-transcript passages the convo miner marks as sensitive (mempalace #589, #590, #591; issue #588).
 
 To read it, name it explicitly: `get_collection(palace, collection_name="mempalace_private_drawers")` in mempalace, or
-SQL on familiar. On familiar, `palace-calls-mine.timer` (an hourly user unit) files new call records into it.
+SQL on the palace host. There, `palace-calls-mine.timer` (an hourly user unit) files new call records into it.
 
 **What marks a passage sensitive:** the code defaults (a private-directory path, a call record's path or raw turn shape,
 the transcription script's listening markers), plus `sensitive_markers` in `~/.mempalace/config.json`. Site-specific

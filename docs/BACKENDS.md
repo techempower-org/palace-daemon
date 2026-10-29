@@ -7,7 +7,7 @@ the daemon only receives what those adapters produce.
 `~/.claude/scripts/backends-report.sh` reads both files for the daily
 brief. Add a row in the same PR as the backend.
 
-Measured on familiar on 2026-10-27 from the running daemon (pid 115558,
+Measured on the palace host on 2026-10-27 from the running daemon (pid 115558,
 `/health` version 1.10.0) and its environment.
 
 ## Ingest endpoints
@@ -42,9 +42,9 @@ Measured 2026-10-27 23:2x. Each copy has its own retention; none is managed by t
 
 | Copy | Where | Schedule | Retention | Size now |
 | --- | --- | --- | --- | --- |
-| `pg_dump` (gzip `--rsyncable`) | familiar `/srv/backups/databases` (`/mnt/archive`, sdb1, 24% used) | `mempalace-backup.timer` 02:15 (`/usr/local/bin/mempalace-backup.sh`, from familiar.realm.watch `ops/familiar/`) | 7 days by mtime (8 dumps) | 27 GB, ~3.5 GB each |
+| `pg_dump` (gzip `--rsyncable`) | the palace host's backup disk (24% used) | `mempalace-backup.timer` 02:15 (`/usr/local/bin/mempalace-backup.sh`, from the host's ops repo) | 7 days by mtime (8 dumps) | 27 GB, ~3.5 GB each |
 | NFS copy of that dump | disks `/mnt/raid/backups/databases` | `database-backup.timer` 02:30 (`/usr/local/bin/backup_databases.sh`) | newest 2 by filename date (`MEMPALACE_KEEP=2`, since 2026-10-13) | 7.1 GB |
 | Borg snapshot of the RAID | disks `/mnt/storage/backups/borg-raid` (not on `/mnt/raid`) | 03:00 | 7 daily, 4 weekly, 6 monthly | not measured |
 
 The RAID copy is capped by count, so mempalace adds a fixed ~7 GB to `/mnt/raid`, not a growing share. Raising the
-cap would add ~3.5 GB per dump kept. Older restore points live in Borg and, for 7 days, on familiar.
+cap would add ~3.5 GB per dump kept. Older restore points live in Borg and, for 7 days, on the palace host.
