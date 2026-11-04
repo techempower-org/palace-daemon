@@ -71,12 +71,15 @@ def fast_status_payload() -> dict:
         with conn:
             with conn.cursor() as cur:
                 cur.execute("SET LOCAL statement_timeout = '3s'")
-                cur.execute("SELECT count(*) FROM mempalace_drawers")
-                total = cur.fetchone()[0]
+                # The total is the sum of the per-wing groups (GROUP BY keeps
+                # the NULL wing as its own group), so no separate count(*):
+                # each full count costs ~400 ms at 1.3M drawers (2026-11-04).
                 cur.execute(
                     "SELECT wing, count(*) FROM mempalace_drawers GROUP BY wing ORDER BY count(*) DESC"
                 )
-                wings = {r[0]: r[1] for r in cur.fetchall()}
+                rows = cur.fetchall()
+                total = sum(r[1] for r in rows)
+                wings = {r[0]: r[1] for r in rows}
                 cur.execute(
                     "SELECT room, count(*) FROM mempalace_drawers WHERE room IS NOT NULL GROUP BY room ORDER BY count(*) DESC"
                 )
