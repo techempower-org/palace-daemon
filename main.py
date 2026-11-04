@@ -137,18 +137,35 @@ PALACE_MCP_TOOL_TIMEOUT_SECONDS = float(os.getenv("PALACE_MCP_TOOL_TIMEOUT_SECON
 # right; past the bound, say "busy" immediately and let the client decide.
 PALACE_MCP_TOOL_MAX_INFLIGHT = int(os.getenv("PALACE_MCP_TOOL_MAX_INFLIGHT", "8"))
 
+# The hook's checkpoint save gets its own lane: its own in-flight bound and its
+# own threads, outside PALACE_MCP_TOOL_MAX_INFLIGHT and _TOOL_EXECUTOR. On
+# 2026-11-04 (12:16-12:37, #323) hung graph reads held all 8 shared slots and
+# every lane's diary_write was refused for 20 minutes. Reads can no longer
+# take a save's slot or thread; saves are bounded among themselves.
+_SAVE_TOOLS = frozenset({"mempalace_diary_write"})
+PALACE_MCP_SAVE_MAX_INFLIGHT = int(os.getenv("PALACE_MCP_SAVE_MAX_INFLIGHT", "2"))
+# How long the /repair rebuild hold waits for running save workers to finish.
+PALACE_EXCLUSIVE_SAVE_DRAIN_SECONDS = float(os.getenv("PALACE_EXCLUSIVE_SAVE_DRAIN_SECONDS", "120"))
+
 PALACE_FAST_EXECUTOR_WORKERS = int(os.getenv("PALACE_FAST_EXECUTOR_WORKERS", "4"))
 PALACE_TOOL_EXECUTOR_WORKERS = int(os.getenv("PALACE_TOOL_EXECUTOR_WORKERS", "8"))
 
 # Mutated only from the event loop, so increments and decrements between
 # awaits are atomic without a lock.
 _tool_inflight = 0
+_save_inflight = 0
 
 
 def _release_tool_slot() -> None:
     """Give back one in-flight slot. Called from the loop thread only."""
     global _tool_inflight
     _tool_inflight = max(0, _tool_inflight - 1)
+
+
+def _release_save_slot() -> None:
+    """Give back one save-lane slot. Called from the loop thread only."""
+    global _save_inflight
+    _save_inflight = max(0, _save_inflight - 1)
 
 
 def _args_hash(arguments) -> str:
@@ -180,6 +197,12 @@ _TOOL_EXECUTOR = _futures.ThreadPoolExecutor(
     max_workers=max(1, PALACE_TOOL_EXECUTOR_WORKERS),
     thread_name_prefix="palace-tool",
 )
+# The save lane's own threads (see _SAVE_TOOLS): parked reads in _TOOL_EXECUTOR
+# can never leave a diary_write waiting for a thread.
+_SAVE_EXECUTOR = _futures.ThreadPoolExecutor(
+    max_workers=max(1, PALACE_MCP_SAVE_MAX_INFLIGHT),
+    thread_name_prefix="palace-save",
+)
 
 PALACE_MCP_FAST_INTERCEPT = os.getenv("PALACE_MCP_FAST_INTERCEPT", "1") not in ("0", "false", "False", "")
 
@@ -202,6 +225,9 @@ CHECKPOINT_TOPIC_SYNONYMS = ("auto-save",)
 # doesn't starve normal traffic.
 _read_sem = asyncio.Semaphore(PALACE_MAX_READ_CONCURRENCY)
 _write_sem = asyncio.Semaphore(PALACE_MAX_WRITE_CONCURRENCY)
+# Saves (_SAVE_TOOLS) take their own semaphore, so other writes holding both
+# _write_sem permits cannot keep a diary_write from reaching its lane (#323).
+_save_sem = asyncio.Semaphore(max(1, PALACE_MCP_SAVE_MAX_INFLIGHT))
 _mine_sem = asyncio.Semaphore(1)
 
 # Repair state — when in_progress is True, /silent-save queues instead of writing.
@@ -384,6 +410,8 @@ def _sem_for(request_dict: dict) -> asyncio.Semaphore:
     # side of holding the write semaphore for malformed requests.
     params = request_dict.get("params")
     tool_name = params.get("name", "") if isinstance(params, dict) else ""
+    if tool_name in _SAVE_TOOLS:
+        return _save_sem
     return _read_sem if tool_name in _READ_TOOLS else _write_sem
 
 
@@ -443,8 +471,10 @@ async def _exclusive_palace():
     """
     read_slots = PALACE_MAX_CONCURRENCY
     write_slots = max(1, PALACE_MAX_CONCURRENCY // 2)
+    save_slots = max(1, PALACE_MCP_SAVE_MAX_INFLIGHT)
     r_held = 0
     w_held = 0
+    s_held = 0
     m_held = False
     try:
         for _ in range(read_slots):
@@ -453,12 +483,31 @@ async def _exclusive_palace():
         for _ in range(write_slots):
             await _write_sem.acquire()
             w_held += 1
+        # Saves are writes too: a diary_write must not race the rebuild.
+        for _ in range(save_slots):
+            await _save_sem.acquire()
+            s_held += 1
+        # A save whose caller timed out has given its permit back while its
+        # thread may still be writing; the lane's in-flight count is held until
+        # the THREAD finishes, so wait for it to drain (release callbacks run on
+        # this loop while we sleep). A save that never finishes fails the
+        # rebuild instead of racing it.
+        deadline = asyncio.get_running_loop().time() + PALACE_EXCLUSIVE_SAVE_DRAIN_SECONDS
+        while _save_inflight > 0:
+            if asyncio.get_running_loop().time() >= deadline:
+                raise RuntimeError(
+                    f"exclusive hold: {_save_inflight} save worker(s) still running after "
+                    f"{PALACE_EXCLUSIVE_SAVE_DRAIN_SECONDS:g}s"
+                )
+            await asyncio.sleep(0.05)
         await _mine_sem.acquire()
         m_held = True
         yield
     finally:
         if m_held:
             _mine_sem.release()
+        for _ in range(s_held):
+            _save_sem.release()
         for _ in range(w_held):
             _write_sem.release()
         for _ in range(r_held):
@@ -1997,15 +2046,23 @@ async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
             if PALACE_MCP_TOOL_TIMEOUT_SECONDS <= 0 or tool_name in _MCP_TIMEOUT_EXEMPT
             else PALACE_MCP_TOOL_TIMEOUT_SECONDS
         )
-        global _tool_inflight
-        if _tool_inflight >= PALACE_MCP_TOOL_MAX_INFLIGHT:
+        global _tool_inflight, _save_inflight
+        save_lane = tool_name in _SAVE_TOOLS
+        if save_lane:
+            inflight, bound, bound_name = (
+                _save_inflight, PALACE_MCP_SAVE_MAX_INFLIGHT, "PALACE_MCP_SAVE_MAX_INFLIGHT"
+            )
+        else:
+            inflight, bound, bound_name = (
+                _tool_inflight, PALACE_MCP_TOOL_MAX_INFLIGHT, "PALACE_MCP_TOOL_MAX_INFLIGHT"
+            )
+        if inflight >= bound:
             # Refuse rather than queue. A queued call whose caller has already
             # timed out is pure harm: it still takes the KG lock and still runs
             # the full walk, for nobody.
             _log.warning(
-                "/mcp busy: %d in flight >= PALACE_MCP_TOOL_MAX_INFLIGHT=%d; "
-                "refusing tool=%s args=%s",
-                _tool_inflight, PALACE_MCP_TOOL_MAX_INFLIGHT, tool_name or "<none>",
+                "/mcp busy: %d in flight >= %s=%d; refusing tool=%s args=%s",
+                inflight, bound_name, bound, tool_name or "<none>",
                 _args_hash(params.get("arguments") if isinstance(params, dict) else None),
             )
             return {
@@ -2014,8 +2071,8 @@ async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
                 "error": {
                     "code": -32003,
                     "message": (
-                        f"daemon busy: {_tool_inflight} MCP tool call(s) in flight "
-                        f"(PALACE_MCP_TOOL_MAX_INFLIGHT={PALACE_MCP_TOOL_MAX_INFLIGHT}). "
+                        f"daemon busy: {inflight} MCP tool call(s) in flight "
+                        f"({bound_name}={bound}). "
                         "Retry shortly."
                     ),
                 },
@@ -2023,10 +2080,11 @@ async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
         # Every slow-path call is logged with tool + args hash: the incident
         # was invisible in the daemon log and only py-spy found it.
         _log.info(
-            "/mcp slow path: tool=%s args=%s inflight=%d",
+            "/mcp slow path: tool=%s args=%s inflight=%d%s",
             tool_name or "<none>",
             _args_hash(params.get("arguments") if isinstance(params, dict) else None),
-            _tool_inflight + 1,
+            inflight + 1,
+            " (save lane)" if save_lane else "",
         )
         # Hold the slot until the THREAD finishes, not until the await returns.
         # This is the whole mechanism of the outage: asyncio.wait_for cancels
@@ -2039,14 +2097,25 @@ async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
         # So the callback goes on the concurrent.futures future (completes when
         # the callable returns) rather than the asyncio one (completes on
         # cancellation), and it hops back to the loop thread to mutate.
-        _tool_inflight += 1
-        cfut = _TOOL_EXECUTOR.submit(_mp.handle_request, request_dict)
-        def _on_done(_f, _loop=loop):
+        if save_lane:
+            _save_inflight += 1
+            executor, release = _SAVE_EXECUTOR, _release_save_slot
+        else:
+            _tool_inflight += 1
+            executor, release = _TOOL_EXECUTOR, _release_tool_slot
+        try:
+            cfut = executor.submit(_mp.handle_request, request_dict)
+        except BaseException:
+            # A refused submit (executor shut down) would otherwise leak the
+            # slot just taken: give it back before re-raising.
+            release()
+            raise
+        def _on_done(_f, _loop=loop, _release=release):
             # The worker can outlive the loop (shutdown, or a test's loop
             # closing under a still-parked thread). A slot on a dead loop is
             # meaningless; never let bookkeeping raise inside a worker thread.
             try:
-                _loop.call_soon_threadsafe(_release_tool_slot)
+                _loop.call_soon_threadsafe(_release)
             except RuntimeError:
                 pass
 
