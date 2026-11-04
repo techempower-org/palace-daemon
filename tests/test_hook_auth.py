@@ -33,10 +33,159 @@ import hook  # noqa: E402
 class TestRequestHeaders(unittest.TestCase):
     """Lock in the auth-header decision logic."""
 
+    def setUp(self):
+        # Never read the real daemon env file from a test.
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.env_file = os.path.join(self._tmp.name, "env")
+        self._p = patch.object(hook, "DAEMON_ENV_FILE", self.env_file)
+        self._p.start()
+
+    def tearDown(self):
+        self._p.stop()
+        self._tmp.cleanup()
+
+    def _write_env(self, text):
+        with open(self.env_file, "w", encoding="utf-8") as f:
+            f.write(text)
+
     def test_no_api_key_env_returns_content_type_only(self):
         with patch.dict(os.environ, {}, clear=True):
             headers = hook._request_headers()
         self.assertEqual(headers, {"Content-Type": "application/json"})
+        self.assertNotIn("X-API-Key", headers)
+
+    def test_env_file_supplies_key_when_env_unset(self):
+        self._write_env("MEMPALACE_BACKEND=postgres\nPALACE_API_KEY=from-file\n")
+        with patch.dict(os.environ, {}, clear=True):
+            headers = hook._request_headers()
+        self.assertEqual(headers["X-API-Key"], "from-file")
+
+    def test_env_file_matched_quotes(self):
+        for raw in ("'quoted-key'", '"quoted-key"'):
+            self._write_env("# comment\nPALACE_API_KEY=%s\n" % raw)
+            with patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(hook._api_key(), "quoted-key")
+
+    def test_export_line_is_ignored_like_systemd(self):
+        # EnvironmentFile= does not understand `export`; neither may we.
+        self._write_env("PALACE_API_KEY=real\nexport PALACE_API_KEY=shell-only\n")
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(hook._api_key(), "real")
+
+    def test_similar_names_are_not_the_key(self):
+        self._write_env("PALACE_API_KEY=real\nPALACE_API_KEYS=other\n")
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(hook._api_key(), "real")
+
+    def test_multiline_quoted_value_refuses(self):
+        # systemd reads this as one OTHER value; the inner line is not a key.
+        self._write_env("OTHER='first\nPALACE_API_KEY=not-the-key\nlast'\n")
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(hook._api_key(), "")
+
+    def test_line_continuation_refuses(self):
+        self._write_env("OTHER=a \\\nPALACE_API_KEY=not-the-key\n")
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(hook._api_key(), "")
+
+    def test_escapes_and_spaces_outside_subset_refuse(self):
+        for raw in ('"a\\"b"', "a b", "'mixed\"", "\"'inner'\"", ""):
+            self._write_env("PALACE_API_KEY=%s\n" % raw)
+            with patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(hook._api_key(), "", raw)
+
+    def test_environment_wins_and_file_is_not_opened(self):
+        self._write_env("PALACE_API_KEY=from-file\n")
+        with patch.dict(os.environ, {"PALACE_API_KEY": "from-env"}, clear=True), \
+                patch("builtins.open", side_effect=AssertionError("opened")):
+            self.assertEqual(hook._api_key(), "from-env")
+
+    def test_last_assignment_wins_like_systemd(self):
+        self._write_env("PALACE_API_KEY=old\nOTHER=1\nPALACE_API_KEY=new\n")
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(hook._api_key(), "new")
+
+    def test_comment_lines_are_skipped(self):
+        self._write_env("PALACE_API_KEY=real\n# PALACE_API_KEY=commented\n; PALACE_API_KEY=x\n")
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(hook._api_key(), "real")
+
+    def test_non_newline_separators_cannot_forge_a_key(self):
+        for sep in ("\v", "\f", "\x85", "\u2028", "\u2029", "\x1c"):
+            for first in ("PALACE_API_KEY=real", "OTHER=x"):
+                self._write_env(first + sep + "PALACE_API_KEY=forged\n")
+                with patch.dict(os.environ, {}, clear=True):
+                    self.assertEqual(hook._api_key(), "", repr(sep))
+
+    def test_crlf_line_endings_are_accepted(self):
+        self._write_env("OTHER=1\r\nPALACE_API_KEY=real\r\n")
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(hook._api_key(), "real")
+
+    def test_escaped_quote_cannot_hide_an_open_value(self):
+        for tail in ("", "\n"):
+            self._write_env('OTHER="a\\"\nPALACE_API_KEY=forged' + tail)
+            with patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(hook._api_key(), "")
+
+    def test_blank_lines_and_no_final_newline_are_fine(self):
+        self._write_env("\nOTHER=1\n\n   \nPALACE_API_KEY=real")
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(hook._api_key(), "real")
+
+    def test_quoted_fragments_elsewhere_refuse(self):
+        for other in ("OTHER='\"'\"", "OTHER='a'", 'OTHER="a"', "OTHER=a\\b"):
+            for tail in ("", "\n"):
+                self._write_env("PALACE_API_KEY=real\n" + other + "\nPALACE_API_KEY=forged" + tail)
+                with patch.dict(os.environ, {}, clear=True):
+                    self.assertEqual(hook._api_key(), "", other)
+
+    def test_quotes_in_comments_are_fine(self):
+        self._write_env("# don't \"quote\" me\nPALACE_API_KEY=real\n")
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(hook._api_key(), "real")
+
+    def test_comment_continuation_cannot_forge_a_key(self):
+        for prefix in ("#", ";"):
+            for tail in ("", "\n"):
+                self._write_env(
+                    "PALACE_API_KEY=real\n" + prefix + " continued \\\nPALACE_API_KEY=forged" + tail
+                )
+                with patch.dict(os.environ, {}, clear=True):
+                    self.assertEqual(hook._api_key(), "", prefix)
+
+    def test_unbalanced_quote_refuses(self):
+        self._write_env("PALACE_API_KEY='unmatched\n")
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(hook._api_key(), "")
+
+    def test_undecodable_file_yields_no_key(self):
+        with open(self.env_file, "wb") as f:
+            f.write(b"PALACE_API_KEY=abc\xff\xfe\n")
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(hook._api_key(), "")
+
+    def test_oversized_file_yields_no_key(self):
+        self._write_env("PALACE_API_KEY=k\n" + "x" * (hook._DAEMON_ENV_MAX_BYTES + 1))
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(hook._api_key(), "")
+
+    def test_unreadable_file_yields_no_key(self):
+        self._write_env("PALACE_API_KEY=k\n")
+        with patch.dict(os.environ, {}, clear=True), \
+                patch("builtins.open", side_effect=PermissionError("denied")):
+            self.assertEqual(hook._api_key(), "")
+
+    def test_whitespace_env_falls_back_to_file(self):
+        self._write_env("PALACE_API_KEY=from-file\n")
+        with patch.dict(os.environ, {"PALACE_API_KEY": "  "}, clear=True):
+            self.assertEqual(hook._api_key(), "from-file")
+
+    def test_env_file_without_key_sends_no_header(self):
+        self._write_env("PALACE_API_KEYS=not-this\nOTHER=1\n")
+        with patch.dict(os.environ, {}, clear=True):
+            headers = hook._request_headers()
         self.assertNotIn("X-API-Key", headers)
 
     def test_with_api_key_env_includes_header(self):
