@@ -81,21 +81,20 @@ class TestListRouteFastPath(unittest.IsolatedAsyncioTestCase):
         fp.assert_called_once_with(wing="general", room=None, limit=5, offset=0)
         slow.assert_not_awaited()
 
-    async def test_route_falls_back_to_tool_on_fast_failure(self):
-        tool_payload = {"drawers": [], "total": 0, "count": 0, "offset": 0, "limit": 5}
-        slow_envelope = {"jsonrpc": "2.0", "id": 1,
-                         "result": {"content": [{"type": "text",
-                                                 "text": json.dumps(tool_payload)}]}}
+    async def test_route_503s_on_fast_failure_instead_of_the_full_drawer_tool(self):
+        # #323: the tool fetches every drawer before paginating; a fast-path
+        # failure must not turn into that fetch.
+        from fastapi import HTTPException
+
         with patch.object(main, "_check_auth"), \
              patch.object(main, "_fast_list_payload", side_effect=RuntimeError("pg down")), \
-             patch.object(main, "_call", new_callable=AsyncMock,
-                          return_value=slow_envelope) as slow:
-            resp = await main.list_drawers(wing=None, room=None, limit=5, offset=0,
-                                           x_api_key=None)
-        self.assertEqual(resp, tool_payload)
-        slow.assert_awaited_once()
-        args = slow.await_args.args[0]["params"]["arguments"]
-        self.assertEqual(args, {"limit": 5, "offset": 0})
+             patch.object(main, "_call", new_callable=AsyncMock) as slow:
+            with self.assertRaises(HTTPException) as cm:
+                await main.list_drawers(wing=None, room=None, limit=5, offset=0,
+                                        x_api_key=None)
+        self.assertEqual(cm.exception.status_code, 503)
+        self.assertIn("pg down", cm.exception.detail)
+        slow.assert_not_awaited()
 
     async def test_route_honors_intercept_kill_switch(self):
         tool_payload = {"drawers": [], "total": 0, "count": 0, "offset": 0, "limit": 5}
@@ -146,15 +145,15 @@ class TestMcpListIntercept(unittest.TestCase):
         fp.assert_not_called()
         slow.assert_awaited_once()
 
-    def test_fast_failure_falls_through_to_tool(self):
-        slow_envelope = {"jsonrpc": "2.0", "id": 3, "result": {"content": [
-            {"type": "text", "text": json.dumps({"drawers": []})}]}}
+    def test_fast_failure_is_an_error_not_the_tool(self):
         with patch.object(main, "_fast_list_payload", side_effect=RuntimeError("pg down")), \
-             patch.object(main, "_call", new_callable=AsyncMock,
-                          return_value=slow_envelope) as slow:
+             patch.object(main, "_call", new_callable=AsyncMock) as slow:
             resp = self._post({"limit": 5})
         self.assertEqual(resp.status_code, 200)
-        slow.assert_awaited_once()
+        body = resp.json()
+        self.assertEqual(body["error"]["code"], -32004)
+        self.assertIn("pg down", body["error"]["message"])
+        slow.assert_not_awaited()
 
 
 if __name__ == "__main__":

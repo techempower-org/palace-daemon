@@ -103,8 +103,10 @@ class TestFastInterceptStatus(unittest.TestCase):
     """``_fast_mcp_status_payload`` wraps the SQL counts in tool_status shape."""
 
     def test_shape_matches_tool_status(self):
+        # A fresh snapshot over the patched counts (status reads through it, #323).
         with patch.object(main, "_fast_status_payload",
-                          return_value={"total_drawers": 42, "wings": {"a": 30, "b": 12}, "rooms": {"sessions": 42}}):
+                          return_value={"total_drawers": 42, "wings": {"a": 30, "b": 12}, "rooms": {"sessions": 42}}), \
+             patch.object(main, "_STATUS_SNAPSHOT", __import__("status_snapshot").SnapshotCache(lambda: main._fast_status_payload())):
             payload = main._fast_mcp_status_payload()
 
         # Required tool_status keys.
@@ -227,9 +229,10 @@ class TestMcpProxyInterception(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(envelope["result"], {"slow": True})
 
-    async def test_fast_path_exception_falls_back_to_slow(self):
-        # If the AGE fast path raises (e.g. AGE down), the slow proxy
-        # path is the safety net so behaviour matches upstream.
+    async def test_fast_path_exception_answers_an_error_not_the_slow_path(self):
+        # #323: the slow path of an intercepted tool is the full-corpus scan
+        # that took the daemon to 5.4 GB on 2026-11-04. A fast-path failure
+        # is an error that names the cause, never that scan.
         body = {"jsonrpc": "2.0", "id": 14, "method": "tools/call",
                 "params": {"name": "mempalace_kg_stats", "arguments": {}}}
 
@@ -240,10 +243,16 @@ class TestMcpProxyInterception(unittest.IsolatedAsyncioTestCase):
              patch.object(main, "_check_auth"), \
              patch.object(main, "_fast_mcp_kg_stats_payload",
                           side_effect=RuntimeError("AGE down")), \
-             patch.object(main, "_call", side_effect=_slow):
+             patch.object(main, "_fast_mcp_kg_stats_cached",
+                          side_effect=RuntimeError("AGE down")), \
+             patch.object(main, "_call", side_effect=_slow) as slow:
             envelope = await self._call_proxy(body)
 
-        self.assertEqual(envelope["result"], {"slow_ok": True})
+        self.assertNotIn("result", envelope)
+        self.assertEqual(envelope["error"]["code"], -32004)
+        self.assertIn("AGE down", envelope["error"]["message"])
+        self.assertIn("#323", envelope["error"]["message"])
+        slow.assert_not_called()
 
     async def test_intercepts_mempalace_list_wings(self):
         """#239: the dispatch table must route list_wings to the fast path.
@@ -324,7 +333,8 @@ class TestFastInterceptWingsTaxonomy(unittest.TestCase):
 
     def test_list_wings_shape(self):
         with patch.object(main, "_fast_status_payload",
-                          return_value={"total_drawers": 5, "wings": {"a": 3, "b": 2}, "rooms": {}}):
+                          return_value={"total_drawers": 5, "wings": {"a": 3, "b": 2}, "rooms": {}}), \
+             patch.object(main, "_STATUS_SNAPSHOT", __import__("status_snapshot").SnapshotCache(lambda: main._fast_status_payload())):
             payload = main._fast_mcp_list_wings_payload()
         self.assertEqual(payload, {"wings": {"a": 3, "b": 2}})
 

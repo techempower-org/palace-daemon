@@ -135,10 +135,11 @@ class BoundedToolPoolTests(unittest.IsolatedAsyncioTestCase):
         ok = {"jsonrpc": "2.0", "id": 3, "result": {}}
         with patch.object(main._mp, "handle_request", return_value=ok):
             with self.assertLogs(main._log, level=logging.INFO) as cap:
-                await main._call(_req("mempalace_kg_stats", {"wing": "2g"}))
+                # A tool with no fast intercept, so it genuinely takes the slow path.
+                await main._call(_req("mempalace_search", {"wing": "2g"}))
 
         line = "\n".join(cap.output)
-        self.assertIn("mempalace_kg_stats", line)
+        self.assertIn("mempalace_search", line)
         self.assertIn("args=", line, "an arguments hash must identify repeat callers")
 
     async def test_the_args_hash_is_stable_and_distinguishes_arguments(self):

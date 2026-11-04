@@ -125,13 +125,14 @@ class TestTheTwoDoorsGiveOneAnswer(_Harness):
 
 
 class TestFallThroughIsPreserved(_Harness):
-    async def test_a_failing_fast_payload_falls_to_the_slow_path(self):
-        """Inv 4 — parity with upstream: the tool runs when SQL cannot answer."""
-        self.park.set()  # let the slow path return
+    async def test_a_failing_fast_payload_is_an_error_not_the_slow_path(self):
+        """#323 replaces Inv 4: the heavy tool never runs because SQL failed."""
+        self.park.set()
         with patch.object(main, "_fast_mcp_kg_stats_cached", side_effect=RuntimeError("pg down")):
             env = await asyncio.wait_for(main._call(_req("mempalace_kg_stats", 5)), 5.0)
-        self.assertEqual(main._unwrap(env), {"slow": "mempalace_kg_stats"})
-        self.assertEqual(self.seen, ["mempalace_kg_stats"])
+        self.assertEqual(env["error"]["code"], -32004)
+        self.assertIn("pg down", env["error"]["message"])
+        self.assertEqual(self.seen, [])
 
     async def test_flag_off_means_slow_path_for_everything(self):
         self.park.set()

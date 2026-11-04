@@ -98,7 +98,7 @@ def fast_mcp_list_wings_payload() -> dict:
     """
     import main  # lazy — mirrors fast_mcp_status_payload's re-export contract
 
-    return {"wings": main._fast_status_payload().get("wings", {})}
+    return {"wings": main._STATUS_SNAPSHOT.get()[0].get("wings", {})}
 
 
 def fast_mcp_get_taxonomy_payload() -> dict:
@@ -142,7 +142,10 @@ def fast_mcp_status_payload() -> dict:
     ever drops those constants.
     """
     import main  # lazy — preserves `patch.object(main, "_fast_status_payload")`
-    payload = main._fast_status_payload()
+    # Through the /status/fast snapshot (#322): the counts are the same ones,
+    # and computing them per call is what timed out under mine load and
+    # tipped the daemon into its slow path on 2026-11-04 (#323).
+    payload = dict(main._STATUS_SNAPSHOT.get()[0])
     try:
         from mempalace.mcp_server import PALACE_PROTOCOL, AAAK_SPEC
 
