@@ -47,6 +47,11 @@ class TestAuthRejectionCounter(unittest.TestCase):
         self.assertEqual(s["by_path"], {"/mine": 1})
         self.assertIsNotNone(s["last_at"])
 
+    def test_recorded_path_is_bounded(self):
+        self._run(401, "/" + "a" * 100_000)
+        (path,) = instruments.auth_rejection_summary()["by_path"]
+        self.assertEqual(len(path), instruments._PATH_MAX)
+
     def test_other_statuses_are_not_counted(self):
         for status in (200, 202, 403, 404, 500):
             self._run(status)

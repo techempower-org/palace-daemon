@@ -55,9 +55,14 @@ class AuthRejectionCounter:
         await self.app(scope, receive, _send)
 
 
+_PATH_MAX = 128
+
+
 def record_rejection(path: str, now: float | None = None) -> None:
+    # Unauthenticated callers choose the path, so store a bounded prefix: at
+    # maxlen entries the deque then costs a few MB, never URL-length x 50K.
     with _LOCK:
-        _REJECTIONS.append((time.time() if now is None else now, path))
+        _REJECTIONS.append((time.time() if now is None else now, str(path)[:_PATH_MAX]))
 
 
 def auth_rejection_summary(now: float | None = None) -> dict:
