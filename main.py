@@ -1629,6 +1629,7 @@ async def _drain_pending_mines() -> int:
                             active_mines.discard(proc)
                         _drop_mine_phase_file(phase_file)
                         _instruments.invalidate_source(directory)
+                        _STATUS_SNAPSHOT.invalidate()
                 if proc.returncode == 0:
                     count += 1
                     if pre_mine_witness is not None:
@@ -2236,6 +2237,11 @@ async def lifespan(app: FastAPI):
     # Start systemd watchdog loop if WatchdogSec is configured.
     # Stash the task on app.state so shutdown can cancel it cleanly —
     # otherwise uvicorn will wait on it until systemd SIGKILLs.
+    # First /status/fast snapshot in the background, so the first session after
+    # a restart is served from memory too.
+    if _postgres_dsn():
+        _STATUS_SNAPSHOT.warm()
+
     app.state.watchdog_task = None
     wdog_secs = _watchdog_interval()
     if wdog_secs > 0:
@@ -2479,6 +2485,13 @@ app = FastAPI(title="palace-daemon", lifespan=lifespan)
 import instruments as _instruments  # noqa: E402
 
 app.add_middleware(_instruments.AuthRejectionCounter)
+
+# /status/fast is served from a stale-while-revalidate snapshot
+# (status_snapshot.py): its three full counts took 1.0-1.4 s and every
+# SessionStart asks for them. A finished mine marks it stale.
+import status_snapshot as _status_snapshot  # noqa: E402
+
+_STATUS_SNAPSHOT = _status_snapshot.SnapshotCache(lambda: _fast_status_payload())
 
 
 # ── MCP proxy ─────────────────────────────────────────────────────────────────
@@ -3149,10 +3162,11 @@ async def status_fast(x_api_key: str | None = Header(default=None)):
         raise HTTPException(status_code=503, detail="postgres backend not configured")
     loop = asyncio.get_running_loop()
     try:
-        payload = await loop.run_in_executor(_FAST_EXECUTOR, _fast_status_payload)
+        payload, age = await loop.run_in_executor(_FAST_EXECUTOR, _STATUS_SNAPSHOT.get)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     if isinstance(payload, dict):
+        payload = {**payload, "snapshot_age_s": round(age, 1)}
         payload["auth_rejections"] = _instruments.auth_rejection_summary()
     return payload
 
@@ -4228,6 +4242,7 @@ async def mine(
             if active_mines is not None:
                 active_mines.discard(proc)
             _instruments.invalidate_source(str(dir_path))
+            _STATUS_SNAPSHOT.invalidate()
         return proc, stdout, stderr
 
     backend = getattr(_mp._config, "backend", "chroma")
