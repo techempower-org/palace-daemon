@@ -200,6 +200,7 @@ class _Conn:
 
 class TestSourceStatus(unittest.TestCase):
     def setUp(self):
+        instruments._SOURCE_CACHE.clear()
         self._tmp = tempfile.TemporaryDirectory()
         self.path = os.path.join(self._tmp.name, "s.jsonl")
         with open(self.path, "wb") as f:
@@ -307,3 +308,67 @@ class TestStatusSourceRoute(unittest.TestCase):
             )
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json(), {"path": path, "drawers": 3})
+
+
+class TestSourceCache(unittest.TestCase):
+    def setUp(self):
+        instruments._SOURCE_CACHE.clear()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self._tmp.name, "c.jsonl")
+        with open(self.path, "wb") as f:
+            f.write(b"x")
+        self.calls = 0
+        self.newest = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 60))
+
+    def tearDown(self):
+        instruments._SOURCE_CACHE.clear()
+        self._tmp.cleanup()
+
+    def _connect(self):
+        self.calls += 1
+        return _Conn([(self.newest,)])
+
+    def _status(self):
+        with patch.dict(sys.modules, _fake_convo_miner(MAX_FILE_SIZE=1000)):
+            return instruments.source_status(self.path, self._connect)
+
+    def test_second_call_is_served_from_the_cache(self):
+        a, b = self._status(), self._status()
+        self.assertEqual(self.calls, 1)
+        self.assertFalse(a["cached"])
+        self.assertTrue(b["cached"])
+        self.assertEqual(a["drawers"], b["drawers"])
+
+    def test_a_mine_of_the_path_or_its_directory_invalidates(self):
+        self._status()
+        instruments.invalidate_source(self.path)
+        self._status()
+        instruments.invalidate_source(self._tmp.name)
+        self._status()
+        self.assertEqual(self.calls, 3)
+
+    def test_unrelated_and_sibling_prefix_paths_keep_their_entry(self):
+        self._status()
+        instruments.invalidate_source(self.path + ".other")
+        instruments.invalidate_source(self._tmp.name + "x")
+        self._status()
+        self.assertEqual(self.calls, 1)
+
+    def test_ttl_expiry_refreshes(self):
+        self._status()
+        with patch.object(instruments, "_SOURCE_CACHE_TTL_S", 0):
+            self._status()
+        self.assertEqual(self.calls, 2)
+
+    def test_file_side_is_never_cached(self):
+        self._status()
+        with open(self.path, "ab") as f:
+            f.write(b"more")
+        self.assertEqual(self._status()["size"], 5)
+
+    def test_cache_is_bounded(self):
+        with patch.object(instruments, "_SOURCE_CACHE_MAX", 3), \
+                patch.dict(sys.modules, _fake_convo_miner(MAX_FILE_SIZE=1000)):
+            for i in range(5):
+                instruments.source_status(self.path + str(i), self._connect)
+        self.assertEqual(len(instruments._SOURCE_CACHE), 3)

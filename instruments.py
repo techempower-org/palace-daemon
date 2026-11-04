@@ -156,6 +156,53 @@ _FILED_AT_SQL = (
 )
 
 
+# Per-path cache of the drawer side (count, newest instant). The full scan
+# costs ~1.1 s on a 40K-drawer transcript and every SessionStart asks for it
+# (2026-11-04). The daemon drops a path's entry after each mine of it
+# (invalidate_source); the TTL bounds staleness from writers that bypass the
+# daemon (a CLI mine). The file side (size, mtime, cap) is never cached, so a
+# growing transcript shows a growing lag between refreshes, which is right.
+_SOURCE_CACHE_TTL_S = 600
+_SOURCE_CACHE_MAX = 2000
+_SOURCE_CACHE: "dict[str, tuple[float, int, float | None]]" = {}
+_SOURCE_LOCK = threading.Lock()
+
+
+def invalidate_source(target: str) -> None:
+    """Forget the cached drawer side for ``target`` and every path under it."""
+    target = str(target)
+    prefix = target.rstrip("/") + "/"
+    with _SOURCE_LOCK:
+        for key in [k for k in _SOURCE_CACHE if k == target or k.startswith(prefix)]:
+            del _SOURCE_CACHE[key]
+
+
+def _drawer_side(path: str, connect) -> "tuple[int, float | None, bool]":
+    """``(drawers, newest_ts, cached)`` for ``path``, from the cache when fresh."""
+    now = time.monotonic()
+    with _SOURCE_LOCK:
+        hit = _SOURCE_CACHE.get(path)
+    if hit is not None and now - hit[0] < _SOURCE_CACHE_TTL_S:
+        return hit[1], hit[2], True
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("SET LOCAL statement_timeout = '5s'")
+        cur.execute(_FILED_AT_SQL, (path,))
+        rows = cur.fetchall()
+        conn.rollback()
+    finally:
+        conn.close()
+    candidates = [ts for ts in (_parse_ts(v) for (v,) in rows if v) if ts is not None]
+    newest_ts = max(candidates) if candidates else None
+    with _SOURCE_LOCK:
+        if len(_SOURCE_CACHE) >= _SOURCE_CACHE_MAX and path not in _SOURCE_CACHE:
+            oldest = min(_SOURCE_CACHE, key=lambda k: _SOURCE_CACHE[k][0])
+            del _SOURCE_CACHE[oldest]
+        _SOURCE_CACHE[path] = (now, len(rows), newest_ts)
+    return len(rows), newest_ts, False
+
+
 def source_status(path: str, connect) -> dict:
     """What the palace holds from one transcript, against the file itself.
 
@@ -178,19 +225,9 @@ def source_status(path: str, connect) -> dict:
             cap_bytes=cap,
             over_cap=cap is not None and st.st_size > cap,
         )
-    conn = connect()
-    try:
-        cur = conn.cursor()
-        cur.execute("SET LOCAL statement_timeout = '5s'")
-        cur.execute(_FILED_AT_SQL, (path,))
-        rows = cur.fetchall()
-        conn.rollback()
-    finally:
-        conn.close()
-    drawers = len(rows)
-    candidates = [ts for ts in (_parse_ts(v) for (v,) in rows if v) if ts is not None]
-    newest_ts = max(candidates) if candidates else None
+    drawers, newest_ts, cached = _drawer_side(path, connect)
     out["drawers"] = drawers
+    out["cached"] = cached
     out["newest_filed_at"] = _iso(newest_ts) if newest_ts is not None else None
     out["lag_s"] = None
     if st is not None and newest_ts is not None:

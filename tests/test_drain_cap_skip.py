@@ -52,5 +52,19 @@ class TestOverCapTranscriptIsReportedNotMined(_DrainHarness):
         self.assertEqual(self.ran, [])
 
 
+class TestDrainMineInvalidatesTheSourceCache(_DrainHarness):
+    async def test_a_drained_mine_drops_its_cached_drawer_side(self):
+        main._instruments._SOURCE_CACHE.clear()
+        main._instruments._SOURCE_CACHE["/d/t.jsonl"] = (0.0, 1, None)
+        main._instruments._SOURCE_CACHE["/d/other.jsonl"] = (0.0, 1, None)
+        self.write_queue([_entry("/d/t.jsonl")])
+        with patch.object(main._instruments, "transcript_over_cap", lambda p: None):
+            await self.drain()
+        self.assertEqual(self.ran, ["/d/t.jsonl"])
+        self.assertNotIn("/d/t.jsonl", main._instruments._SOURCE_CACHE)
+        self.assertIn("/d/other.jsonl", main._instruments._SOURCE_CACHE)
+        main._instruments._SOURCE_CACHE.clear()
+
+
 if __name__ == "__main__":
     unittest.main()

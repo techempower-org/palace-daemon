@@ -1628,6 +1628,7 @@ async def _drain_pending_mines() -> int:
                         if active_mines is not None:
                             active_mines.discard(proc)
                         _drop_mine_phase_file(phase_file)
+                        _instruments.invalidate_source(directory)
                 if proc.returncode == 0:
                     count += 1
                     if pre_mine_witness is not None:
@@ -4226,6 +4227,7 @@ async def mine(
         finally:
             if active_mines is not None:
                 active_mines.discard(proc)
+            _instruments.invalidate_source(str(dir_path))
         return proc, stdout, stderr
 
     backend = getattr(_mp._config, "backend", "chroma")
