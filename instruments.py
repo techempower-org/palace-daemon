@@ -246,3 +246,43 @@ def _parse_ts(value: str) -> "float | None":
         # The miners write local wall-clock time without an offset.
         return time.mktime(dt.timetuple()) + dt.microsecond / 1e6
     return dt.timestamp()
+
+
+# Fast-path failures (#323). Under mine load a fast SQL path's statement
+# timeout was the trigger of both 2026-11-04 incidents (12:16 kg_stats, 13:11
+# status): the daemon then fell back to the in-process full-corpus scan. The
+# fallback is gone; this counter is the leading signal it leaves behind.
+_FAST_FAILURES: "collections.deque[tuple[float, str, bool]]" = collections.deque(maxlen=10_000)
+_FAST_LOCK = threading.Lock()
+
+
+def is_statement_timeout(exc: BaseException) -> bool:
+    """True for a postgres statement timeout (QueryCanceled), by type or text."""
+    name = type(exc).__name__
+    return name == "QueryCanceled" or "statement timeout" in str(exc)
+
+
+def record_fast_failure(tool: str, exc: BaseException, now: float | None = None) -> None:
+    with _FAST_LOCK:
+        _FAST_FAILURES.append(
+            (time.time() if now is None else now, str(tool)[:_PATH_MAX], is_statement_timeout(exc))
+        )
+
+
+def fast_failure_summary(now: float | None = None) -> dict:
+    """Fast-path failures in the last 24 h; ``timeouts_24h`` is the leading signal."""
+    now = time.time() if now is None else now
+    cutoff = now - _WINDOW_S
+    with _FAST_LOCK:
+        recent = [r for r in _FAST_FAILURES if r[0] >= cutoff]
+        # Full and its oldest entry inside the window: older failures in the
+        # window were evicted, so the counts are lower bounds.
+        saturated = len(_FAST_FAILURES) == _FAST_FAILURES.maxlen and _FAST_FAILURES[0][0] >= cutoff
+    return {
+        "timeouts_24h": sum(1 for r in recent if r[2]),
+        "failures_24h": len(recent),
+        "by_tool": dict(collections.Counter(r[1] for r in recent).most_common(5)),
+        "last_at": _iso(recent[-1][0]) if recent else None,
+        "since": _iso(max(cutoff, _PROCESS_START)),
+        "saturated": saturated,
+    }

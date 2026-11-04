@@ -1967,9 +1967,17 @@ def _fast_intercept_fn(tool, arguments):
 
 
 async def _run_fast_intercept(tool, fast_fn, origin: str):
-    """Run a fast payload off-loop. Returns the payload dict, or ``None`` when
-    it failed — the caller then falls through to the slow path, so behaviour
-    matches the upstream MCP server. ``origin`` names the door in the log."""
+    """Run a fast payload off-loop. Returns the payload dict, or the exception
+    when it failed. ``origin`` names the door in the log.
+
+    A failure is NOT a reason to run the slow path (#323). Every intercepted
+    tool is intercepted because its slow path scans the whole corpus
+    in-process. On 2026-11-04 a fast path's statement timeout under mine load
+    fell back to exactly that scan twice (12:16 kg_stats, 13:11 status), and
+    the daemon grew 1.2 -> 5.4 GB and refused every save for 20 minutes. The
+    callers answer with an error naming the cause; the failure is counted
+    (instruments.fast_failure_summary) as the leading signal on /status/fast.
+    """
     loop = asyncio.get_running_loop()
     try:
         _fast_t0 = _time.monotonic()
@@ -2002,8 +2010,28 @@ async def _run_fast_intercept(tool, fast_fn, origin: str):
                 _record_db_error(e)
         except Exception:
             pass
-        _log.warning("fast-intercept %s failed (%s); falling back to %s slow path", tool, e, origin)
-        return None
+        _instruments.record_fast_failure(tool, e)
+        _log.warning(
+            "fast-intercept %s failed (%s); answering with an error, not the %s slow path (#323)",
+            tool, e, origin,
+        )
+        return e
+
+
+def _fast_failure_envelope(request_id, tool, exc: BaseException) -> dict:
+    """JSON-RPC error for a failed fast intercept: names the cause, no fallback."""
+    kind = "statement timeout" if _instruments.is_statement_timeout(exc) else type(exc).__name__
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "error": {
+            "code": -32004,
+            "message": (
+                f"{tool}: fast path failed ({kind}: {str(exc)[:200]}); not falling back "
+                "to the full-corpus scan (palace-daemon #323). Retry shortly."
+            ),
+        },
+    }
 
 
 def _fast_result_envelope(request_id, payload: dict) -> dict:
@@ -2026,8 +2054,9 @@ async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
         _fast_fn = _fast_intercept_fn(_tool, _params.get("arguments"))
         if _fast_fn is not None:
             _payload = await _run_fast_intercept(_tool, _fast_fn, origin="_call")
-            if _payload is not None:
-                return _fast_result_envelope(request_dict.get("id"), _payload)
+            if isinstance(_payload, BaseException):
+                return _fast_failure_envelope(request_dict.get("id"), _tool, _payload)
+            return _fast_result_envelope(request_dict.get("id"), _payload)
     async with _sem_for(request_dict):
         loop = asyncio.get_running_loop()
         # JSON-RPC params can be a dict, an array, or null; only the dict
@@ -2560,7 +2589,12 @@ app.add_middleware(_instruments.AuthRejectionCounter)
 # SessionStart asks for them. A finished mine marks it stale.
 import status_snapshot as _status_snapshot  # noqa: E402
 
-_STATUS_SNAPSHOT = _status_snapshot.SnapshotCache(lambda: _fast_status_payload())
+_STATUS_SNAPSHOT = _status_snapshot.SnapshotCache(
+    lambda: _fast_status_payload(),
+    # A refresh that fails while a stale snapshot is served still counts as a
+    # fast-path failure: it is the same timeout, seen earlier (#323).
+    on_failure=lambda e: _instruments.record_fast_failure("status_snapshot", e),
+)
 
 
 # ── MCP proxy ─────────────────────────────────────────────────────────────────
@@ -2594,8 +2628,9 @@ async def mcp_proxy(request: Request, x_api_key: str | None = Header(default=Non
     fast_fn = _fast_intercept_fn(tool, arguments)
     if fast_fn is not None:
         payload = await _run_fast_intercept(tool, fast_fn, origin="/mcp")
-        if payload is not None:
-            return JSONResponse(content=_fast_result_envelope(body.get("id"), payload))
+        if isinstance(payload, BaseException):
+            return JSONResponse(content=_fast_failure_envelope(body.get("id"), tool, payload))
+        return JSONResponse(content=_fast_result_envelope(body.get("id"), payload))
 
     # Daemon-native tools (#93): rooms CRUD + wakeup + mined. These have no
     # upstream MCP equivalent — the CLI commands they replace open a local
@@ -2896,8 +2931,8 @@ async def list_drawers(
     # wing/room already canonicalized by dependencies (palace-daemon#179).
     # #231 fast path: the upstream tool fetches EVERY drawer (documents
     # included) before slicing the page — ~50s at 490K drawers with no
-    # wing filter. The SQL fast path serves the same envelope in ms;
-    # any failure falls back to the slow tool (#49 pattern).
+    # wing filter. The SQL fast path serves the same envelope in ms. A
+    # failure is a 503 naming the cause, never that full fetch (#323).
     if PALACE_MCP_FAST_INTERCEPT:
         loop = asyncio.get_running_loop()
         try:
@@ -2908,7 +2943,13 @@ async def list_drawers(
                 ),
             )
         except Exception as e:
-            _log.warning("/list fast path failed → falling back to MCP tool: %s", e)
+            _instruments.record_fast_failure("/list", e)
+            _log.warning("/list fast path failed (%s); 503, not the full-drawer tool (#323)", e)
+            raise HTTPException(
+                status_code=503,
+                detail=f"/list fast path failed ({str(e)[:200]}); not falling back to the "
+                "full-drawer tool (palace-daemon #323). Retry shortly.",
+            )
     args: dict = {"limit": int(limit), "offset": int(offset)}
     if wing is not None:
         args["wing"] = wing
@@ -3237,6 +3278,7 @@ async def status_fast(x_api_key: str | None = Header(default=None)):
     if isinstance(payload, dict):
         payload = {**payload, "snapshot_age_s": round(age, 1)}
         payload["auth_rejections"] = _instruments.auth_rejection_summary()
+        payload["fast_path_timeouts"] = _instruments.fast_failure_summary()
     return payload
 
 

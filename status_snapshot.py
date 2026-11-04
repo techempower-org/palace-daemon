@@ -25,8 +25,9 @@ _log = logging.getLogger("palace-daemon")
 
 
 class SnapshotCache:
-    def __init__(self, compute, ttl_s: float = 60.0, max_age_s: float = 900.0):
+    def __init__(self, compute, ttl_s: float = 60.0, max_age_s: float = 900.0, on_failure=None):
         self._compute = compute
+        self._on_failure = on_failure  # called with the exception of a failed refresh
         self.ttl_s = ttl_s
         self.max_age_s = max_age_s
         self._lock = threading.Lock()  # guards the fields below
@@ -90,9 +91,14 @@ class SnapshotCache:
             with self._sync:
                 gen = self._generation()
                 self._store(self._compute(), gen)
-        except Exception:
+        except Exception as e:
             # Keep serving the last good snapshot; max_age_s bounds how long.
             _log.exception("status snapshot refresh failed; serving the previous one")
+            if self._on_failure is not None:
+                try:
+                    self._on_failure(e)
+                except Exception:
+                    pass
         finally:
             with self._lock:
                 self._refreshing = False
