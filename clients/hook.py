@@ -49,6 +49,13 @@ HOOK_SETTINGS_PATH = Path.home() / ".mempalace" / "hook_settings.json"
 # single `auto_wake` entry arms both the interactive CLI path and this hook
 # path. hook.py re-implements the reader in stdlib (no mempalace import).
 MEMPALACE_CONFIG_PATH = Path.home() / ".mempalace" / "config.json"
+# The daemon's own env file (mode 600) holds PALACE_API_KEY; read when the
+# hook's environment does not carry it (see _api_key).
+DAEMON_ENV_FILE = Path.home() / ".config" / "palace-daemon" / "env"
+_DAEMON_ENV_MAX_BYTES = 64 * 1024  # the real file is ~2 KB
+_DAEMON_ENV_KEY_LINE = re.compile(
+    r"""PALACE_API_KEY=(['"]?)([!#-&(-\[\]-~]+)\1"""
+)
 # Where failed transcript ingests are journaled for replay on next session
 # start. Kept under hook_state (not the CLI's ~/.mempalace/pending) so the
 # two replay paths never contend for the same files.
@@ -946,9 +953,66 @@ def _project_wing(data: dict, transcript_path: str) -> str:
     return "personal"
 
 
+def _api_key() -> str:
+    """PALACE_API_KEY from the environment, else from the daemon env file.
+
+    Claude Code only hands a hook the env its settings declare. The 2026-10-27
+    key rotation moved the key out of the user-wide settings.json, so every
+    session outside ~ lost it and its saves got 401 for eight days (16K+
+    rejections in hook.log). mempalace's auto-query hook already falls back to
+    this file (mempalace/auto_query/runner.py:_api_key).
+
+    The daemon loads the file as a systemd EnvironmentFile. This reader does
+    not emulate that syntax; it accepts a strict subset and refuses the rest,
+    because a guessed key is worse than none (the request then 401s and says
+    so in hook.log). Accepted: ``PALACE_API_KEY=<token>`` on one line, the
+    token optionally inside one pair of matching quotes, where a token is
+    printable ASCII with no whitespace, quote or backslash. ``#``/``;`` lines
+    are comments and the last accepted assignment wins, as in systemd. A
+    backslash anywhere, a quote on any other non-comment line, a control or
+    line-separator character anywhere, a PALACE_API_KEY line outside the
+    subset, or an oversized, undecodable or unreadable file yields no key.
+    """
+    key = os.environ.get("PALACE_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        with open(DAEMON_ENV_FILE, "rb") as f:
+            data = f.read(_DAEMON_ENV_MAX_BYTES + 1)
+        if len(data) > _DAEMON_ENV_MAX_BYTES:
+            return ""
+        text = data.decode("utf-8")
+    except (OSError, ValueError):  # ValueError covers UnicodeDecodeError
+        return ""
+    if "\\" in text:
+        # systemd honours backslash escapes and continuations even inside
+        # comments; a file that uses them is outside the subset.
+        return ""
+    # Split on "\n" only: str.splitlines() also breaks at \v, \f, U+0085 and
+    # U+2028/9, which would let one physical line carry a second "assignment".
+    for line in text.split("\n"):
+        if line.endswith("\r"):
+            line = line[:-1]
+        if not line.replace("\t", " ").isprintable():
+            return ""
+        line = line.strip()
+        if not line or line[0] in "#;":
+            continue
+        if line.split("=", 1)[0].strip() == "PALACE_API_KEY":
+            m = _DAEMON_ENV_KEY_LINE.fullmatch(line)
+            if m is None:
+                return ""
+            key = m.group(2)
+        elif any(c in line for c in "'\""):
+            # A quote elsewhere can carry a value across lines (quoted
+            # fragments); refuse, don't parse.
+            return ""
+    return key
+
+
 def _request_headers() -> dict:
     headers = {"Content-Type": "application/json"}
-    api_key = os.environ.get("PALACE_API_KEY", "").strip()
+    api_key = _api_key()
     if api_key:
         headers["X-API-Key"] = api_key
     return headers
