@@ -23,6 +23,7 @@ import os
 import tempfile
 import sqlite3
 import sys
+import threading
 import concurrent.futures as _futures
 import fcntl
 import fnmatch
@@ -160,6 +161,60 @@ def _release_tool_slot() -> None:
     """Give back one in-flight slot. Called from the loop thread only."""
     global _tool_inflight
     _tool_inflight = max(0, _tool_inflight - 1)
+
+
+def _run_tracked(fn, request_dict, box: dict):
+    """Run ``fn`` in a worker, recording which thread runs it (see _log_overdue_stack)."""
+    box["ident"] = threading.get_ident()
+    try:
+        return fn(request_dict)
+    finally:
+        box["done"] = True
+
+
+_OVERDUE_STACK_FRAMES = 30
+
+
+def _frames_of_this_call(frame, box: dict):
+    """``[(file, line, function), ...]`` innermost first, or None if ``frame``
+    is not running THIS call: an executor thread runs one task after another,
+    so the thread id alone could name the next request's stack."""
+    out = []
+    f = frame
+    while f is not None:
+        code = f.f_code
+        if code is _run_tracked.__code__:
+            return out if f.f_locals.get("box") is box else None
+        if len(out) < _OVERDUE_STACK_FRAMES:
+            out.append((code.co_filename, f.f_lineno, code.co_name))
+        f = f.f_back
+    return None
+
+
+def _log_overdue_stack(tool_name: str, params, box: dict) -> None:
+    """Log, once, where a slow-path worker is stuck after its caller timed out (#323).
+
+    The thread cannot be stopped. Each postgres statement is bounded (role
+    statement_timeout 30 s), so a call that outlives its caller is in a long
+    run of statements, or waiting on a lock or a pool checkout. On 2026-11-04
+    nothing said which; this names it for the next hang. Only file:line and
+    function names are logged: no source text, no values.
+    """
+    ident = box.get("ident")
+    if ident is None or box.get("done"):
+        return  # not started yet, or already finished
+    frame = sys._current_frames().get(ident)
+    frames = _frames_of_this_call(frame, box) if frame is not None else None
+    if not frames or box.get("done"):
+        return
+    stack = "\n".join(f"  {fn}:{ln} in {name}" for fn, ln, name in reversed(frames))
+    _log.warning(
+        "slow path overdue: tool=%s args=%s still running after its %gs caller timeout; "
+        "worker thread %s, innermost last:\n%s",
+        tool_name or "<none>",
+        _args_hash(params.get("arguments") if isinstance(params, dict) else None),
+        PALACE_MCP_TOOL_TIMEOUT_SECONDS, ident, stack,
+    )
 
 
 def _release_save_slot() -> None:
@@ -2132,8 +2187,9 @@ async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
         else:
             _tool_inflight += 1
             executor, release = _TOOL_EXECUTOR, _release_tool_slot
+        box: dict = {}
         try:
-            cfut = executor.submit(_mp.handle_request, request_dict)
+            cfut = executor.submit(_run_tracked, _mp.handle_request, request_dict, box)
         except BaseException:
             # A refused submit (executor shut down) would otherwise leak the
             # slot just taken: give it back before re-raising.
@@ -2153,6 +2209,10 @@ async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
             fut = asyncio.wrap_future(cfut)
             result = await (asyncio.wait_for(fut, timeout) if timeout else fut)
         except asyncio.TimeoutError:
+            try:
+                _log_overdue_stack(tool_name, params, box)
+            except Exception:
+                pass  # an instrument must never change the caller's answer
             return {
                 "jsonrpc": "2.0",
                 "id": request_dict.get("id"),
