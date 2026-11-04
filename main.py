@@ -173,6 +173,9 @@ _FAST_EXECUTOR = _futures.ThreadPoolExecutor(
     max_workers=max(1, PALACE_FAST_EXECUTOR_WORKERS),
     thread_name_prefix="palace-fast",
 )
+# /status/source gets its own pool so a slow stat or a 5 s drawer count can
+# never queue /health or /status/fast behind it.
+_SOURCE_EXECUTOR = _futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="palace-source")
 _TOOL_EXECUTOR = _futures.ThreadPoolExecutor(
     max_workers=max(1, PALACE_TOOL_EXECUTOR_WORKERS),
     thread_name_prefix="palace-tool",
@@ -992,6 +995,7 @@ def _source_witness(directory: str) -> "dict | None":
 
 _TRANSCRIPT_MODES = frozenset({"convos", "session"})
 _deferral_logged_at: dict = {}  # target key -> monotonic time of its last "deferring" log line
+_cap_skip_logged_at: dict = {}  # target key -> monotonic time of its last over-cap warning
 
 
 def _mine_min_interval_s() -> float:
@@ -1554,6 +1558,25 @@ async def _drain_pending_mines() -> int:
                             "drain-mine: skipping %s — invalid limit %r", directory, limit
                         )
                         continue
+                over = (
+                    _instruments.transcript_over_cap(directory)
+                    if mode in _TRANSCRIPT_MODES else None
+                )
+                if over is not None:
+                    # The miner skips a file over its cap and still exits 0,
+                    # so spawning it only records a mine that read nothing
+                    # (a 601 MB transcript, 2026-11-04). Say so instead, and
+                    # leave no witness so the file mines once the cap allows.
+                    key = _mined_state_key(directory, mode)
+                    if _time.monotonic() - _cap_skip_logged_at.get(key, -1e9) >= 3600:
+                        _cap_skip_logged_at[key] = _time.monotonic()
+                        _log.warning(
+                            "drain-mine: NOT mining %s (%s): %d MB is over the miner's "
+                            "%d MB cap, so its new content is not reaching the palace",
+                            directory, mode, over[0] // (1024 * 1024),
+                            over[1] // (1024 * 1024),
+                        )
+                    continue
                 # Stat BEFORE spawning: the witness has to describe what this
                 # mine READ, not what it left behind. A session appending while
                 # its checkpoint mine runs would otherwise have those bytes
@@ -2450,6 +2473,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="palace-daemon", lifespan=lifespan)
 
+# Count every 401 the daemon sends (instruments.py): eight days of rejected
+# hook saves went unseen because a rejected POST read as healthy (2026-11-04).
+import instruments as _instruments  # noqa: E402
+
+app.add_middleware(_instruments.AuthRejectionCounter)
+
 
 # ── MCP proxy ─────────────────────────────────────────────────────────────────
 
@@ -3119,7 +3148,40 @@ async def status_fast(x_api_key: str | None = Header(default=None)):
         raise HTTPException(status_code=503, detail="postgres backend not configured")
     loop = asyncio.get_running_loop()
     try:
-        return await loop.run_in_executor(_FAST_EXECUTOR, _fast_status_payload)
+        payload = await loop.run_in_executor(_FAST_EXECUTOR, _fast_status_payload)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    if isinstance(payload, dict):
+        payload["auth_rejections"] = _instruments.auth_rejection_summary()
+    return payload
+
+
+@app.get("/status/source")
+async def status_source(path: str, x_api_key: str | None = Header(default=None)):
+    """What the palace holds from one transcript, against the file itself.
+
+    For the SessionStart line: a session's own transcript whose newest drawer
+    lags the file by hours, or that is over the miner's size cap, is not
+    reaching the palace whatever the mines report (instruments.source_status).
+    """
+    _check_auth(x_api_key)
+    if _instruments.resolve_source_path(path) is None:
+        raise HTTPException(
+            status_code=422,
+            detail="path must be an absolute .jsonl path under ~/.claude/projects",
+        )
+    if not _postgres_dsn():
+        raise HTTPException(status_code=503, detail="postgres backend not configured")
+    import psycopg2
+
+    def _connect():
+        return psycopg2.connect(_postgres_dsn(), connect_timeout=3)
+
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(
+            _SOURCE_EXECUTOR, _instruments.source_status, path, _connect
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
