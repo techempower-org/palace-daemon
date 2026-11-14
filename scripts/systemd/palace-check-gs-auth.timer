@@ -1,0 +1,11 @@
+[Unit]
+Description=palace lane check: gnome-speaks auth state, refused callers and the boot-PATH fix on each desktop (07:50:00 15:50:00)
+
+[Timer]
+OnCalendar=*-*-* 07:50:00
+OnCalendar=*-*-* 15:50:00
+RandomizedDelaySec=60
+Persistent=true
+
+[Install]
+WantedBy=timers.target
