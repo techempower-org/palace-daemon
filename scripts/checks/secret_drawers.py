@@ -8,8 +8,12 @@ recurs in many drawers; what matters is a hash the palace has never held before.
 - **fail**: text the current rules would still redact, in a drawer filed after the rules last
   loaded (palace-daemon's start): a writer skipped redaction. Wings and kinds, never a value.
 - **warn**: a hashed placeholder whose first appearance anywhere in the palace is inside the
-  last ``WINDOW_HOURS``: a new secret was printed into a session and should be rotated (wings
-  and kinds named). Also warn: raw text in drawers filed *before* the rules last loaded, which
+  last ``WINDOW_HOURS``: a secret printed into a session was mined (wings and kinds named; the
+  owner judges and rotates). "First mined" is not "first printed": the palace keeps no
+  reliable print time (``authored_at`` is the mining time too), so an old transcript mined
+  late shows here (2026-11-14: three of four were older lines mined after a reboot). Hashes
+  of known-public values are listed in ``SECRET_CHECK_IGNORE`` (``kind:sha8`` items, local
+  config; never the value) and skipped. Also warn: raw text in drawers filed *before* the rules last loaded, which
   a rule added since now matches (sweep candidates; 2026-11-14 the litellm shape matched 4).
 - **ok** otherwise; the line still counts the window's unhashed redactions (``assignment``,
   ``code``, ``custom``: guessable values carry no hash, so they cannot be told apart).
@@ -50,8 +54,20 @@ def filed(stamp: str | None) -> dt.datetime | None:
     return when if when.tzinfo else when.astimezone()
 
 
+def ignored(spec: str) -> set[tuple[str, str]]:
+    """``kind:sha8`` items (space separated) → {(kind, sha8)}; anything else is skipped."""
+    out = set()
+    for item in spec.split():
+        kind, _, digest = item.partition(":")
+        if re.fullmatch(r"[a-z]+", kind) and re.fullmatch(r"[0-9a-f]{8}", digest):
+            out.add((kind, digest))
+    return out
+
+
 def new_secrets(
-    rows: Iterable[tuple[str, str, str, str]], since: dt.datetime
+    rows: Iterable[tuple[str, str, str, str]],
+    since: dt.datetime,
+    ignore: set[tuple[str, str]] = frozenset(),
 ) -> list[tuple[str, list[str]]]:
     """[(kind, wings)] for each hash whose earliest drawer anywhere was filed at or after
     ``since``, from (kind, hash, wing, filed_at) rows. The minimum is taken over parsed times,
@@ -60,6 +76,8 @@ def new_secrets(
     first: dict[tuple[str, str], dt.datetime] = {}
     wings: dict[tuple[str, str], set] = collections.defaultdict(set)
     for kind, digest, wing, stamp in rows:
+        if (kind, digest) in ignore:
+            continue
         when = filed(stamp)
         key = (kind, digest)
         wings[key].add(wing)
@@ -132,7 +150,7 @@ def assess(new, raw, older, unhashed: int, n: int, since: dt.datetime) -> str:
             for w in wings:
                 tally[(w, kind)] += 1
         warns.append(
-            f"{len(new)} new secret(s) first seen in the palace: {_by_wing(tally)}"
+            f"{len(new)} secret(s) first mined into the palace (not necessarily printed today): {_by_wing(tally)}"
         )
     if older:
         warns.append(

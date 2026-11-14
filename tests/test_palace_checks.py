@@ -192,7 +192,9 @@ def test_secret_lines_fail_warn_and_ok_never_print_a_value():
     )
     assert warn.startswith("CHECK secret-drawers warn")
     assert (
-        "1 new secret(s)" in warn and "w2 (jwt×1)" in warn and "w4 (litellm×1)" in warn
+        "1 secret(s) first mined" in warn
+        and "w2 (jwt×1)" in warn
+        and "w4 (litellm×1)" in warn
     )
     ok = secrets.assess([], {}, {}, 7, 10, since)
     assert ok.startswith("CHECK secret-drawers ok") and "7 unhashed" in ok
@@ -524,3 +526,14 @@ def test_the_dream_check_asks_systemd_for_every_property_it_judges(
     props = {seen["argv"][i + 1] for i, a in enumerate(seen["argv"]) if a == "-p"}
     assert {"LoadState", "Result", "ExecMainStatus", "ExecMainExitTimestamp"} <= props
     assert capsys.readouterr().out.startswith("CHECK dream-night ok")
+
+
+def test_known_public_hashes_are_ignored_and_the_list_takes_only_kind_sha8():
+    since = dt.datetime(2026, 11, 14, 9, 0, tzinfo=dt.timezone.utc)
+    rows = [
+        ("google", "34d4aaaa", "w1", "2026-11-14T10:00:00Z"),
+        ("aws", "aaaa0000", "w1", "2026-11-14T10:00:00Z"),
+    ]
+    skip = secrets.ignored("google:34d4aaaa AIzaSyNOTAHASH aws:XYZ bad")
+    assert skip == {("google", "34d4aaaa")}
+    assert secrets.new_secrets(rows, since, skip) == [("aws", ["w1"])]
