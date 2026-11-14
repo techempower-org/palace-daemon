@@ -4,14 +4,15 @@
 
 A check reports; it never gates: every check exits 0 and its state is in the line. The line goes
 to stdout (the unit's journal) and to ``$PALACE_CHECKS_DIR/<name>.line`` (default
-``~/Projects/palace-daemon/scratch/checks``), replaced atomically.
+``~/.local/state/checks``, where the plan's Hearth › Checks reads it: FOR-AGENTS §24), written as
+``<name>.line.tmp`` and renamed.
 """
 
 from __future__ import annotations
 
+import fcntl
 import os
 import re
-import tempfile
 from pathlib import Path
 
 STATES = ("ok", "warn", "fail")
@@ -40,7 +41,7 @@ def line(name: str, state: str, fact: str, nxt: str = OWNER) -> str:
 
 
 def checks_dir() -> Path:
-    default = Path.home() / "Projects" / "palace-daemon" / "scratch" / "checks"
+    default = Path.home() / ".local" / "state" / "checks"
     return Path(os.environ.get("PALACE_CHECKS_DIR") or default)
 
 
@@ -49,11 +50,19 @@ def emit(name: str, text: str) -> None:
     try:
         out = checks_dir()
         out.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=out, prefix=f".{name}.")
-        with os.fdopen(fd, "w") as f:
-            f.write(text + "\n")
-        os.chmod(tmp, 0o644)
-        os.replace(tmp, out / f"{name}.line")
+        tmp = out / f"{name}.line.tmp"
+        # One writer at a time per directory: the .tmp name is fixed by the plan's contract, so
+        # two overlapping runs would otherwise write one inode, and the second could change the
+        # .line after the first renamed it. The lock is the directory itself (no extra file).
+        dfd = os.open(out, os.O_RDONLY)
+        try:
+            fcntl.flock(dfd, fcntl.LOCK_EX)
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(text + "\n")
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, out / f"{name}.line")
+        finally:
+            os.close(dfd)
     except OSError as exc:
         text += f" [line not saved: {type(exc).__name__}]"
     try:

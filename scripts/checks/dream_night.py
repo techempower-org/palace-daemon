@@ -28,7 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from checklib import OWNER, emit, line, run
 
-NAME = "dream-night"
+NAME = "palace-dream-night"
 STALE_HOURS = 27
 OFF_NIGHTS = 3
 _DAY = re.compile(r"^\d{4}-\d{2}-\d{2}\.json$")

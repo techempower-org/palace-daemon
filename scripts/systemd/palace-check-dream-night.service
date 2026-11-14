@@ -18,5 +18,5 @@ LimitCORE=0
 # Read-only filesystem but the line dir (PALACE_CHECKS_DIR must be it). Not on gs-auth: in a
 # user unit these work through a user namespace, and ssh then refuses /etc/ssh as "bad owner".
 ProtectSystem=strict
-ReadWritePaths=%h/Projects/palace-daemon/scratch/checks
+ReadWritePaths=%h/.local/state/checks
 PrivateTmp=yes

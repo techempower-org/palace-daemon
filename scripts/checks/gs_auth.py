@@ -33,7 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from checklib import emit, label, line, run
 
-NAME = "gs-auth"
+NAME = "palace-gs-auth"
 WINDOW_HOURS = 24
 DEPLOY_GRACE = 60
 _HOST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
@@ -67,16 +67,27 @@ print(json.dumps({"active":a[1],"status":st,"events":[[float(t),k] for t,k in ev
 """
 
 
-def expectations(spec: str) -> tuple[list[tuple[str, str]], list[str]]:
-    """(``host=required|open`` items, items not understood). A host must be a plain name (never
-    an ssh option); one bad item fails the check rather than quietly dropping a host."""
+def expectations(spec: str) -> tuple[list[tuple[str, str, str]], list[int]]:
+    """(``host=required|open[@label]`` items as (host, state, label), the 1-based positions of
+    items not understood). A host must be a plain name (never an ssh option); one bad item fails
+    the check rather than quietly dropping a host. The label is what the line shows (default
+    ``desktop-<n>``); a label that equals any configured host is refused, so the line, which
+    goes to the plan's page, never carries a host name."""
+    items = spec.split()
+    hosts = {it.partition("=")[0] for it in items}
     out, bad = [], []
-    for item in spec.split():
-        host, _, want = item.partition("=")
-        if _HOST.match(host) and want in ("required", "open"):
-            out.append((host, want))
+    for n, item in enumerate(items, 1):
+        host, _, rest = item.partition("=")
+        want, _, name = rest.partition("@")
+        ok = _HOST.match(host) and want in ("required", "open")
+        name = name or f"desktop-{n}"
+        ok = (
+            ok and _HOST.match(name) and name not in hosts
+        )  # the label shown, default included
+        if ok:
+            out.append((host, want, name))
         else:
-            bad.append(item)
+            bad.append(n)
     return out, bad
 
 
@@ -106,7 +117,7 @@ def caller_refusals(
 
 
 def judge_host(host: str, want: str, r: dict | None) -> tuple[str, str]:
-    """(state, fact) for one host."""
+    """(state, fact) for one host; ``host`` here is the label the line may show."""
     host = label(host)
     if not isinstance(r, dict):
         return "fail", f"{host} unreachable"
@@ -202,12 +213,12 @@ def body() -> None:
             line(
                 NAME,
                 "fail",
-                f"GS_CHECK_HOSTS has {len(bad)} item(s) not understood, first {label(bad[0])} (read {now:%H:%M})",
+                f"GS_CHECK_HOSTS item(s) {','.join(map(str, bad))} not understood (read {now:%H:%M})",
                 "owner palace lane: fix ~/.config/palace-checks/env",
             ),
         )
         return
-    emit(NAME, assess([(h, w, read_host(h)) for h, w in hosts], now))
+    emit(NAME, assess([(name, w, read_host(h)) for h, w, name in hosts], now))
 
 
 def main() -> int:

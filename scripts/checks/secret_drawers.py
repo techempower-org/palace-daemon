@@ -37,7 +37,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from checklib import emit, label, line, read_var, run
 
-NAME = "secret-drawers"
+NAME = "palace-secret-drawers"
 WINDOW_HOURS = 24
 PLACEHOLDER = re.compile(r"\[redacted ([a-z]+)(?: sha256:[0-9a-f]{8})?\]")
 HASHED_SQL = r"\[redacted ([a-z]+) sha256:([0-9a-f]{8})\]"
