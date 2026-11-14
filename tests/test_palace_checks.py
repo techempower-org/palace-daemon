@@ -537,3 +537,13 @@ def test_known_public_hashes_are_ignored_and_the_list_takes_only_kind_sha8():
     skip = secrets.ignored("google:34d4aaaa AIzaSyNOTAHASH aws:XYZ bad")
     assert skip == {("google", "34d4aaaa")}
     assert secrets.new_secrets(rows, since, skip) == [("aws", ["w1"])]
+
+
+def test_the_check_passes_its_ignore_list_to_the_judgement():
+    # the body must hand SECRET_CHECK_IGNORE to new_secrets, not only parse it
+    src = (CHECKS / "secret_drawers.py").read_text()
+    body = src[src.index("def body()") :]
+    assert (
+        'ignored(os.environ.get("SECRET_CHECK_IGNORE"' in body
+        and "new_secrets(" in body
+    )

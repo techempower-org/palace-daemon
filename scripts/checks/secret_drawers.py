@@ -13,8 +13,9 @@ recurs in many drawers; what matters is a hash the palace has never held before.
   reliable print time (``authored_at`` is the mining time too), so an old transcript mined
   late shows here (2026-11-14: three of four were older lines mined after a reboot). Hashes
   of known-public values are listed in ``SECRET_CHECK_IGNORE`` (``kind:sha8`` items, local
-  config; never the value) and skipped. Also warn: raw text in drawers filed *before* the rules last loaded, which
-  a rule added since now matches (sweep candidates; 2026-11-14 the litellm shape matched 4).
+  config; never the value) and skipped. Also warn: raw text in drawers filed *before* the
+  rules last loaded, which a rule added since now matches (sweep candidates; 2026-11-14 the
+  litellm shape matched 4).
 - **ok** otherwise; the line still counts the window's unhashed redactions (``assignment``,
   ``code``, ``custom``: guessable values carry no hash, so they cannot be told apart).
 
@@ -264,7 +265,16 @@ def body() -> None:
         return
     emit(
         NAME,
-        assess(new_secrets(hashed, since), raw, older, unhashed, n, since.astimezone()),
+        assess(
+            new_secrets(
+                hashed, since, ignored(os.environ.get("SECRET_CHECK_IGNORE", ""))
+            ),
+            raw,
+            older,
+            unhashed,
+            n,
+            since.astimezone(),
+        ),
     )
 
 
