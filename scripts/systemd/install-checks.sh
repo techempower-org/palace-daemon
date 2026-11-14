@@ -6,7 +6,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 [ -r "$HOME/.config/palace-checks/env" ] || { echo "install-checks: ~/.config/palace-checks/env is missing (docs/CHECKS.md)" >&2; exit 4; }
 # The local units' only writable path (ReadWritePaths): it must exist before they start, and
 # the lines must go there.
-lines="$(cd "$here/../.." && pwd)/scratch/checks"; mkdir -p "$lines"
+lines="$HOME/.local/state/checks"; mkdir -p "$lines"   # where the plan's Hearth › Checks reads
 want="$(sed -n 's/^PALACE_CHECKS_DIR=//p' "$HOME/.config/palace-checks/env" | tr -d '"')"
 [ "$want" = "$lines" ] || { echo "install-checks: PALACE_CHECKS_DIR must be $lines (the units' writable path)" >&2; exit 4; }
 dest="$HOME/.config/systemd/user"; mkdir -p "$dest"

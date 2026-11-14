@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -125,29 +126,31 @@ class PalaceChecks(unittest.TestCase):
     def test_dream_ok_when_the_night_published_and_the_judge_answered(self):
         out = dream.assess([_night("2026-11-15", 5, GOOD)], RAN, NOW)
         assert (
-            out.startswith("CHECK dream-night ok")
+            out.startswith("CHECK palace-dream-night ok")
             and "exit 0" in out
             and "60 cached" in out
         )
 
     def test_dream_fails_when_nothing_was_published_or_the_night_is_stale(self):
-        assert dream.assess([], RAN, NOW).startswith("CHECK dream-night fail")
+        assert dream.assess([], RAN, NOW).startswith("CHECK palace-dream-night fail")
         stale = dream.assess([_night("2026-11-13", 30, GOOD)], RAN, NOW)
-        assert stale.startswith("CHECK dream-night fail") and "older than" in stale
+        assert (
+            stale.startswith("CHECK palace-dream-night fail") and "older than" in stale
+        )
 
     def test_dream_warns_on_a_bad_exit_or_a_judge_error(self):
         bad = dream.assess(
             [_night("2026-11-15", 5, GOOD)], {**RAN, "ExecMainStatus": "3"}, NOW
         )
         assert (
-            bad.startswith("CHECK dream-night warn")
+            bad.startswith("CHECK palace-dream-night warn")
             and "exit 3" in bad
             and "last run" in bad
         )
         err = dream.assess(
             [_night("2026-11-15", 5, {**GOOD, "error": "TimeoutError: busy"})], RAN, NOW
         )
-        assert err.startswith("CHECK dream-night warn") and "judge error" in err
+        assert err.startswith("CHECK palace-dream-night warn") and "judge error" in err
 
     def test_dream_warns_only_after_three_nights_with_the_judge_off(self):
         two = [
@@ -155,14 +158,17 @@ class PalaceChecks(unittest.TestCase):
             _night("2026-11-14", 29, OFF),
             _night("2026-11-13", 53, GOOD),
         ]
-        assert dream.assess(two, RAN, NOW).startswith("CHECK dream-night ok")
+        assert dream.assess(two, RAN, NOW).startswith("CHECK palace-dream-night ok")
         three = [
             _night("2026-11-15", 5, OFF),
             _night("2026-11-14", 29, OFF),
             _night("2026-11-13", 53, OFF),
         ]
         out = dream.assess(three, RAN, NOW)
-        assert out.startswith("CHECK dream-night warn") and "judge off 3 nights" in out
+        assert (
+            out.startswith("CHECK palace-dream-night warn")
+            and "judge off 3 nights" in out
+        )
 
     def test_dream_reads_only_day_files_newest_first(self):
         for day in ("2026-11-13", "2026-11-15", "2026-11-14"):
@@ -174,7 +180,7 @@ class PalaceChecks(unittest.TestCase):
         assert [n["day"] for n in nights[1:]] == ["2026-11-15", "2026-11-14"]
         out = dream.assess(nights, RAN, NOW)
         assert out.startswith(
-            "CHECK dream-night fail · the newest published night is unreadable"
+            "CHECK palace-dream-night fail · the newest published night is unreadable"
         )
 
     # --- secret-drawers
@@ -221,18 +227,20 @@ class PalaceChecks(unittest.TestCase):
     def test_secret_lines_fail_warn_and_ok_never_print_a_value(self):
         since = NOW
         fail = secrets.assess([], {("w1", "aws"): 2}, {}, 0, 10, since)
-        assert fail.startswith("CHECK secret-drawers fail") and "w1 (aws×2)" in fail
+        assert (
+            fail.startswith("CHECK palace-secret-drawers fail") and "w1 (aws×2)" in fail
+        )
         warn = secrets.assess(
             [("jwt", ["w2", "w3"])], {}, {("w4", "litellm"): 1}, 5, 10, since
         )
-        assert warn.startswith("CHECK secret-drawers warn")
+        assert warn.startswith("CHECK palace-secret-drawers warn")
         assert (
             "1 secret(s) first mined" in warn
             and "w2 (jwt×1)" in warn
             and "w4 (litellm×1)" in warn
         )
         ok = secrets.assess([], {}, {}, 7, 10, since)
-        assert ok.startswith("CHECK secret-drawers ok") and "7 unhashed" in ok
+        assert ok.startswith("CHECK palace-secret-drawers ok") and "7 unhashed" in ok
 
     def test_filed_reads_utc_and_naive_local_stamps(self):
         assert secrets.filed("2026-11-14T15:17:39.103Z").utcoffset() == dt.timedelta(0)
@@ -263,46 +271,53 @@ class PalaceChecks(unittest.TestCase):
             ],
             NOW,
         )
-        assert out.startswith("CHECK gs-auth ok") and "1 deploy probe(s)" in out
+        assert out.startswith("CHECK palace-gs-auth ok") and "1 deploy probe(s)" in out
 
     def test_gs_warns_on_a_refused_caller_a_wrong_state_or_an_old_service(self):
         caller = gs.assess([("h1", "required", _host(True, [[900.0, "refused"]]))], NOW)
         assert (
-            caller.startswith("CHECK gs-auth warn") and "a caller is refused" in caller
+            caller.startswith("CHECK palace-gs-auth warn")
+            and "a caller is refused" in caller
         )
         flipped = gs.assess([("h1", "required", _host(False))], NOW)
         assert (
-            flipped.startswith("CHECK gs-auth warn") and "expected required" in flipped
+            flipped.startswith("CHECK palace-gs-auth warn")
+            and "expected required" in flipped
         )
         old = gs.assess([("h2", "open", _host(False, bwfix=0))], NOW)
-        assert old.startswith("CHECK gs-auth warn") and "boot-PATH" in old
+        assert old.startswith("CHECK palace-gs-auth warn") and "boot-PATH" in old
 
     def test_gs_fails_when_a_host_is_down_unreachable_or_unreadable(self):
-        assert gs.assess([("h1", "open", None)], NOW).startswith("CHECK gs-auth fail")
+        assert gs.assess([("h1", "open", None)], NOW).startswith(
+            "CHECK palace-gs-auth fail"
+        )
         assert gs.assess([("h1", "open", _host(active="failed"))], NOW).startswith(
-            "CHECK gs-auth fail"
+            "CHECK palace-gs-auth fail"
         )
         unreadable = {"active": "active", "status": None, "events": [], "bwfix": 1}
         assert gs.assess([("h1", "open", unreadable)], NOW).startswith(
-            "CHECK gs-auth fail"
+            "CHECK palace-gs-auth fail"
         )
-        assert gs.assess([], NOW).startswith("CHECK gs-auth fail")
+        assert gs.assess([], NOW).startswith("CHECK palace-gs-auth fail")
 
     def test_the_worst_host_decides_and_every_host_is_named(self):
         out = gs.assess([("h1", "open", _host(False)), ("h2", "open", None)], NOW)
         assert (
-            out.startswith("CHECK gs-auth fail")
+            out.startswith("CHECK palace-gs-auth fail")
             and "h1 open" in out
             and "h2 unreachable" in out
         )
 
     def test_host_specs_are_parsed_and_bad_items_reported(self):
-        hosts, bad = gs.expectations("a=required b=open c=maybe =open d")
-        assert hosts == [("a", "required"), ("b", "open")] and bad == [
-            "c=maybe",
-            "=open",
-            "d",
-        ]
+        hosts, bad = gs.expectations(
+            "a=required b=open@desk-b c=maybe =open d e=open@-x f=open@a"
+        )
+        assert hosts == [("a", "required", "desktop-1"), ("b", "open", "desk-b")]
+        assert bad == [3, 4, 5, 6, 7]  # f's label is a host name: refused
+        hosts, bad = gs.expectations(
+            "desktop-1=required"
+        )  # the default label would be the host
+        assert hosts == [] and bad == [1]
 
     def test_no_host_name_or_private_address_is_written_into_the_checks(self):
         # The names come from the local config (never listed here: this repo is public); CI has none,
@@ -317,7 +332,9 @@ class PalaceChecks(unittest.TestCase):
                 if row.startswith("GS_CHECK_HOSTS="):
                     names |= {
                         h
-                        for h, _ in gs.expectations(row.split("=", 1)[1].strip('"'))[0]
+                        for h, _, _ in gs.expectations(row.split("=", 1)[1].strip('"'))[
+                            0
+                        ]
                     }
                 if row.startswith(("DREAM_OUT=", "PALACE_CHECKS_DIR=")):
                     names.add(row.split("=", 1)[1].strip('"'))
@@ -336,22 +353,26 @@ class PalaceChecks(unittest.TestCase):
 
     def test_dream_fails_cleanly_on_an_unreadable_night_or_a_missing_dir(self):
         bad = dream.assess([{"day": "2026-11-15", "run": {}}], RAN, NOW)
-        assert bad.startswith("CHECK dream-night fail") and "generated_at" in bad
+        assert bad.startswith("CHECK palace-dream-night fail") and "generated_at" in bad
         with self.env(
             PALACE_CHECKS_DIR=str(self.tmp / "c"), DREAM_OUT=str(self.tmp / "nowhere")
         ):
             out = self.stdout(dream.main)
-        assert out.startswith("CHECK dream-night fail · DREAM_OUT is not a directory")
+        assert out.startswith(
+            "CHECK palace-dream-night fail · DREAM_OUT is not a directory"
+        )
 
     # --- review round 1 (xreview): fail closed, never tokenless, never leak
 
     def test_gs_never_probes_without_a_token_config_and_says_so(self):
         out = gs.assess([("h1", "required", _host(tokenconf=False))], NOW)
-        assert out.startswith("CHECK gs-auth fail") and "never tokenless" in out
+        assert out.startswith("CHECK palace-gs-auth fail") and "never tokenless" in out
 
     def test_gs_warns_when_the_journal_could_not_be_read(self):
         out = gs.assess([("h1", "required", _host(journal=False))], NOW)
-        assert out.startswith("CHECK gs-auth warn") and "journal unreadable" in out
+        assert (
+            out.startswith("CHECK palace-gs-auth warn") and "journal unreadable" in out
+        )
 
     def test_refusals_before_the_window_are_dropped_but_their_start_still_matches_a_probe(
         self,
@@ -364,7 +385,7 @@ class PalaceChecks(unittest.TestCase):
 
     def test_host_specs_reject_ssh_options_and_odd_names(self):
         hosts, bad = gs.expectations("-F/tmp/x=required ok-host=open a;b=open .x=open")
-        assert hosts == [("ok-host", "open")] and len(bad) == 3
+        assert hosts == [("ok-host", "open", "desktop-2")] and bad == [1, 3, 4]
         assert gs.read_host("-oProxyCommand=x") is None
 
     def test_dream_warns_when_the_unit_state_is_unknown_or_the_time_is_in_the_future(
@@ -372,14 +393,16 @@ class PalaceChecks(unittest.TestCase):
     ):
         unknown = dream.assess([_night("2026-11-15", 5, GOOD)], {}, NOW)
         assert (
-            unknown.startswith("CHECK dream-night warn")
+            unknown.startswith("CHECK palace-dream-night warn")
             and "unit state unreadable" in unknown
         )
         future = dream.assess([_night("2026-11-15", -3, GOOD)], RAN, NOW)
-        assert future.startswith("CHECK dream-night warn") and "future" in future
+        assert future.startswith("CHECK palace-dream-night warn") and "future" in future
         naive = _night("2026-11-15", 5, GOOD)
         naive["generated_at"] = "2026-11-15T04:00:00"
-        assert dream.assess([naive], RAN, NOW).startswith("CHECK dream-night fail")
+        assert dream.assess([naive], RAN, NOW).startswith(
+            "CHECK palace-dream-night fail"
+        )
 
     def test_a_judge_error_shows_its_type_never_its_text(self):
         leak = {**GOOD, "error": "URLError: http://user:hunter2-secret@host/x"}
@@ -442,8 +465,9 @@ class PalaceChecks(unittest.TestCase):
         ):
             out = self.stdout(gs.main)
         assert (
-            out.startswith("CHECK gs-auth fail")
-            and "b?requird" in out
+            out.startswith("CHECK palace-gs-auth fail")
+            and "item(s) 2 not understood" in out
+            and "requird" not in out
             and out.count("\n") == 1
         )
 
@@ -464,7 +488,7 @@ class PalaceChecks(unittest.TestCase):
         out = dream.assess(
             [_night("2026-11-15", 5, GOOD)], {**RAN, "LoadState": "not-found"}, NOW
         )
-        assert out.startswith("CHECK dream-night warn") and "not loaded" in out
+        assert out.startswith("CHECK palace-dream-night warn") and "not loaded" in out
 
     def test_a_judge_error_is_shown_as_a_type_or_a_fixed_marker(self):
         cases = [
@@ -495,7 +519,7 @@ class PalaceChecks(unittest.TestCase):
         for unit in (CHECKS.parent / "systemd").glob("*.service"):
             body = unit.read_text()
             if "ReadWritePaths" in body:
-                assert "ReadWritePaths=%h/Projects/palace-daemon/scratch/checks" in body
+                assert "ReadWritePaths=%h/.local/state/checks" in body
 
     def test_the_remote_takes_only_the_token_header_and_never_runs_the_host_curl_config(
         self,
@@ -531,7 +555,7 @@ class PalaceChecks(unittest.TestCase):
             "ExecMainStatus",
             "ExecMainExitTimestamp",
         } <= props
-        assert out.startswith("CHECK dream-night ok")
+        assert out.startswith("CHECK palace-dream-night ok")
 
     def test_known_public_hashes_are_ignored_and_the_list_takes_only_kind_sha8(self):
         since = dt.datetime(2026, 11, 14, 9, 0, tzinfo=dt.timezone.utc)
@@ -551,6 +575,124 @@ class PalaceChecks(unittest.TestCase):
             'ignored(os.environ.get("SECRET_CHECK_IGNORE"' in body
             and "new_secrets(" in body
         )
+
+    # --- plan contract (FOR-AGENTS §24)
+
+    def test_names_and_the_line_file_follow_the_plan_contract(self):
+        assert (dream.NAME, secrets.NAME, gs.NAME) == (
+            "palace-dream-night",
+            "palace-secret-drawers",
+            "palace-gs-auth",
+        )
+        with self.env(PALACE_CHECKS_DIR=str(self.tmp)):
+            self.stdout(
+                lambda: checklib.emit("palace-x", checklib.line("palace-x", "ok", "f"))
+            )
+        assert sorted(p.name for p in self.tmp.iterdir()) == [
+            "palace-x.line"
+        ]  # the .tmp was renamed
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PALACE_CHECKS_DIR", None)
+            assert checklib.checks_dir() == Path.home() / ".local" / "state" / "checks"
+
+    def test_the_gs_line_shows_labels_never_host_names(self):
+        seen = []
+
+        def fake_read(host):
+            seen.append(host)
+            return {
+                "active": "active",
+                "status": {"auth": {"required": True}},
+                "events": [],
+                "bwfix": 1,
+                "tokenconf": True,
+                "journal": True,
+                "now": 1.0,
+            }
+
+        with (
+            self.env(
+                PALACE_CHECKS_DIR=str(self.tmp),
+                GS_CHECK_HOSTS="realhostname1=required@desk-a",
+            ),
+            mock.patch.object(gs, "read_host", fake_read),
+        ):
+            out = self.stdout(gs.main)
+        assert (
+            seen == ["realhostname1"]
+            and "desk-a required" in out
+            and "realhostname1" not in out
+        )
+
+    def test_the_registry_has_the_plan_columns_and_parseable_cadences(self):
+        text = (CHECKS.parent.parent / "docs" / "CHECKS.md").read_text()
+        header = next(r for r in text.splitlines() if r.startswith("| name |"))
+        cols = [c.strip() for c in header.strip("|").split("|")]
+        for need in (
+            "name",
+            "host",
+            "timer",
+            "cadence",
+            "measures",
+            "owner",
+            "the miss behind it",
+        ):
+            assert need in cols, need
+        rows = [r for r in text.splitlines() if r.startswith("| palace-")]
+        assert len(rows) == 3
+        cadence = re.compile(
+            r"^(every \d+ min|every \d+ h|hourly|daily \d\d:\d\d|weekly (Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d\d:\d\d)$"
+        )
+        for r in rows:
+            cells = [c.strip() for c in r.strip("|").split("|")]
+            assert cadence.match(cells[cols.index("cadence")]), cells[0]
+            assert re.fullmatch(r"[a-z0-9-]+", cells[0])
+
+    def test_a_bad_item_naming_a_host_in_its_label_never_reaches_the_line(self):
+        with self.env(
+            PALACE_CHECKS_DIR=str(self.tmp),
+            GS_CHECK_HOSTS="secrethost=requird@secrethost",
+        ):
+            out = self.stdout(gs.main)
+        assert out.startswith("CHECK palace-gs-auth fail") and "secrethost" not in out
+
+    def test_overlapping_writers_never_leave_a_partial_or_foreign_line(self):
+        # Force the overlap: each rename waits, so without the lock a second writer truncates the
+        # shared .tmp while the first is between write and rename, and one rename then fails.
+        import threading
+        import time
+
+        real_replace = os.replace
+
+        def slow_replace(src, dst):
+            time.sleep(0.05)
+            return real_replace(src, dst)
+
+        lines = [
+            checklib.line("palace-c", "ok", f"writer {i} " + "x" * 400)
+            for i in range(6)
+        ]
+        # emit prints; capture once around the whole threaded run (redirect_stdout is global)
+        buf = io.StringIO()
+        with (
+            self.env(PALACE_CHECKS_DIR=str(self.tmp)),
+            mock.patch.object(checklib.os, "replace", slow_replace),
+            contextlib.redirect_stdout(buf),
+        ):
+            threads = [
+                threading.Thread(target=checklib.emit, args=("palace-c", t))
+                for t in lines
+            ]
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join()
+        outs = buf.getvalue().splitlines()
+        assert len(outs) == len(lines)
+        assert not [o for o in outs if "not saved" in o], "a writer lost its rename"
+        final = (self.tmp / "palace-c.line").read_text()
+        assert final.rstrip("\n") in lines and final.count("\n") == 1
+        assert not (self.tmp / "palace-c.line.tmp").exists()
 
 
 if __name__ == "__main__":
