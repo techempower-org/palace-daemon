@@ -1,0 +1,22 @@
+[Unit]
+Description=palace lane check: last night's palace-dream run published, exit 0, judge state
+Documentation=file://%h/Projects/palace-daemon/docs/CHECKS.md
+
+[Service]
+Type=oneshot
+# A user unit started at boot sees a bare PATH: name the dirs (ssh, systemctl, journalctl).
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Paths and hosts only. Never a secrets file: systemd logs a line it cannot parse in full.
+EnvironmentFile=%h/.config/palace-checks/env
+ExecStart=%h/.local/share/palace-daemon/venv/bin/python %h/Projects/palace-daemon/scripts/checks/dream_night.py
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=15min
+NoNewPrivileges=yes
+UMask=0077
+LimitCORE=0
+# Read-only filesystem but the line dir (PALACE_CHECKS_DIR must be it). Not on gs-auth: in a
+# user unit these work through a user namespace, and ssh then refuses /etc/ssh as "bad owner".
+ProtectSystem=strict
+ReadWritePaths=%h/Projects/palace-daemon/scratch/checks
+PrivateTmp=yes
