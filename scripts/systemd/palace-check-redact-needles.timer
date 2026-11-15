@@ -1,0 +1,10 @@
+[Unit]
+Description=palace lane check: redaction needles load and no palace write was refused (every 10 min)
+
+[Timer]
+OnCalendar=*:0/10
+RandomizedDelaySec=30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

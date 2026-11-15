@@ -33,6 +33,7 @@ checklib = _load("checklib")
 dream = _load("dream_night")
 secrets = _load("secret_drawers")
 gs = _load("gs_auth")
+needles = _load("redact_needles")
 
 NOW = dt.datetime(2026, 11, 15, 9, 0, tzinfo=dt.timezone(dt.timedelta(hours=-8)))
 SHAPE = r"^CHECK [a-z-]+ (ok|warn|fail) · .+ · .+$"
@@ -697,3 +698,30 @@ class PalaceChecks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RedactNeedles(unittest.TestCase):
+    """palace-redact-needles: mining stopped by a vault needle is a fail line naming the label only."""
+
+    def test_probe_failure_is_fail_naming_the_label_only(self):
+        state, fact = needles.assess("vault item homelab-shared: vault answered rc 1, empty", ["homelab-shared"], [], 1)
+        self.assertEqual(state, "fail")
+        self.assertIn("mining stopped: vault item homelab-shared", fact)
+        self.assertRegex(checklib.line(needles.NAME, state, fact), SHAPE)
+
+    def test_refused_writes_in_the_window_fail_even_when_the_probe_now_loads(self):
+        journal = ["ok line", "add failed: SecretPatternsUnavailable: vault item homelab-shared: vault answered rc 1, empty"]
+        state, fact = needles.assess(None, ["homelab-shared"], journal, 1)
+        self.assertEqual(state, "fail")
+        self.assertIn("1 palace write(s) refused", fact)
+        self.assertIn("homelab-shared", fact)
+
+    def test_quiet_window_with_needles_loaded_is_ok(self):
+        state, fact = needles.assess(None, ["homelab-shared"], ["mine ok", "search ok"], 1)
+        self.assertEqual(state, "ok")
+        self.assertIn("1 needle(s) loaded (homelab-shared)", fact)
+
+    def test_unreadable_journal_is_warn_and_a_missing_needle_is_warn(self):
+        self.assertEqual(needles.assess(None, ["a"], None, 1)[0], "warn")
+        self.assertEqual(needles.assess(None, [], [], 1)[0], "warn")
+        self.assertEqual(needles.assess(None, [], [], 0)[0], "ok")
