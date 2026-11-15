@@ -640,7 +640,9 @@ class PalaceChecks(unittest.TestCase):
         ):
             assert need in cols, need
         rows = [r for r in text.splitlines() if r.startswith("| palace-")]
-        assert len(rows) == 3
+        timers = sorted(p.name for p in (CHECKS.parent / "systemd").glob("palace-check-*.timer"))
+        named = sorted(r.strip("|").split("|")[2].strip() for r in rows)
+        assert named == timers, (named, timers)  # one row per installed check timer, no more, no less
         cadence = re.compile(
             r"^(every \d+ min|every \d+ h|hourly|daily \d\d:\d\d|weekly (Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d\d:\d\d)$"
         )
@@ -723,5 +725,22 @@ class RedactNeedles(unittest.TestCase):
 
     def test_unreadable_journal_is_warn_and_a_missing_needle_is_warn(self):
         self.assertEqual(needles.assess(None, ["a"], None, 1)[0], "warn")
-        self.assertEqual(needles.assess(None, [], [], 1)[0], "warn")
-        self.assertEqual(needles.assess(None, [], [], 0)[0], "ok")
+        self.assertEqual(needles.assess(None, [], ["x"], 1)[0], "warn")
+        self.assertEqual(needles.assess(None, [], ["x"], 0)[0], "ok")
+        self.assertEqual(needles.assess(None, ["a"], [], 1)[0], "warn")  # empty window: blind
+
+    def test_no_exception_text_or_unconfigured_label_is_ever_echoed(self):
+        secret = "plainlettersecret"
+        err = f"vault item homelab-shared: vault answered rc 1, {secret}"
+        state, fact = needles.assess(err, ["homelab-shared"], ["x"], 1)
+        self.assertEqual(state, "fail")
+        self.assertNotIn(secret, fact)
+        self.assertIn("vault-error", fact)
+        journal = [f"SecretPatternsUnavailable: vault item {secret}: x", "SecretPatternsUnavailable: vault item homelab-shared: empty"]
+        state, fact = needles.assess(None, ["homelab-shared"], journal, 1)
+        self.assertNotIn(secret, fact)
+        self.assertIn("2 palace write(s) refused", fact)
+
+    def test_journal_reads_the_system_unit(self):
+        self.assertEqual(needles.JOURNAL_CMD[:3], ["journalctl", "-u", "palace-daemon"])
+        self.assertNotIn("--user", needles.JOURNAL_CMD)

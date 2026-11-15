@@ -41,14 +41,33 @@ _REFUSED = re.compile(r"SecretPatternsUnavailable|secret patterns? (?:unavailabl
 _LABEL = re.compile(r"vault item ([a-z0-9-]+)")
 
 
-def refused_writes(journal: list[str]) -> tuple[int, list[str]]:
-    """(refused-write lines, needle labels named in them, in order of first appearance)."""
+def reason(error: str) -> str:
+    """An allowlisted reason code for a probe or journal error. Never any text of the error itself:
+    sanitising does not make arbitrary exception text safe (xreview 2026-11-15)."""
+    e = error.lower()
+    for code, needle in (
+        ("vault-locked-or-empty", "empty"),
+        ("vault-unreachable", "unreachable"),
+        ("vault-error", "answered rc"),
+        ("value-too-short", "too short"),
+        ("too-many-items", "more than"),
+        ("config-invalid", "secret_vault_items"),
+        ("config-unreadable", "config"),
+    ):
+        if needle in e:
+            return code
+    return "unavailable"
+
+
+def refused_writes(journal: list[str], configured: list[str]) -> tuple[int, list[str]]:
+    """(refused-write lines, the CONFIGURED needle labels named in them). A label not in the
+    configured set is never echoed: journal text is not trusted to be a label."""
     n, labels = 0, []
     for row in journal:
         if _REFUSED.search(row):
             n += 1
             for m in _LABEL.finditer(row):
-                if m.group(1) not in labels:
+                if m.group(1) in configured and m.group(1) not in labels:
                     labels.append(m.group(1))
     return n, labels
 
@@ -59,17 +78,25 @@ def assess(probe_error: str | None, needles: list[str], journal: list[str] | Non
     names = ", ".join(label(x) for x in needles) or "none"
     if probe_error is not None:
         m = _LABEL.search(probe_error)
-        who = f"vault item {m.group(1)}" if m else "redaction patterns"
-        return "fail", f"mining stopped: {who} cannot load now ({label(probe_error.split(':')[-1].strip())[:40]}); every palace write is refused until the vault answers"
+        who = f"vault item {m.group(1)}" if m and m.group(1) in needles else "redaction patterns"
+        return "fail", f"mining stopped: {who} cannot load now ({reason(probe_error)}); every palace write is refused until it loads"
     if journal is None:
         return "warn", f"{len(needles)} needle(s) loaded ({names}); the daemon journal could not be read"
-    n, labels = refused_writes(journal)
+    if not journal:
+        # palace-daemon logs on every request; an empty window means this instrument is blind
+        return "warn", f"{len(needles)} needle(s) loaded ({names}); the daemon journal returned 0 lines in {WINDOW_MIN} min (blind?)"
+    n, labels = refused_writes(journal, needles)
     if n:
         who = ", ".join(labels) or "patterns"
         return "fail", f"{n} palace write(s) refused in the last {WINDOW_MIN} min ({who}); needles load now, so it recovered or is intermittent"
     if expect and len(needles) < expect:
         return "warn", f"{len(needles)} needle(s) configured, {expect} expected ({names})"
     return "ok", f"{len(needles)} needle(s) loaded ({names}); 0 palace writes refused in the last {WINDOW_MIN} min"
+
+
+JOURNAL_CMD = ["journalctl", "-u", "palace-daemon", "--since", f"-{WINDOW_MIN}min", "--no-pager", "-o", "cat"]
+# palace-daemon is a SYSTEM unit (User=jp), so -u, not --user -u; the user running the check reads
+# its journal through the systemd-journal group.
 
 
 def _probe() -> tuple[str | None, list[str]]:
@@ -87,10 +114,7 @@ def _probe() -> tuple[str | None, list[str]]:
 
 def _journal() -> list[str] | None:
     try:
-        out = subprocess.run(
-            ["journalctl", "-u", "palace-daemon", "--since", f"-{WINDOW_MIN}min", "--no-pager", "-o", "cat"],
-            capture_output=True, text=True, timeout=60,
-        )
+        out = subprocess.run(JOURNAL_CMD, capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.SubprocessError):
         return None
     return out.stdout.splitlines() if out.returncode == 0 else None
