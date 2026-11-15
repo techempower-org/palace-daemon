@@ -19,9 +19,9 @@ Two instruments:
   journal could not be read.
 - **ok**: n needle(s) loaded (labels), 0 refused writes in the window.
 
-The miss behind it (2026-11-15): the shared homelab password, lower case letters only, matched no
-secret shape and sat in ~950 drawers; the needle that now catches it can stop all mining when the
-vault locks, and nobody would know without a line on the Watch.
+The miss behind it (2026-11-15): a password with no secret shape matched no rule and reached the
+palace; the needle that now catches such a value can stop all mining when the vault locks, and nobody
+would know without a line on the Watch.
 """
 
 from __future__ import annotations
