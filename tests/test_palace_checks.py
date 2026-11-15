@@ -33,6 +33,7 @@ checklib = _load("checklib")
 dream = _load("dream_night")
 secrets = _load("secret_drawers")
 gs = _load("gs_auth")
+needles = _load("redact_needles")
 
 NOW = dt.datetime(2026, 11, 15, 9, 0, tzinfo=dt.timezone(dt.timedelta(hours=-8)))
 SHAPE = r"^CHECK [a-z-]+ (ok|warn|fail) · .+ · .+$"
@@ -639,7 +640,9 @@ class PalaceChecks(unittest.TestCase):
         ):
             assert need in cols, need
         rows = [r for r in text.splitlines() if r.startswith("| palace-")]
-        assert len(rows) == 3
+        timers = sorted(p.name for p in (CHECKS.parent / "systemd").glob("palace-check-*.timer"))
+        named = sorted(r.strip("|").split("|")[2].strip() for r in rows)
+        assert named == timers, (named, timers)  # one row per installed check timer, no more, no less
         cadence = re.compile(
             r"^(every \d+ min|every \d+ h|hourly|daily \d\d:\d\d|weekly (Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d\d:\d\d)$"
         )
@@ -697,3 +700,47 @@ class PalaceChecks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RedactNeedles(unittest.TestCase):
+    """palace-redact-needles: mining stopped by a vault needle is a fail line naming the label only."""
+
+    def test_probe_failure_is_fail_naming_the_label_only(self):
+        state, fact = needles.assess("vault item example-shared: vault answered rc 1, empty", ["example-shared"], [], 1)
+        self.assertEqual(state, "fail")
+        self.assertIn("mining stopped: vault item example-shared", fact)
+        self.assertRegex(checklib.line(needles.NAME, state, fact), SHAPE)
+
+    def test_refused_writes_in_the_window_fail_even_when_the_probe_now_loads(self):
+        journal = ["ok line", "add failed: SecretPatternsUnavailable: vault item example-shared: vault answered rc 1, empty"]
+        state, fact = needles.assess(None, ["example-shared"], journal, 1)
+        self.assertEqual(state, "fail")
+        self.assertIn("1 palace write(s) refused", fact)
+        self.assertIn("example-shared", fact)
+
+    def test_quiet_window_with_needles_loaded_is_ok(self):
+        state, fact = needles.assess(None, ["example-shared"], ["mine ok", "search ok"], 1)
+        self.assertEqual(state, "ok")
+        self.assertIn("1 needle(s) loaded (example-shared)", fact)
+
+    def test_unreadable_journal_is_warn_and_a_missing_needle_is_warn(self):
+        self.assertEqual(needles.assess(None, ["a"], None, 1)[0], "warn")
+        self.assertEqual(needles.assess(None, [], ["x"], 1)[0], "warn")
+        self.assertEqual(needles.assess(None, [], ["x"], 0)[0], "ok")
+        self.assertEqual(needles.assess(None, ["a"], [], 1)[0], "warn")  # empty window: blind
+
+    def test_no_exception_text_or_unconfigured_label_is_ever_echoed(self):
+        secret = "plainlettersecret"
+        err = f"vault item example-shared: vault answered rc 1, {secret}"
+        state, fact = needles.assess(err, ["example-shared"], ["x"], 1)
+        self.assertEqual(state, "fail")
+        self.assertNotIn(secret, fact)
+        self.assertIn("vault-error", fact)
+        journal = [f"SecretPatternsUnavailable: vault item {secret}: x", "SecretPatternsUnavailable: vault item example-shared: empty"]
+        state, fact = needles.assess(None, ["example-shared"], journal, 1)
+        self.assertNotIn(secret, fact)
+        self.assertIn("2 palace write(s) refused", fact)
+
+    def test_journal_reads_the_system_unit(self):
+        self.assertEqual(needles.JOURNAL_CMD[:3], ["journalctl", "-u", "palace-daemon"])
+        self.assertNotIn("--user", needles.JOURNAL_CMD)
