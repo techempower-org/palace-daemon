@@ -3394,9 +3394,15 @@ async def search_fast(
     # palace-daemon#179: wing canonicalization via dependency. No room
     # filter on this endpoint (BM25 only filters on wing).
     wing: str | None = Depends(_rooms.wing_filter_dep),
+    # judged classes: include drawers flagged chatter/stale (left out by default).
+    all_classes: bool = False,
     x_api_key: str | None = Header(default=None),
 ):
-    """Fast BM25 text search via direct SQL — no vector, no AGE locks."""
+    """Fast BM25 text search via direct SQL — no vector, no AGE locks.
+
+    Drawers flagged ``judged_class`` chatter/stale are left out in the SQL itself unless
+    ``all_classes=true``; the response is a bare list, so it carries no ``judged_excluded``
+    count (use /search or /search/keyword for the count)."""
     _check_auth(x_api_key)
     # wing already canonicalized by dependency (palace-daemon#179).
     dsn = os.environ.get("MEMPALACE_POSTGRES_DSN") or getattr(
@@ -3428,6 +3434,9 @@ async def search_fast(
                 if wing:
                     sql += " AND wing = %s"
                     params.append(wing)
+                if not all_classes:
+                    # judged classes: rows flagged chatter/stale stay out; NULL (unflagged) passes.
+                    sql += " AND COALESCE(metadata->>'judged_class', '') NOT IN ('chatter', 'stale')"
                 sql += " ORDER BY rank DESC LIMIT %s"
                 params.append(limit)
                 cur.execute(sql, params)

@@ -43,6 +43,63 @@ from search_models import (  # noqa: F401
 
 router = APIRouter()
 
+# ── judged classes (mempalace docs/designs/judged-drawer-classes.md) ────────
+#
+# A drawer the judged-class run flagged ``judged_class`` chatter or stale stays
+# in the palace and is left out of default search; ``all_classes=true`` returns
+# every drawer, so a flagged drawer is never unreachable. Routes that go through
+# the ``mempalace_search`` tool pass the flag on (mempalace filters); routes with
+# their own SQL filter here. Lookups fail open: a drawer is hidden only when its
+# row is read and proven flagged.
+
+JUDGED_SEARCH_EXCLUDED = ("chatter", "stale")
+
+
+def _judged_hidden_ids(ids, dsn):
+    ids = sorted({i for i in ids if isinstance(i, str) and i})
+    if not ids or not dsn:
+        return set()
+    try:
+        import psycopg2
+
+        with psycopg2.connect(dsn, connect_timeout=3) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = '2s'")
+                cur.execute(
+                    "SELECT id FROM mempalace_drawers WHERE id = ANY(%s) "
+                    "AND metadata->>'judged_class' = ANY(%s)",
+                    (ids, list(JUDGED_SEARCH_EXCLUDED)),
+                )
+                return {r[0] for r in cur.fetchall()}
+    except Exception as e:  # noqa: BLE001 -- fail open: never hide what we cannot prove is flagged
+        _log.warning("judged-class lookup failed; not filtering: %s", e)
+        return set()
+
+
+def _drop_judged(response, dsn, limit=None):
+    """Remove judged chatter/stale hits from a search response; count them in ``judged_excluded``."""
+    if not isinstance(response, dict) or not response.get("results"):
+        return response
+    hits = response["results"]
+    hidden = _judged_hidden_ids([h.get("drawer_id") or h.get("id") for h in hits], dsn)
+    kept = [h for h in hits if (h.get("drawer_id") or h.get("id")) not in hidden]
+    response["results"] = kept[:limit] if limit else kept
+    _note_judged(response, len(hits) - len(kept))
+    return response
+
+
+def _note_judged(response, n):
+    """Count left-out hits in ``judged_excluded`` (the candidates this route examined) and say how to get them."""
+    if not n:
+        return
+    response["judged_excluded"] = response.get("judged_excluded", 0) + n
+    warnings = response.setdefault("warnings", [])
+    if isinstance(warnings, list):
+        warnings.append(
+            f"{n} hit(s) judged chatter/stale were left out; add all_classes=true to include them"
+        )
+
+
 # ── kind= filter (palace-daemon#194) ─────────────────────────────────────────
 #
 # Stop-hook auto-save checkpoint diary entries (``CHECKPOINT:…`` bodies,
@@ -153,6 +210,8 @@ async def search(
     # palace-daemon#189: per-request rerank override. ?rerank=false skips
     # the cross-encoder for this request only; absent → PALACE_RERANK_ENABLED.
     rerank: bool | None = None,
+    # judged classes: include drawers flagged chatter/stale (left out by default).
+    all_classes: bool = False,
     x_api_key: str | None = Header(default=None),
 ):
     """Semantic search over the main `mempalace_drawers` collection.
@@ -183,6 +242,8 @@ async def search(
         args["wing"] = wing
     if room:
         args["room"] = room
+    if all_classes:
+        args["all_classes"] = True
     result = await main._call({
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
@@ -262,6 +323,8 @@ async def search_hybrid(
     args["include_trace"] = body.include_trace
     if body.fusion_mode is not None:
         args["fusion_mode"] = body.fusion_mode
+    if body.all_classes:
+        args["all_classes"] = True
 
     result = await main._call({
         "jsonrpc": "2.0", "id": 1,
@@ -309,6 +372,24 @@ async def search_keyword(
     result = _bm25_only_via_postgres(
         body.query, dsn, wing=body.wing, room=body.room, n_results=body.limit,
     )
+    if not body.all_classes and isinstance(result, dict) and result.get("results"):
+        # Same request as before when nothing is flagged; only a page that lost flagged
+        # hits is fetched again, wider, and filtered before the rerank sees it.
+        # The lookups are blocking psycopg2 calls: run them off the event loop.
+        hits = result["results"]
+        hidden = await asyncio.to_thread(
+            _judged_hidden_ids, [h.get("drawer_id") or h.get("id") for h in hits], dsn
+        )
+        if hidden:
+            wider = await asyncio.to_thread(
+                _bm25_only_via_postgres,
+                body.query, dsn, wing=body.wing, room=body.room,
+                n_results=min(body.limit + 2 * len(hidden), 400),
+            )
+            # Use the wider page only when it has results; a failed or empty refetch keeps
+            # (and filters) the page we already had.
+            usable = isinstance(wider, dict) and bool(wider.get("results")) and "error" not in wider
+            result = await asyncio.to_thread(_drop_judged, wider if usable else result, dsn, body.limit)
     return main._rerank.rerank_response(body.query, result, enabled=body.rerank)
 
 
@@ -376,7 +457,8 @@ async def search_age_fused(
             query,
             # Over-fetch so RRF has more candidates to work with.
             max(graph_top_k, limit * 3),
-        ) | ({"wing": wing} if wing else {}) | ({"room": room} if room else {})},
+        ) | ({"wing": wing} if wing else {}) | ({"room": room} if room else {})
+          | ({"all_classes": True} if body.all_classes else {})},
     })
     vec_hits = (main._unwrap(vec_result) or {}).get("results") or []
 
@@ -496,7 +578,8 @@ async def search_age_fused(
                             "SELECT id, document, wing, room, "
                             "       COALESCE(metadata->>'topic', '') AS topic, "
                             "       COALESCE(metadata->>'source_file', '') AS source_file, "
-                            "       metadata->>'created_at' AS created_at "
+                            "       metadata->>'created_at' AS created_at, "
+                            "       metadata->>'judged_class' AS judged_class "
                             "FROM mempalace_drawers WHERE id = ANY(%s)",
                             (ids,),
                         )
@@ -508,6 +591,7 @@ async def search_age_fused(
                                 "topic": r[4],
                                 "source_file": r[5],
                                 "created_at": r[6] or None,
+                                "judged_class": r[7] if len(r) > 7 else None,
                             }
                             for r in cur.fetchall()
                         }
@@ -516,6 +600,7 @@ async def search_age_fused(
                 return {}
         hydrated = await asyncio.to_thread(_hydrate_drawers, graph_only_ids)
 
+    judged_excluded = 0
     out_hits: list[dict] = []
     for did, score in fused_order:
         if did in vec_by_id:
@@ -528,6 +613,9 @@ async def search_age_fused(
             # failed (postgres bounced etc.), fall back to the historic
             # minimal-stub shape so the response is still valid.
             row = hydrated.get(did)
+            if row and not body.all_classes and row.get("judged_class") in JUDGED_SEARCH_EXCLUDED:
+                judged_excluded += 1  # graph-only and flagged: vector hits are filtered by mempalace
+                continue
             if row:
                 hit = {
                     "drawer_id": did,
@@ -552,6 +640,13 @@ async def search_age_fused(
         out_hits.append(hit)
 
     response = {"results": out_hits}
+    vec_payload = main._unwrap(vec_result) if isinstance(vec_result, dict) else {}
+    if isinstance(vec_payload, dict):
+        if vec_payload.get("judged_excluded"):
+            response["judged_excluded"] = vec_payload["judged_excluded"]
+        if vec_payload.get("warnings"):
+            response["warnings"] = list(vec_payload["warnings"])
+    _note_judged(response, judged_excluded)
     if include_trace:
         response["trace"] = {
             "n_vector": len(vec_hits),
@@ -568,6 +663,7 @@ async def context(
     limit: int = 5,
     # palace-daemon#194: same kind= semantics as /search.
     kind: str = "content",
+    all_classes: bool = False,
     x_api_key: str | None = Header(default=None),
 ):
     """Alias for /search with a semantically friendlier name for LLM tool
@@ -584,6 +680,7 @@ async def context(
     result = await main._call({
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
-        "params": {"name": "mempalace_search", "arguments": main._search_args(topic, limit)},
+        "params": {"name": "mempalace_search", "arguments": main._search_args(topic, limit)
+                   | ({"all_classes": True} if all_classes else {})},
     })
     return _apply_kind_filter(main._unwrap(result), kind)
