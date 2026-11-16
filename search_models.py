@@ -70,6 +70,9 @@ class SearchKeywordBody(BaseModel):
     limit: int = Field(20, ge=1, le=200, description="Result count (1..200).")
     # rerank (#189): per-request cross-encoder override; None → env default.
     rerank: "bool | None" = Field(None, description="Per-request rerank toggle; None defers to PALACE_RERANK_ENABLED.")
+    # judged classes (docs/designs/judged-drawer-classes.md in mempalace): drawers flagged
+    # judged_class chatter/stale are left out unless this is true.
+    all_classes: bool = Field(False)
 
     @field_validator("query")
     @classmethod
@@ -113,6 +116,9 @@ class SearchHybridBody(BaseModel):
     # to PALACE_RERANK_ENABLED; True/False forces the stage on/off for this
     # request only, so ablation benches can A/B rerank within one pass.
     rerank: "bool | None" = Field(None)
+    # judged classes (docs/designs/judged-drawer-classes.md in mempalace): drawers flagged
+    # judged_class chatter/stale are left out unless this is true.
+    all_classes: bool = Field(False)
 
     @field_validator("query")
     @classmethod
@@ -373,6 +379,9 @@ class SearchAgeFusedBody(BaseModel):
     include_trace: bool = Field(False)
     # rerank (#189): per-request cross-encoder override; None → env default.
     rerank: "bool | None" = Field(None)
+    # judged classes (docs/designs/judged-drawer-classes.md in mempalace): drawers flagged
+    # judged_class chatter/stale are left out unless this is true.
+    all_classes: bool = Field(False)
 
     @field_validator("query")
     @classmethod
