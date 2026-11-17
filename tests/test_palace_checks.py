@@ -36,6 +36,7 @@ secrets = _load("secret_drawers")
 gs = _load("gs_auth")
 needles = _load("redact_needles")
 psec = _load("palace_secrets")
+pclass = _load("palace_secrets_classify")
 
 NOW = dt.datetime(2026, 11, 15, 9, 0, tzinfo=dt.timezone(dt.timedelta(hours=-8)))
 SHAPE = r"^CHECK [a-z-]+ (ok|warn|fail) · .+ · .+$"
@@ -1050,3 +1051,99 @@ class PalaceSecrets(unittest.TestCase):
                     os.utime(f, (old, old))
             psec.prune_backups(Path(d))
             self.assertEqual(sorted(x.name for x in Path(d).iterdir()), ["new.jsonl"])
+
+
+class PalaceSecretsClassify(unittest.TestCase):
+    """palace-secrets classify: a value-free verdict per hit (Sen 2026-11-17)."""
+
+    @staticmethod
+    def _rand(alphabet, n, seed):
+        import random
+
+        return "".join(random.Random(seed).choice(alphabet) for _ in range(n))
+
+    def test_shapes_never_contain_the_value(self):
+        import base64 as b64
+
+        up = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        cases = {
+            "AKIA" + self._rand(up, 16, 1): "AWS long-term",
+            "ASIA" + self._rand(up, 16, 2): "AWS temporary",
+            "ghs_" + self._rand(up.lower() + up, 36, 3): "installation token",
+            self._rand("0123456789abcdef", 40, 4): "hex-40",
+            self._rand("0123456789abcdef", 64, 5): "sha256",
+        }
+        blob_obj = {"type": "service_account", "private_key_id": self._rand(up, 20, 6), "client_email": "x"}
+        blob = b64.b64encode(json.dumps(blob_obj).encode()).decode()
+        cases[blob] = "keys [type,private_key_id,client_email] type=service_account"
+        for value, want in cases.items():
+            got = pclass.shape(value)
+            self.assertIn(want, got, value[:4])
+            self.assertNotIn(value, got)
+            for part in (value[4:12], value[-8:]):
+                self.assertNotIn(part, got)
+        self.assertNotIn(blob_obj["private_key_id"], pclass.shape(blob))
+
+    def test_a_jwt_reports_alg_and_expiry_only(self):
+        import base64 as b64
+
+        def seg(o):
+            return b64.urlsafe_b64encode(json.dumps(o).encode()).decode().rstrip("=")
+
+        sub = self._rand("abcdefghij", 12, 7)
+        tok = ".".join((seg({"alg": "HS256", "typ": "JWT"}), seg({"sub": sub, "exp": 1}), self._rand("abcdef", 43, 8)))
+        got = pclass.shape(tok)
+        self.assertIn("jwt alg=HS256", got)
+        self.assertIn("expired", got)
+        self.assertNotIn(sub, got)
+
+    def test_a_cut_base64_json_run_reports_the_key_names_seen(self):
+        import base64 as b64
+
+        val = self._rand("ABCDEFGHJKMNPQRSTUVWXYZ", 30, 10)
+        enc = b64.b64encode(json.dumps({"kind": "tiles", "payload": val, "more": [1] * 50}).encode()).decode()
+        run = enc[: len(enc) - len(enc) % 4 - 7]  # cut mid-object and mid-quantum
+        self.assertEqual(len(run) % 4, 1)
+        got = pclass.shape(run)
+        self.assertIn("keys seen [kind,payload", got)
+        self.assertIn("not whole base64", got)
+        self.assertNotIn(val, got)
+
+    def test_binary_that_starts_with_a_brace_is_called_binary(self):
+        import base64 as b64
+        import random
+
+        raw = b"{" + bytes(random.Random(11).randrange(128, 256) for _ in range(300))
+        got = pclass.shape(b64.b64encode(raw).decode())
+        self.assertIn("binary", got)
+        self.assertNotIn("JSON", got)
+
+    def test_the_documentation_example_is_named(self):
+        self.assertIn("documentation example", pclass.shape("AKIA" + "IOSFODNN7" + "EXAMPLE"))
+
+    def test_classify_row_lines_hold_no_value_and_redact_the_heading(self):
+        import re as _re
+
+        secret = "AKIA" + self._rand("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567", 16, 9)
+        pat = _re.compile(r"(?P<_mprkeep>(?!))|(?P<_mpr0>AKIA[A-Z2-7]{16})")
+        passes = [(pat, ["aws"])]
+
+        def safe_fn(text):
+            return pat.sub("[redacted aws]", text)
+
+        doc = f"# deploy notes {secret}\nthe key {secret} was printed"
+        meta = {"source_file": "/p/chat.jsonl", "note": secret}
+        lines = pclass.classify_row("mempalace_drawers", "d1", doc, meta, passes, safe_fn)
+        self.assertEqual(len(lines), 3)  # two in the document, one in metadata.note
+        for line in lines:
+            self.assertNotIn(secret, line)
+            cols = line.split("\t")
+            self.assertEqual(len(cols), 8)
+            self.assertEqual(cols[2], "/p/chat.jsonl")
+            self.assertIn("AWS long-term", cols[6])
+            self.assertTrue(cols[7].startswith("# deploy notes [redacted aws]"))
+        self.assertIn("metadata.note", lines[2])
+
+    def test_usage_without_a_wing(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(pclass.main([]), 22)
