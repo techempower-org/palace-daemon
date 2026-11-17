@@ -40,3 +40,6 @@ networkx>=3.0
 # Installed by hand until now; a scratch daemon on 2026-10-24 refused to start
 # from a requirements-only venv. 0.7.6 is what the production venv runs.
 chroma-hnswlib>=0.7.6
+# realm-sigil: the /api/version contract every realm web service serves (status.realm.watch sigil-coverage,
+# JP 2026-11-17). Pinned to a commit of the public repo.
+sigil.realm.watch @ git+https://github.com/jphein/sigil.realm.watch@4693abbf23db8f3607d471844874ea95e0b169ac#subdirectory=python
