@@ -33,6 +33,7 @@ held 24 drawers of private-key text no rule caught.
 from __future__ import annotations
 
 import collections
+import contextlib
 import datetime as dt
 import json
 import os
@@ -342,13 +343,26 @@ def probe_wait(conn, path: Path, fakes: dict, placeholder, deadline: float) -> t
     return "not measured", f"probe not filed within {PROBE_WAIT_S // 60} min"
 
 
+def probe_files_cleanup(pdir: Path) -> int:
+    """Delete every probe transcript file; the number that could not go. Needs no database."""
+    left = 0
+    for f in pdir.glob("*.jsonl"):
+        try:
+            f.unlink()
+        except OSError:
+            left += 1
+    return left
+
+
 def probe_cleanup(conn, key, pdir: Path) -> int:
-    """Delete every probe drawer (this run's and any a past run left) and every probe file; the number left."""
+    """Delete every probe drawer (this run's and any a past run left); the number left (1 if it cannot look)."""
     left = 0
     try:
+        # a literal prefix: LIKE would read "_" and "%" in the path as wildcards
         rows = conn.execute(
-            "SELECT id FROM mempalace_drawers WHERE metadata->>'source_file' LIKE %s",
-            (str(pdir) + "/%",),
+            "SELECT id FROM mempalace_drawers "
+            "WHERE starts_with(metadata->>'source_file', %s)",
+            (str(pdir) + "/",),
         ).fetchall()
     except Exception:  # noqa: BLE001 -- cannot see: count it as left
         return 1
@@ -357,11 +371,6 @@ def probe_cleanup(conn, key, pdir: Path) -> int:
             status, _out = _daemon("DELETE", f"/memory/{did}", key)
             left += status != 200
         except (urllib.error.URLError, OSError, ValueError):
-            left += 1
-    for f in pdir.glob("*.jsonl"):
-        try:
-            f.unlink()
-        except OSError:
             left += 1
     return left
 
@@ -389,13 +398,20 @@ def scan(conn, passes, placeholder):
                     yield table, did, wing, nd, nm, kinds, tuple(md5)
 
 
+def _is_probe_row(row, pdir: Path) -> bool:
+    """A scan row (table, id, wing, doc, meta, kinds, md5) whose drawer a probe transcript filed."""
+    meta = row[4] if isinstance(row[4], dict) else {}
+    return str(meta.get("source_file", "")).startswith(str(pdir) + "/")
+
+
 def count_rows(conn) -> int:
     return sum(conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in TABLES)
 
 
 def prune_backups(bdir: Path) -> None:
     cutoff = time.time() - BACKUP_DAYS * 86400
-    for old in list(bdir.glob("*.jsonl")):
+    # .copy: the first version's backup format, pruned the same way
+    for old in list(bdir.glob("*.jsonl")) + list(bdir.glob("*.copy")):
         try:
             if old.stat().st_mtime < cutoff:
                 old.unlink()
@@ -568,24 +584,31 @@ def body() -> None:
         for _t, _d, wing, _nd, _nm, kinds, _m in found:
             for kind, k in kinds.items():
                 hits[(wing, kind)] += k
+        # Judge the probe BEFORE any redaction: redacting its raw drawers first
+        # would repair the very control it measures.
+        verdict = early or probe_wait(conn, path, fakes, placeholder, deadline)
         ents, ent_hits, e_done, e_bad = entity_scan(
             conn, passes, placeholder, redact_on, bdir
         )
-        if redact_on and found:
-            redacted, failed = redact_rows(conn, found, bdir)
+        # probe rows are deleted in the cleanup below, never redacted
+        mine = [r for r in found if not _is_probe_row(r, pdir)]
+        if redact_on and mine:
+            redacted, failed = redact_rows(conn, mine, bdir)
         redacted, failed = redacted + e_done, failed + e_bad
-        verdict = early or probe_wait(conn, path, fakes, placeholder, deadline)
     except Exception as exc:  # noqa: BLE001 -- a check reports, it never raises
         error = type(exc).__name__
     finally:
-        if conn is None:
-            try:
-                conn = psycopg.connect(dsn, connect_timeout=20, autocommit=True)
-            except Exception:  # noqa: BLE001
-                conn = None
-        leftovers = probe_cleanup(conn, key, pdir) if conn is not None else 1
+        leftovers = probe_files_cleanup(pdir)  # files first: needs no database
         if conn is not None:
-            conn.close()
+            with contextlib.suppress(
+                Exception
+            ):  # a broken connection may not close cleanly
+                conn.close()
+        try:  # a fresh connection: the scan's may be the one that broke
+            with psycopg.connect(dsn, connect_timeout=20, autocommit=True) as fresh:
+                leftovers += probe_cleanup(fresh, key, pdir)
+        except Exception:  # noqa: BLE001 -- cannot look: count it as left
+            leftovers += 1
     emit(
         NAME,
         assess(

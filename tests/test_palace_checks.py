@@ -12,6 +12,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -996,3 +997,67 @@ class PalaceSecrets(unittest.TestCase):
         passes, ph = self._passes()
         src = (CHECKS / "palace_secrets.py").read_text(encoding="utf-8")
         self.assertEqual(dict(psec.strong_redact(src, passes, ph)[1]), {})
+
+    def test_probe_rows_are_judged_never_redacted(self):
+        pdir = Path("/x/palace_probe/probe")
+        own = (
+            "t",
+            "drawer_1",
+            "palace_probe",
+            "",
+            {"source_file": "/x/palace_probe/probe/s.jsonl"},
+            {},
+            (),
+        )
+        other = (
+            "t",
+            "drawer_2",
+            "jp",
+            "",
+            {"source_file": "/x/palaceXprobe/probe/s.jsonl"},
+            {},
+            (),
+        )
+        self.assertTrue(psec._is_probe_row(own, pdir))
+        self.assertFalse(psec._is_probe_row(other, pdir))
+
+    def test_drawer_cleanup_matches_the_probe_dir_literally(self):
+        # "_" and "%" in the path must not act as wildcards (LIKE would delete unrelated drawers)
+        seen = {}
+
+        class Conn:
+            def execute(self, sql, params):
+                seen["sql"], seen["params"] = sql, params
+                return mock.Mock(fetchall=list)
+
+        self.assertEqual(
+            psec.probe_cleanup(Conn(), "k", Path("/tmp/palace_probe/probe")), 0
+        )
+        self.assertIn("starts_with(", seen["sql"])
+        self.assertNotIn("LIKE", seen["sql"])
+        self.assertEqual(seen["params"], ("/tmp/palace_probe/probe/",))
+
+    def test_cleanup_that_cannot_look_counts_as_left(self):
+        class Broken:
+            def execute(self, *_a):
+                raise RuntimeError("connection is closed")
+
+        self.assertEqual(psec.probe_cleanup(Broken(), "k", Path("/p")), 1)
+
+    def test_probe_files_go_without_a_database(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "a.jsonl").write_text("x")
+            (Path(d) / "b.jsonl").write_text("x")
+            self.assertEqual(psec.probe_files_cleanup(Path(d)), 0)
+            self.assertEqual(list(Path(d).iterdir()), [])
+
+    def test_old_backups_of_both_formats_are_pruned(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = time.time() - (psec.BACKUP_DAYS + 1) * 86400
+            for name in ("old.jsonl", "old.copy", "new.jsonl"):
+                f = Path(d) / name
+                f.write_text("x")
+                if name.startswith("old"):
+                    os.utime(f, (old, old))
+            psec.prune_backups(Path(d))
+            self.assertEqual(sorted(x.name for x in Path(d).iterdir()), ["new.jsonl"])
