@@ -4,17 +4,21 @@ decoy by design, dead, or live (rotate) WITHOUT reading the drawer, which would 
 
     palace_secrets_classify.py <wing> [<wing> ...]
 
-One tab-separated line per hit (the same strong passes the check runs): table, drawer id, source_file, where
-(document, or metadata and its key path), kind, length, shape verdict, heading. Never a value:
+One tab-separated line per hit (the same strong passes the check runs): table, drawer id, source, where, kind,
+length, shape, heading. Text from a drawer is printed only through an allowlist, never as it is:
 
-- shape: hex-40/64/32 (a git or sha hash, md5), a JWT's alg and whether its exp has passed, a known key prefix and
-  what it means (AKIA long-term vs ASIA temporary AWS id, ghp_/gho_/ghs_ GitHub token types, ya29. short-lived
-  Google OAuth token, …), a documentation example (AWS's EXAMPLE keys), or base64 with its decoded length and, for
-  base64 JSON (the "blob" kind), the decoded object's top-level key NAMES and a "type" from a fixed list;
-  otherwise the character classes and the entropy per character;
-- heading: the drawer's first heading line (or its first line), itself fully redacted and cut to 100 characters.
+- source: "project <dir> session <uuid8>" when the drawer's source_file is a transcript under a project directory
+  that exists on this host (~/.claude/projects/<dir>/…), else the source kind only ("other file", "none");
+- where: "document", or "metadata.<key>" for a known mempalace metadata key, else "metadata.<other>";
+- shape: an ENCODING observation, never a verdict on validity: hex length, a key prefix's documented meaning, an
+  exact match of a published documentation example, a JWT's algorithm (from a fixed list) and its UNVERIFIED exp
+  claim, base64 with its decoded size and, for base64 JSON (the "blob" kind), its top-level key names from a fixed
+  schema list (any other name counts as "<other>"); otherwise the character classes and the entropy per character;
+- heading: the drawer's first markdown heading, fully redacted, and only when it holds no credential word and no
+  long token-shaped run (else "<withheld>").
 
-Reads the DSN from MEMPALACE_POSTGRES_DSN, else from the daemon env file (PALACE_CHECKS_DSN_FILE).
+Every column is one line: tabs and line breaks are replaced. Reads the DSN from MEMPALACE_POSTGRES_DSN, else from
+the daemon env file (PALACE_CHECKS_DSN_FILE).
 """
 
 from __future__ import annotations
@@ -30,21 +34,24 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
 TABLES = ("mempalace_drawers", "mempalace_private_drawers")
-DOC_EXAMPLES = ("AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
-PREFIXES = (  # longest first where they nest
+PROJECTS = Path(os.path.expanduser("~/.claude/projects"))
+# AWS's own published documentation examples; only an EXACT match is named.
+DOC_EXAMPLES = {
+    "AKIAIOSFODNN7EXAMPLE": "AWS documentation example access key id",
+    "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY": "AWS documentation example secret key",
+}
+PREFIXES = (  # longest first where they nest; meanings are the issuer's documented ones, validity unknown
     ("github_pat_", "GitHub fine-grained PAT"),
     ("ghp_", "GitHub classic PAT"),
     ("gho_", "GitHub OAuth app token"),
-    ("ghu_", "GitHub user-to-server token (8 h)"),
-    ("ghs_", "GitHub app installation token (1 h)"),
+    ("ghu_", "GitHub user-to-server token (typically 8 h)"),
+    ("ghs_", "GitHub app installation token (typically 1 h)"),
     ("ghr_", "GitHub refresh token"),
     ("AKIA", "AWS long-term access key id"),
     ("ASIA", "AWS temporary (STS) access key id"),
     ("AIza", "Google API key"),
-    ("ya29.", "Google OAuth access token (about 1 h)"),
+    ("ya29.", "Google OAuth access token (typically 1 h)"),
     ("sk-do-", "DigitalOcean GenAI key"),
     ("sk-ant-", "Anthropic key"),
     ("sk-proj-", "OpenAI project key"),
@@ -52,12 +59,38 @@ PREFIXES = (  # longest first where they nest
     ("xoxb-", "Slack bot token"),
     ("xoxp-", "Slack user token"),
     ("ntn_", "Notion integration token"),
-    ("secret_", "Notion integration token (old)"),
+    ("secret_", "Notion integration token (old format)"),
     ("glpat-", "GitLab PAT"),
 )
-JSON_TYPES = {"service_account", "authorized_user", "external_account", "JWT", "jwt"}
+# JSON key names that may be shown: schema names of the credential and token formats a "blob" usually is.
+SCHEMA_KEYS = frozenset(
+    """type project_id private_key_id private_key client_email client_id client_secret auth_uri token_uri
+    auth_provider_x509_cert_url client_x509_cert_url universe_domain refresh_token access_token id_token token_type
+    expires_in expires_at expiry scope scopes alg enc kid cty jti typ iss sub aud exp iat nbf azp nonce
+    at_least auths auth username password email serveraddress identitytoken registrytoken kind apiVersion
+    metadata data name namespace user users clusters contexts current-context tiles version account_id
+    tenant_id subscription_id key secret token session cookies headers url host port database""".split()
+)
+JSON_TYPES = frozenset({"service_account", "authorized_user", "external_account"})
+ALGS = frozenset(
+    """HS256 HS384 HS512 RS256 RS384 RS512 ES256 ES384 ES512 PS256 PS384 PS512 EdDSA none dir RSA-OAEP
+    RSA-OAEP-256 A128KW A192KW A256KW A128GCMKW A256GCMKW ECDH-ES ECDH-ES+A128KW ECDH-ES+A256KW""".split()
+)
+META_KEYS = frozenset(
+    """source_file source_path chunk_index chunk_total wing room topic entities filed_at authored_at content_hash
+    extract_mode ingest_mode normalize_version id_recipe source_mtime source_dir_ino novelty_tag hall
+    convo_chunker_version aaak_source agent source_kind""".split()
+)
+CRED_WORDS = re.compile(r"(?i)pass(?:word|wd|phrase)?|secret|token|api.?key|private|bearer|credential|auth")
+TOKEN_RUN = re.compile(r"[A-Za-z0-9+/=_.-]{16,}")
 _HEX = re.compile(r"[0-9a-fA-F]+")
 _B64 = re.compile(r"[A-Za-z0-9+/_-]+={0,2}")
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_MAX_TS = 253402300799  # 9999-12-31
+
+
+def one_line(text: str) -> str:
+    return re.sub(r"[\t\r\n\x00-\x1f\x7f  \x85]", " ", str(text))
 
 
 def _entropy(s: str) -> float:
@@ -94,99 +127,125 @@ def _b64decode(s: str):
     return None
 
 
-def _json_shape(obj, safe_fn) -> str:
+def _exp(value) -> str:
+    """An UNVERIFIED exp claim, described; never raises."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return "invalid exp claim"
+    if not 0 <= value <= _MAX_TS:
+        return "invalid exp claim"
+    try:
+        when = dt.datetime.fromtimestamp(value, dt.timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return "invalid exp claim"
+    past = when < dt.datetime.now(dt.timezone.utc)
+    return f"unverified exp claim {when:%Y-%m-%d} ({'past' if past else 'future'})"
+
+
+def _names(keys) -> str:
+    keys = list(keys)
+    shown = [k if isinstance(k, str) and k in SCHEMA_KEYS else "<other>" for k in keys[:12]]
+    more = f",+{len(keys) - 12}" if len(keys) > 12 else ""
+    return ",".join(shown) + more
+
+
+def _json_shape(obj) -> str:
     if not isinstance(obj, dict):
         return f"JSON {type(obj).__name__}"
-    keys = ",".join(safe_fn(str(k))[:30] for k in list(obj)[:12])
-    more = f",+{len(obj) - 12}" if len(obj) > 12 else ""
     typ = obj.get("type")
     typ_s = f" type={typ}" if isinstance(typ, str) and typ in JSON_TYPES else ""
-    exp = obj.get("exp")
-    exp_s = ""
-    if isinstance(exp, (int, float)):
-        when = dt.datetime.fromtimestamp(exp, dt.timezone.utc)
-        exp_s = f" exp={when:%Y-%m-%d} ({'expired' if when < dt.datetime.now(dt.timezone.utc) else 'not expired'})"
-    return f"JSON object keys [{keys}{more}]{typ_s}{exp_s}"
+    exp_s = f"; {_exp(obj['exp'])}" if "exp" in obj else ""
+    return f"JSON object keys [{_names(obj)}]{typ_s}{exp_s}"
 
 
-def shape(value: str, safe_fn=lambda s: s) -> str:
-    """A verdict on one matched value that never contains the value. ``safe_fn`` redacts any text taken from it
-    (JSON key names) before it is shown."""
+def _loads(raw: bytes):
+    return json.loads(raw, parse_constant=lambda _c: None)  # NaN / Infinity: no value
+
+
+def shape(value: str) -> str:
+    """An encoding observation on one matched value. It never contains the value or text taken from it, except
+    names from the fixed lists above. It is never a verdict that the value is valid or harmless."""
     v = value.strip()
-    if any(ex in v for ex in DOC_EXAMPLES) or "EXAMPLE" in v:
-        return "documentation example (EXAMPLE marker), not a credential"
+    if v in DOC_EXAMPLES:
+        return f"exact match: {DOC_EXAMPLES[v]}"
     if _HEX.fullmatch(v):
-        name = {40: "git sha1 / sha1 hash", 64: "sha256 hash", 32: "md5 hash"}.get(len(v))
-        return f"hex-{len(v)}" + (f" ({name})" if name else "")
+        return f"hex-{len(v)} (hash-like format; validity unknown)"
     parts = v.split(".")
     if len(parts) == 3 and v.startswith("eyJ"):
-        head = _b64decode(parts[0])
-        body = _b64decode(parts[1])
+        alg, exp_s = "<other>", ""
         try:
-            h = json.loads(head) if head else {}
-            alg = h.get("alg") if isinstance(h, dict) and isinstance(h.get("alg"), str) else "?"
+            h = _loads(_b64decode(parts[0]) or b"")
+            if isinstance(h, dict) and h.get("alg") in ALGS:
+                alg = h["alg"]
         except ValueError:
-            alg = "?"
+            pass
         try:
-            b = json.loads(body) if body else None
+            b = _loads(_b64decode(parts[1]) or b"")
+            if isinstance(b, dict) and "exp" in b:
+                exp_s = f", {_exp(b['exp'])}"
         except ValueError:
-            b = None
-        exp_s = ""
-        if isinstance(b, dict) and isinstance(b.get("exp"), (int, float)):
-            when = dt.datetime.fromtimestamp(b["exp"], dt.timezone.utc)
-            exp_s = f", exp {when:%Y-%m-%d} ({'expired' if when < dt.datetime.now(dt.timezone.utc) else 'not expired'})"
-        return f"jwt alg={safe_fn(alg)[:12]}{exp_s}"
+            pass
+        return f"jwt alg={alg}{exp_s}"
     for prefix, name in PREFIXES:
         if v.startswith(prefix):
-            return f"prefixed key: {name}"
+            return f"prefixed key: {name}; validity unknown"
     if _B64.fullmatch(v) and len(v) >= 16:
         raw = _b64decode(v)
         cut = ""
         if raw is None:  # a run cut off mid-quantum: decode the whole quanta before the cut
             aligned = v.rstrip("=")
-            aligned = aligned[: len(aligned) - len(aligned) % 4]
-            raw = _b64decode(aligned)
+            raw = _b64decode(aligned[: len(aligned) - len(aligned) % 4])
             cut = f", cut at {len(v)} chars (not whole base64)"
-            if raw is not None and raw[:1] in (b"{", b"[") and _printable(raw[:4096]) > 0.95:
+        if raw is not None:
+            size = f"base64 of {len(raw)}{'+' if cut else ''} bytes{cut}"
+            if raw[:1] in (b"{", b"[") and _printable(raw[:4096]) > 0.95:
                 try:
-                    return f"base64 of {len(raw)}+ bytes{cut}: " + _json_shape(json.loads(raw), safe_fn)
+                    return f"{size}: " + _json_shape(_loads(raw))
                 except ValueError:
                     seen = []
                     for k in re.findall(rb'"([^"\\\x00-\x1f]{1,60})"\s*:', raw[:4096]):
-                        name = safe_fn(k.decode())[:30]
-                        if name not in seen:
-                            seen.append(name)
-                    return (
-                        f"base64 of {len(raw)}+ bytes{cut}: JSON, does not parse whole; keys seen "
-                        f"[{','.join(seen[:12])}]"
-                    )
-        if raw is not None:
-            if raw[:1] in (b"{", b"[") and _printable(raw[:4096]) > 0.95:
-                try:
-                    return f"base64 of {len(raw)} bytes: " + _json_shape(json.loads(raw), safe_fn)
-                except ValueError:
-                    return f"base64 of {len(raw)} bytes: JSON-like, does not parse"
-            magic = {
-                b"\x89PNG": "PNG image",
-                b"\x1f\x8b": "gzip",
-                b"%PDF": "PDF",
-                b"\x30\x82": "DER (certificate or key)",
-            }
+                        if k.decode("utf-8", "replace") not in seen:
+                            seen.append(k.decode("utf-8", "replace"))
+                    return f"{size}: JSON, does not parse whole; keys seen [{_names(seen)}]"
+            magic = {b"\x89PNG": "PNG image", b"\x1f\x8b": "gzip", b"%PDF": "PDF", b"\x30\x82": "DER"}
             for m, name in magic.items():
                 if raw.startswith(m):
-                    return f"base64 of {len(raw)} bytes: {name}"
+                    return f"{size}: {name} format (may still hold a credential)"
             pr = _printable(raw)
-            kind = "text" if pr > 0.95 else "binary"
-            return f"base64 of {len(raw)} bytes{cut}: {kind} ({pr:.0%} printable)"
+            return f"{size}: {'text' if pr > 0.95 else 'binary'} ({pr:.0%} printable)"
     return f"{_classes(v)}, entropy {_entropy(v):.1f} bits/char"
 
 
+def source(meta, projects=PROJECTS) -> str:
+    sf = meta.get("source_file") if isinstance(meta, dict) else None
+    if not isinstance(sf, str) or not sf:
+        return "none"
+    root = str(projects).rstrip("/") + "/"
+    if sf.startswith(root):
+        rest = sf[len(root):].split("/")
+        if rest and rest[0] and (projects / rest[0]).is_dir() and rest[0] in os.listdir(projects):
+            u = next((m.group(0) for p in rest[1:] for m in [_UUID.match(p)] if m), None)
+            return f"project {rest[0]}" + (f" session {u[:8]}" if u else "")
+    return "other file"
+
+
+def where_label(path: str) -> str:
+    if path == "document":
+        return "document"
+    head = path.split(".", 2)[1] if path.startswith("metadata.") else ""
+    head = head.split("[", 1)[0]
+    return f"metadata.{head}" if head in META_KEYS else "metadata.<other>"
+
+
 def heading(doc: str, safe_fn) -> str:
-    lines = [ln.strip() for ln in (doc or "").splitlines() if ln.strip()]
-    if not lines:
+    first = next((ln.strip() for ln in (doc or "").splitlines() if ln.strip().startswith("#")), "")
+    if not first:
         return ""
-    first = next((ln for ln in lines if ln.startswith("#")), lines[0])
-    return safe_fn(first)[:100].replace("\t", " ")
+    if CRED_WORDS.search(first) or TOKEN_RUN.search(first):
+        return "<withheld>"
+    clean = safe_fn(first)
+    if clean != first:
+        return "<withheld>"
+    return one_line(clean)[:80]
 
 
 def _matches(text, passes):
@@ -203,35 +262,30 @@ def _matches(text, passes):
     return out
 
 
-def _walk(value, path=""):
+def _walk(value, path="metadata"):
     """(key path, string) for every string in a JSON value, dict keys included."""
     if isinstance(value, str):
-        yield path or "$", value
+        yield path, value
     elif isinstance(value, dict):
         for k, v in value.items():
             if isinstance(k, str):
                 yield f"{path}.<key>", k
-            yield from _walk(v, f"{path}.{k}" if isinstance(k, str) else path)
+            yield from _walk(v, f"{path}.{k}")
     elif isinstance(value, list):
         for i, v in enumerate(value):
             yield from _walk(v, f"{path}[{i}]")
 
 
-def classify_row(table, did, doc, meta, passes, safe_fn, path_fn=None):
-    """Lines (tab-separated, value-free) for one drawer's strong-pass hits. ``path_fn`` redacts the source_file
-    (default ``safe_fn``); main passes the redactor without its broad shapes so a path stays readable."""
-    src = str((meta or {}).get("source_file") or "-") if isinstance(meta, dict) else "-"
-    src = (path_fn or safe_fn)(src)
+def classify_row(table, did, doc, meta, passes, safe_fn, projects=PROJECTS):
+    """Lines (tab-separated, one line each, value-free) for one drawer's strong-pass hits."""
+    src = source(meta, projects)
     head = heading(doc, safe_fn)
     lines = []
-    sites = [("document", doc)] + [(f"metadata{p}", s) for p, s in _walk(meta)]
+    sites = [("document", doc)] + list(_walk(meta))
     for where, text in sites:
         for kind, value in _matches(text, passes):
-            lines.append(
-                "\t".join(
-                    (table, did, src, safe_fn(where)[:60], kind, str(len(value)), shape(value, safe_fn), head)
-                )
-            )
+            cols = (table, did, src, where_label(where), kind, str(len(value)), shape(value), head)
+            lines.append("\t".join(one_line(c) for c in cols))
     return lines
 
 
@@ -249,21 +303,14 @@ def _dsn() -> str:
 def main(argv=None) -> int:
     wings = list(argv if argv is not None else sys.argv[1:])
     if not wings or any(w.startswith("-") for w in wings):
-        print(__doc__.split("\n\n")[1], file=sys.stderr)
+        print("usage: palace_secrets_classify.py <wing> [<wing> ...]", file=sys.stderr)
         return 22
     import psycopg
 
     from mempalace import redact as R
 
     passes = R.patterns()
-
-    def safe_fn(text: str) -> str:
-        return R.redact(text)
-
-    def path_fn(text: str) -> str:
-        return R.redact(text, skip_shapes=True)
-
-    print("table\tdrawer_id\tsource_file\twhere\tkind\tlength\tshape\theading")
+    print("table\tdrawer_id\tsource\twhere\tkind\tlength\tshape\theading")
     n = 0
     with psycopg.connect(_dsn(), autocommit=True) as conn:
         conn.execute("SET statement_timeout = 600000")
@@ -271,10 +318,10 @@ def main(argv=None) -> int:
             for did, doc, meta in conn.execute(
                 f"SELECT id, document, metadata FROM {table} WHERE wing = ANY(%s) ORDER BY id", (wings,)
             ):
-                for line in classify_row(table, did, doc, meta, passes, safe_fn, path_fn):
+                for line in classify_row(table, did, doc, meta, passes, R.redact):
                     print(line)
                     n += 1
-    print(f"# {n} hit(s) in {','.join(wings)}", file=sys.stderr)
+    print(f"# {n} hit(s)", file=sys.stderr)
     return 0
 
 

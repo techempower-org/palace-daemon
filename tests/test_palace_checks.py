@@ -1054,95 +1054,122 @@ class PalaceSecrets(unittest.TestCase):
 
 
 class PalaceSecretsClassify(unittest.TestCase):
-    """palace-secrets classify: a value-free verdict per hit (Sen 2026-11-17)."""
+    """palace-secrets classify: an encoding observation per hit, never a value (Sen 2026-11-17; xreview r1)."""
 
     @staticmethod
     def _rand(alphabet, n, seed):
         import random
 
-        return "".join(random.Random(seed).choice(alphabet) for _ in range(n))
+        rnd = random.Random(seed)
+        return "".join(rnd.choice(alphabet) for _ in range(n))
 
-    def test_shapes_never_contain_the_value(self):
+    UP = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    PW = "abcdefghijkmnopqrstuvwxyz23456789"
+
+    @staticmethod
+    def _b64(obj):
         import base64 as b64
 
-        up = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-        cases = {
-            "AKIA" + self._rand(up, 16, 1): "AWS long-term",
-            "ASIA" + self._rand(up, 16, 2): "AWS temporary",
-            "ghs_" + self._rand(up.lower() + up, 36, 3): "installation token",
-            self._rand("0123456789abcdef", 40, 4): "hex-40",
-            self._rand("0123456789abcdef", 64, 5): "sha256",
-        }
-        blob_obj = {"type": "service_account", "private_key_id": self._rand(up, 20, 6), "client_email": "x"}
-        blob = b64.b64encode(json.dumps(blob_obj).encode()).decode()
-        cases[blob] = "keys [type,private_key_id,client_email] type=service_account"
-        for value, want in cases.items():
-            got = pclass.shape(value)
-            self.assertIn(want, got, value[:4])
-            self.assertNotIn(value, got)
-            for part in (value[4:12], value[-8:]):
-                self.assertNotIn(part, got)
-        self.assertNotIn(blob_obj["private_key_id"], pclass.shape(blob))
+        return b64.b64encode(json.dumps(obj).encode()).decode()
 
-    def test_a_jwt_reports_alg_and_expiry_only(self):
+    def _assert_free(self, out, *secrets):
+        for sec in secrets:
+            self.assertNotIn(sec, out)
+            for i in range(0, max(len(sec) - 6, 1), 3):
+                self.assertNotIn(sec[i : i + 6], out, "a 6-character fragment leaked")
+
+    def test_prefixes_and_hex_are_observations_never_verdicts(self):
+        for value, want in {
+            "AKIA" + self._rand(self.UP, 16, 1): "AWS long-term",
+            "ASIA" + self._rand(self.UP, 16, 2): "AWS temporary",
+            "ghs_" + self._rand(self.UP + self.PW, 36, 3): "installation token (typically 1 h)",
+        }.items():
+            got = pclass.shape(value)
+            self.assertIn(want, got)
+            self.assertIn("validity unknown", got)
+            self._assert_free(got, value[4:])
+        for n in (32, 40, 64):
+            h = self._rand("0123456789abcdef", n, n)
+            got = pclass.shape(h)
+            self.assertEqual(got, f"hex-{n} (hash-like format; validity unknown)")
+
+    def test_only_an_exact_published_example_is_named(self):
+        self.assertIn("exact match", pclass.shape("AKIA" + "IOSFODNN7" + "EXAMPLE"))
+        live = "AKIA" + self._rand(self.UP, 9, 4) + "EXAMPLE"
+        self.assertNotIn("example", pclass.shape(live).lower())
+
+    def test_unknown_json_key_names_are_never_shown(self):
+        pw = self._rand(self.PW, 14, 5)
+        got = pclass.shape(self._b64({"type": "service_account", "private_key_id": "x", pw: "y"}))
+        self.assertIn("keys [type,private_key_id,<other>] type=service_account", got)
+        self._assert_free(got, pw)
+        cut = self._b64({"kind": "tiles", pw: 1, "more": [1] * 40})
+        cut = cut[: len(cut) - len(cut) % 4 - 7]
+        got = pclass.shape(cut)
+        self.assertIn("keys seen [kind,<other>", got)
+        self._assert_free(got, pw)
+
+    def test_a_jwt_shows_only_a_listed_alg_and_an_unverified_exp(self):
         import base64 as b64
 
         def seg(o):
             return b64.urlsafe_b64encode(json.dumps(o).encode()).decode().rstrip("=")
 
-        sub = self._rand("abcdefghij", 12, 7)
-        tok = ".".join((seg({"alg": "HS256", "typ": "JWT"}), seg({"sub": sub, "exp": 1}), self._rand("abcdef", 43, 8)))
-        got = pclass.shape(tok)
-        self.assertIn("jwt alg=HS256", got)
-        self.assertIn("expired", got)
-        self.assertNotIn(sub, got)
-
-    def test_a_cut_base64_json_run_reports_the_key_names_seen(self):
-        import base64 as b64
-
-        val = self._rand("ABCDEFGHJKMNPQRSTUVWXYZ", 30, 10)
-        enc = b64.b64encode(json.dumps({"kind": "tiles", "payload": val, "more": [1] * 50}).encode()).decode()
-        run = enc[: len(enc) - len(enc) % 4 - 7]  # cut mid-object and mid-quantum
-        self.assertEqual(len(run) % 4, 1)
-        got = pclass.shape(run)
-        self.assertIn("keys seen [kind,payload", got)
-        self.assertIn("not whole base64", got)
-        self.assertNotIn(val, got)
+        pw = self._rand(self.PW, 12, 6)
+        sig = self._rand(self.PW, 43, 7)
+        got = pclass.shape(".".join((seg({"alg": "HS256"}), seg({"sub": pw, "exp": 1}), sig)))
+        self.assertEqual(got, "jwt alg=HS256, unverified exp claim 1970-01-01 (past)")
+        got = pclass.shape(".".join((seg({"alg": pw}), seg({"exp": 10**30}), sig)))
+        self.assertEqual(got, "jwt alg=<other>, invalid exp claim")
+        got = pclass.shape(".".join((seg({"alg": "none"}), "eyJleHAiOiBOYU59", sig)))  # {"exp": NaN}
+        self.assertIn("invalid exp claim", got)
 
     def test_binary_that_starts_with_a_brace_is_called_binary(self):
         import base64 as b64
         import random
 
-        raw = b"{" + bytes(random.Random(11).randrange(128, 256) for _ in range(300))
+        rnd = random.Random(11)
+        raw = b"{" + bytes(rnd.randrange(128, 256) for _ in range(300))
         got = pclass.shape(b64.b64encode(raw).decode())
         self.assertIn("binary", got)
         self.assertNotIn("JSON", got)
 
-    def test_the_documentation_example_is_named(self):
-        self.assertIn("documentation example", pclass.shape("AKIA" + "IOSFODNN7" + "EXAMPLE"))
-
-    def test_classify_row_lines_hold_no_value_and_redact_the_heading(self):
+    def test_classify_row_end_to_end_with_adversarial_text(self):
         import re as _re
 
         secret = "AKIA" + self._rand("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567", 16, 9)
+        pw = self._rand(self.PW, 14, 10)
         pat = _re.compile(r"(?P<_mprkeep>(?!))|(?P<_mpr0>AKIA[A-Z2-7]{16})")
         passes = [(pat, ["aws"])]
 
         def safe_fn(text):
             return pat.sub("[redacted aws]", text)
 
-        doc = f"# deploy notes {secret}\nthe key {secret} was printed"
-        meta = {"source_file": "/p/chat.jsonl", "note": secret}
-        lines = pclass.classify_row("mempalace_drawers", "d1", doc, meta, passes, safe_fn)
-        self.assertEqual(len(lines), 3)  # two in the document, one in metadata.note
-        for line in lines:
-            self.assertNotIn(secret, line)
-            cols = line.split("\t")
-            self.assertEqual(len(cols), 8)
-            self.assertEqual(cols[2], "/p/chat.jsonl")
-            self.assertIn("AWS long-term", cols[6])
-            self.assertTrue(cols[7].startswith("# deploy notes [redacted aws]"))
-        self.assertIn("metadata.note", lines[2])
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR_TESTS")) as d:
+            proj = Path(d)
+            (proj / "-home-u-Projects-alpha").mkdir()
+            uuid = "0a1b2c3d-1111-2222-3333-444455556666"
+            cases = [
+                (f"# deploy notes\nthe key {secret} was printed", {"source_file": f"{d}/-home-u-Projects-alpha/{uuid}.jsonl"},
+                 "project -home-u-Projects-alpha session 0a1b2c3d", "# deploy notes"),
+                (f"# password: {pw}\n{secret}", {"source_file": f"{d}/{pw}/x.jsonl"}, "other file", "<withheld>"),
+                (f"# tab\there {pw}{pw}\n{secret}", {"source_file": f"/elsewhere/{pw}.jsonl"}, "other file", "<withheld>"),
+            ]
+            for doc, meta, want_src, want_head in cases:
+                lines = pclass.classify_row("mempalace_drawers", "d1", doc, meta, passes, safe_fn, proj)
+                self.assertEqual(len(lines), 1)
+                cols = lines[0].split("\t")
+                self.assertEqual(len(cols), 8)
+                self.assertEqual(cols[2], want_src)
+                self.assertEqual(cols[3], "document")
+                self.assertEqual(cols[7], want_head)
+                self._assert_free(lines[0], secret[4:], pw)
+            lines = pclass.classify_row(
+                "mempalace_drawers", "d2", "", {pw: secret, "topic": secret}, passes, safe_fn, proj
+            )
+            self.assertEqual([ln.split("\t")[3] for ln in lines], ["metadata.<other>", "metadata.topic"])
+            for ln in lines:
+                self._assert_free(ln, secret[4:], pw)
 
     def test_usage_without_a_wing(self):
         with contextlib.redirect_stderr(io.StringIO()):
