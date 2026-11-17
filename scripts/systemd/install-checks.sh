@@ -7,6 +7,8 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # The local units' only writable path (ReadWritePaths): it must exist before they start, and
 # the lines must go there.
 lines="$HOME/.local/state/checks"; mkdir -p "$lines"   # where the plan's Hearth › Checks reads
+# palace-secrets' probe transcripts and its redaction backups (0700; ReadWritePaths in its unit)
+mkdir -p "$HOME/.local/state/palace-secrets" && chmod 0700 "$HOME/.local/state/palace-secrets"
 want="$(sed -n 's/^PALACE_CHECKS_DIR=//p' "$HOME/.config/palace-checks/env" | tr -d '"')"
 [ "$want" = "$lines" ] || { echo "install-checks: PALACE_CHECKS_DIR must be $lines (the units' writable path)" >&2; exit 4; }
 dest="$HOME/.config/systemd/user"; mkdir -p "$dest"

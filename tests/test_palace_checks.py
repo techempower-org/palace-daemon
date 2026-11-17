@@ -34,6 +34,7 @@ dream = _load("dream_night")
 secrets = _load("secret_drawers")
 gs = _load("gs_auth")
 needles = _load("redact_needles")
+psec = _load("palace_secrets")
 
 NOW = dt.datetime(2026, 11, 15, 9, 0, tzinfo=dt.timezone(dt.timedelta(hours=-8)))
 SHAPE = r"^CHECK [a-z-]+ (ok|warn|fail) · .+ · .+$"
@@ -166,7 +167,9 @@ class PalaceChecks(unittest.TestCase):
         }
         out = dream.assess([_night("2026-11-14", 25, GOOD)], skip, NOW)
         assert out.startswith("CHECK palace-dream-night warn"), out
-        assert "skipped by its start condition" in out and "no run since boot" not in out
+        assert (
+            "skipped by its start condition" in out and "no run since boot" not in out
+        )
         # a night published by hand after the skip: ok, and the line still names the skip
         later = dream.assess([_night("2026-11-15", 1, GOOD)], skip, NOW)
         assert later.startswith("CHECK palace-dream-night ok"), later
@@ -184,7 +187,11 @@ class PalaceChecks(unittest.TestCase):
         )
         at = (NOW - dt.timedelta(hours=5)).replace(microsecond=0)
         stamp = f"@{int(at.timestamp())}"
-        base = {"LoadState": "loaded", "Result": "exec-condition", "ExecMainStatus": "0"}
+        base = {
+            "LoadState": "loaded",
+            "Result": "exec-condition",
+            "ExecMainStatus": "0",
+        }
         # an exit timestamp kept from an earlier run, and a night published after the skip: ok
         kept = {**base, "ExecMainExitTimestamp": "@1", "ConditionTimestamp": stamp}
         ok = dream.assess([_night("2026-11-15", 1, GOOD)], kept, NOW)
@@ -210,10 +217,17 @@ class PalaceChecks(unittest.TestCase):
         assert "time unreadable" in out
 
     def test_dream_still_says_no_run_since_boot_when_the_unit_never_started(self):
-        never = {"LoadState": "loaded", "Result": "success", "ExecMainStatus": "0",
-                 "ExecMainExitTimestamp": "", "ConditionTimestamp": ""}
+        never = {
+            "LoadState": "loaded",
+            "Result": "success",
+            "ExecMainStatus": "0",
+            "ExecMainExitTimestamp": "",
+            "ConditionTimestamp": "",
+        }
         out = dream.assess([_night("2026-11-15", 5, GOOD)], never, NOW)
-        assert out.startswith("CHECK palace-dream-night ok") and "no run since boot" in out
+        assert (
+            out.startswith("CHECK palace-dream-night ok") and "no run since boot" in out
+        )
 
     def test_dream_warns_only_after_three_nights_with_the_judge_off(self):
         two = [
@@ -705,9 +719,14 @@ class PalaceChecks(unittest.TestCase):
         ):
             assert need in cols, need
         rows = [r for r in text.splitlines() if r.startswith("| palace-")]
-        timers = sorted(p.name for p in (CHECKS.parent / "systemd").glob("palace-check-*.timer"))
+        timers = sorted(
+            p.name for p in (CHECKS.parent / "systemd").glob("palace-check-*.timer")
+        )
         named = sorted(r.strip("|").split("|")[2].strip() for r in rows)
-        assert named == timers, (named, timers)  # one row per installed check timer, no more, no less
+        assert named == timers, (
+            named,
+            timers,
+        )  # one row per installed check timer, no more, no less
         cadence = re.compile(
             r"^(every \d+ min|every \d+ h|hourly|daily \d\d:\d\d|weekly (Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d\d:\d\d)$"
         )
@@ -771,20 +790,30 @@ class RedactNeedles(unittest.TestCase):
     """palace-redact-needles: mining stopped by a vault needle is a fail line naming the label only."""
 
     def test_probe_failure_is_fail_naming_the_label_only(self):
-        state, fact = needles.assess("vault item example-shared: vault answered rc 1, empty", ["example-shared"], [], 1)
+        state, fact = needles.assess(
+            "vault item example-shared: vault answered rc 1, empty",
+            ["example-shared"],
+            [],
+            1,
+        )
         self.assertEqual(state, "fail")
         self.assertIn("mining stopped: vault item example-shared", fact)
         self.assertRegex(checklib.line(needles.NAME, state, fact), SHAPE)
 
     def test_refused_writes_in_the_window_fail_even_when_the_probe_now_loads(self):
-        journal = ["ok line", "add failed: SecretPatternsUnavailable: vault item example-shared: vault answered rc 1, empty"]
+        journal = [
+            "ok line",
+            "add failed: SecretPatternsUnavailable: vault item example-shared: vault answered rc 1, empty",
+        ]
         state, fact = needles.assess(None, ["example-shared"], journal, 1)
         self.assertEqual(state, "fail")
         self.assertIn("1 palace write(s) refused", fact)
         self.assertIn("example-shared", fact)
 
     def test_quiet_window_with_needles_loaded_is_ok(self):
-        state, fact = needles.assess(None, ["example-shared"], ["mine ok", "search ok"], 1)
+        state, fact = needles.assess(
+            None, ["example-shared"], ["mine ok", "search ok"], 1
+        )
         self.assertEqual(state, "ok")
         self.assertIn("1 needle(s) loaded (example-shared)", fact)
 
@@ -792,7 +821,9 @@ class RedactNeedles(unittest.TestCase):
         self.assertEqual(needles.assess(None, ["a"], None, 1)[0], "warn")
         self.assertEqual(needles.assess(None, [], ["x"], 1)[0], "warn")
         self.assertEqual(needles.assess(None, [], ["x"], 0)[0], "ok")
-        self.assertEqual(needles.assess(None, ["a"], [], 1)[0], "warn")  # empty window: blind
+        self.assertEqual(
+            needles.assess(None, ["a"], [], 1)[0], "warn"
+        )  # empty window: blind
 
     def test_no_exception_text_or_unconfigured_label_is_ever_echoed(self):
         secret = "plainlettersecret"
@@ -801,7 +832,10 @@ class RedactNeedles(unittest.TestCase):
         self.assertEqual(state, "fail")
         self.assertNotIn(secret, fact)
         self.assertIn("vault-error", fact)
-        journal = [f"SecretPatternsUnavailable: vault item {secret}: x", "SecretPatternsUnavailable: vault item example-shared: empty"]
+        journal = [
+            f"SecretPatternsUnavailable: vault item {secret}: x",
+            "SecretPatternsUnavailable: vault item example-shared: empty",
+        ]
         state, fact = needles.assess(None, ["example-shared"], journal, 1)
         self.assertNotIn(secret, fact)
         self.assertIn("2 palace write(s) refused", fact)
@@ -809,3 +843,122 @@ class RedactNeedles(unittest.TestCase):
     def test_journal_reads_the_system_unit(self):
         self.assertEqual(needles.JOURNAL_CMD[:3], ["journalctl", "-u", "palace-daemon"])
         self.assertNotIn("--user", needles.JOURNAL_CMD)
+
+
+class PalaceSecrets(unittest.TestCase):
+    """palace-secrets: the miner positive control, the strong-pass scan and the line. Fakes are built at run time."""
+
+    def setUp(self):
+        self.cfg = tempfile.mkdtemp()
+        self._env = mock.patch.dict(os.environ, {"MEMPALACE_CONFIG_DIR": self.cfg})
+        self._env.start()
+
+    def tearDown(self):
+        self._env.stop()
+        shutil.rmtree(self.cfg, ignore_errors=True)
+
+    def _redact(self):
+        try:
+            from mempalace.redact import redact
+        except ImportError:
+            self.skipTest("mempalace not importable")
+        return redact
+
+    def test_every_fake_is_taken_by_the_miner_rules_under_its_own_kind(self):
+        # the control proves nothing unless the miner's own rules take every fake, each as its kind
+        redact = self._redact()
+        for _ in range(20):
+            for kind, value in psec.make_fakes().items():
+                out = redact(f"value {value} end")
+                self.assertNotIn(value, out, kind)
+                self.assertIn(f"[redacted {kind} sha256:", out, kind)
+
+    def test_the_probe_transcript_prints_every_fake(self):
+        fakes = psec.make_fakes()
+        text = psec.probe_transcript(fakes, "s1")
+        rows = [json.loads(ln) for ln in text.splitlines()]
+        self.assertEqual([r["type"] for r in rows], ["user", "assistant"])
+        for value in fakes.values():
+            self.assertIn(value, text)
+
+    def test_the_probe_judge(self):
+        fakes = psec.make_fakes()
+        ph = " ".join(f"[redacted {k} sha256:00000000]" for k in fakes)
+        self.assertEqual(psec.judge_probe([], fakes)[0], "not measured")
+        self.assertEqual(psec.judge_probe([ph], fakes), ("ok", "1 probe drawer(s)"))
+        state, detail = psec.judge_probe([ph + " " + fakes["aws"]], fakes)
+        self.assertEqual((state, detail), ("FAIL", "raw aws"))
+        self.assertNotIn(fakes["aws"], detail)
+        state, detail = psec.judge_probe(["[redacted aws sha256:00000000]"], fakes)
+        self.assertEqual(state, "FAIL")
+        self.assertIn("no placeholder for github,litellm", detail)
+
+    def test_strong_passes_take_providers_not_the_broad_shapes(self):
+        self._redact()
+        passes, ph = psec.strong_passes()
+        fakes = psec.make_fakes()
+        broad = (
+            "Kx" + "9q" * 6 + "Zr4tLm"
+        )  # a mixed-case token with no provider prefix: a broad shape
+        text = f"aws {fakes['aws']} and an identifier {broad}"
+        out, kinds = psec.strong_redact(text, passes, ph)
+        self.assertNotIn(fakes["aws"], out)
+        self.assertIn(broad, out)
+        self.assertEqual(dict(kinds), {"aws": 1})
+
+    def test_metadata_is_redacted_at_any_depth(self):
+        self._redact()
+        passes, ph = psec.strong_passes()
+        gh = psec.make_fakes()["github"]
+        meta = {"a": [{"b": f"tok {gh}"}], "n": 3}
+        out, kinds = psec.strong_redact_value(meta, passes, ph)
+        self.assertNotIn(gh, json.dumps(out))
+        self.assertEqual(out["n"], 3)
+        self.assertEqual(dict(kinds), {"github": 1})
+
+    def test_the_line(self):
+        ok = ("ok", "1 probe drawer(s)")
+        cases = {
+            "ok": psec.assess({}, 0, 0, 100, 50, 0, ok, False),
+            "warn_hits": psec.assess(
+                {("money", "aws"): 2}, 0, 0, 100, 50, 0, ok, False
+            ),
+            "warn_probe": psec.assess(
+                {}, 0, 0, 100, 50, 0, ("not measured", "mining paused: x"), False
+            ),
+            "fail_miner": psec.assess({}, 0, 0, 100, 50, 0, ("FAIL", "raw aws"), False),
+            "fail_left": psec.assess({("jp", "pem"): 1}, 0, 1, 100, 50, 0, ok, True),
+            "fail_error": psec.assess(
+                {},
+                0,
+                0,
+                0,
+                0,
+                0,
+                ("not measured", "the scan failed first"),
+                False,
+                "OperationalError",
+            ),
+        }
+        for name, text in cases.items():
+            self.assertRegex(text, SHAPE, name)
+        self.assertIn(" ok · ", cases["ok"])
+        self.assertIn("miner redaction: ok", cases["ok"])
+        self.assertIn(" warn · ", cases["warn_hits"])
+        self.assertIn("money (aws×2)", cases["warn_hits"])
+        self.assertIn("PALACE_SECRETS_REDACT=1", cases["warn_hits"])
+        self.assertIn(" warn · ", cases["warn_probe"])
+        self.assertIn(
+            "miner redaction: not measured (mining paused: x)", cases["warn_probe"]
+        )
+        self.assertIn(" fail · ", cases["fail_miner"])
+        self.assertIn(" fail · ", cases["fail_left"])
+        self.assertIn("1 NOT redacted", cases["fail_left"])
+        self.assertIn(" fail · ", cases["fail_error"])
+
+    def test_no_credential_shaped_literal_in_the_check(self):
+        # the strong passes (provider shapes, keys) find nothing in the source: every fake is assembled at run time
+        self._redact()
+        passes, ph = psec.strong_passes()
+        src = (CHECKS / "palace_secrets.py").read_text(encoding="utf-8")
+        self.assertEqual(dict(psec.strong_redact(src, passes, ph)[1]), {})
