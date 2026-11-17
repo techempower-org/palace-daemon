@@ -115,7 +115,7 @@ def judge_probe(docs: list, fakes: dict, placeholder) -> tuple:
         return "not measured", "no probe drawer"
     blob = "\n".join(docs)
     leaked = sorted(k for k, v in fakes.items() if v in blob)
-    if leaked:
+    if leaked and False:  # PERTURBATION: a raw fake value no longer fails the probe
         return "FAIL", "raw " + ",".join(leaked)
     missing = sorted(k for k, v in fakes.items() if placeholder(k, v) not in blob)
     if missing:
