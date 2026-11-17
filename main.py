@@ -737,6 +737,20 @@ def _low_priority(cmd: list[str]) -> list[str]:
 _floor_warned_at = [0.0]  # monotonic time of the last low-disk drain warning
 
 
+def _mine_pause_problem() -> "str | None":
+    """Why the drain should hold queued mines: the bench lock or PALACE_DISABLE_AUTOMINE, or ``None``.
+
+    The same switches a POST /mine honours. Checked per entry, so setting the lock
+    stops a drain pass between two mines (a mine already running finishes)."""
+    disabled, why = _automine_disabled()
+    if disabled:
+        return f"mining disabled ({why})"
+    active, why = _bench_lock_active()
+    if active:
+        return f"bench-active.lock present ({why})"
+    return None
+
+
 def _mine_disk_floor_problem() -> "str | None":
     """Why mining should wait for disk space, or ``None`` when it can go ahead.
 
@@ -1590,9 +1604,13 @@ async def _drain_pending_mines() -> int:
             line, entry = owned.pop(0)
             consumed += 1
             try:
-                # Low disk: put the entry back for a later pass instead of
-                # spawning. Not quarantined; it runs once space is freed.
-                floor_problem = _mine_disk_floor_problem()
+                # Low disk, the bench lock, or PALACE_DISABLE_AUTOMINE: put the
+                # entry back for a later pass instead of spawning. Not
+                # quarantined; it runs once the pause ends. The lock and the
+                # switch used to stop only new POST /mine and the watcher, so
+                # queued mines kept running behind them (2026-11-17: 71,717
+                # drawers wiped after the lock was set).
+                floor_problem = _mine_disk_floor_problem() or _mine_pause_problem()
                 if floor_problem:
                     requeue_lines.append(json.dumps(entry))
                     if not floor_logged:
