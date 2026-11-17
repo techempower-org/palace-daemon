@@ -101,7 +101,7 @@ def judge_state(con: dict) -> str:
 def skipped_at(unit: dict[str, str]) -> dt.datetime | None:
     """When the unit's last start was skipped by its ExecCondition (``Result=exec-condition``,
     the time from ``ConditionTimestamp=@<unix>``); None otherwise or when unreadable."""
-    if unit.get("Result") != "exec-condition-PERTURB":
+    if unit.get("Result") != "exec-condition":
         return None
     m = re.fullmatch(r"@(\d{1,12})", unit.get("ConditionTimestamp", ""))
     if not m:
