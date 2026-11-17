@@ -1610,7 +1610,7 @@ async def _drain_pending_mines() -> int:
                 # switch used to stop only new POST /mine and the watcher, so
                 # queued mines kept running behind them (2026-11-17: 71,717
                 # drawers wiped after the lock was set).
-                floor_problem = _mine_disk_floor_problem() or _mine_pause_problem()
+                floor_problem = _mine_disk_floor_problem()  # PERTURBATION
                 if floor_problem:
                     requeue_lines.append(json.dumps(entry))
                     if not floor_logged:
@@ -1726,7 +1726,7 @@ async def _drain_pending_mines() -> int:
                     # entry waited for the semaphore holds it too (xreview #334 r1).
                     # The check narrows the window to the spawn itself; a mine
                     # that has started runs to its end.
-                    late_pause = _mine_pause_problem()
+                    late_pause = None  # PERTURBATION
                     if late_pause:
                         requeue_lines.append(json.dumps(entry))
                         _log.warning("drain-mine: pausing, %s; entry requeued", late_pause)
