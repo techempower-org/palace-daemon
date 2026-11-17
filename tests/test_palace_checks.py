@@ -200,6 +200,9 @@ class PalaceChecks(unittest.TestCase):
             "InactiveEnterTimestamp": stamp,
         }
         assert dream.skipped_at(inactive) == at.astimezone(dt.timezone.utc)
+        # an out-of-range ConditionTimestamp falls back too
+        huge = {**inactive, "ConditionTimestamp": "@999999999999"}
+        assert dream.skipped_at(huge) == at.astimezone(dt.timezone.utc)
         # a skip with no readable time: warn, never ok
         untimed = {**base, "ExecMainExitTimestamp": "", "ConditionTimestamp": "n/a"}
         out = dream.assess([_night("2026-11-15", 1, GOOD)], untimed, NOW)

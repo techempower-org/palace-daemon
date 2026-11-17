@@ -112,7 +112,10 @@ def skipped_at(unit: dict[str, str]) -> dt.datetime | None:
     for key in ("ConditionTimestamp", "InactiveEnterTimestamp"):
         m = re.fullmatch(r"@(\d{1,12})", unit.get(key, ""))
         if m:
-            return dt.datetime.fromtimestamp(int(m.group(1)), dt.timezone.utc)
+            try:
+                return dt.datetime.fromtimestamp(int(m.group(1)), dt.timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                continue
     return SKIP_UNTIMED
 
 
