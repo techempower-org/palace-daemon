@@ -857,21 +857,23 @@ class PalaceSecrets(unittest.TestCase):
         self._env.stop()
         shutil.rmtree(self.cfg, ignore_errors=True)
 
-    def _redact(self):
+    def _passes(self):
         try:
-            from mempalace.redact import redact
+            import mempalace.redact  # noqa: F401
         except ImportError:
             self.skipTest("mempalace not importable")
-        return redact
+        return psec.strong_passes()
 
     def test_every_fake_is_taken_by_the_miner_rules_under_its_own_kind(self):
         # the control proves nothing unless the miner's own rules take every fake, each as its kind
-        redact = self._redact()
+        _passes, ph = self._passes()
+        from mempalace.redact import redact
+
         for _ in range(20):
             for kind, value in psec.make_fakes().items():
                 out = redact(f"value {value} end")
                 self.assertNotIn(value, out, kind)
-                self.assertIn(f"[redacted {kind} sha256:", out, kind)
+                self.assertIn(ph(kind, value), out, kind)
 
     def test_the_probe_transcript_prints_every_fake(self):
         fakes = psec.make_fakes()
@@ -881,21 +883,25 @@ class PalaceSecrets(unittest.TestCase):
         for value in fakes.values():
             self.assertIn(value, text)
 
-    def test_the_probe_judge(self):
+    def test_the_probe_judge_needs_this_runs_own_placeholders(self):
+        _passes, ph = self._passes()
         fakes = psec.make_fakes()
-        ph = " ".join(f"[redacted {k} sha256:00000000]" for k in fakes)
-        self.assertEqual(psec.judge_probe([], fakes)[0], "not measured")
-        self.assertEqual(psec.judge_probe([ph], fakes), ("ok", "1 probe drawer(s)"))
-        state, detail = psec.judge_probe([ph + " " + fakes["aws"]], fakes)
+        own = " ".join(ph(k, v) for k, v in fakes.items())
+        self.assertEqual(psec.judge_probe([], fakes, ph)[0], "not measured")
+        self.assertEqual(
+            psec.judge_probe([own], fakes, ph), ("ok", "1 probe drawer(s)")
+        )
+        state, detail = psec.judge_probe([own + " " + fakes["aws"]], fakes, ph)
         self.assertEqual((state, detail), ("FAIL", "raw aws"))
         self.assertNotIn(fakes["aws"], detail)
-        state, detail = psec.judge_probe(["[redacted aws sha256:00000000]"], fakes)
+        # placeholders of the right kinds but for OTHER values (an old probe's) are not this run's: FAIL
+        other = " ".join(ph(k, v) for k, v in psec.make_fakes().items())
+        state, detail = psec.judge_probe([other], fakes, ph)
         self.assertEqual(state, "FAIL")
-        self.assertIn("no placeholder for github,litellm", detail)
+        self.assertIn("no placeholder for aws,github,litellm", detail)
 
     def test_strong_passes_take_providers_not_the_broad_shapes(self):
-        self._redact()
-        passes, ph = psec.strong_passes()
+        passes, ph = self._passes()
         fakes = psec.make_fakes()
         broad = (
             "Kx" + "9q" * 6 + "Zr4tLm"
@@ -906,15 +912,37 @@ class PalaceSecrets(unittest.TestCase):
         self.assertIn(broad, out)
         self.assertEqual(dict(kinds), {"aws": 1})
 
-    def test_metadata_is_redacted_at_any_depth(self):
-        self._redact()
-        passes, ph = psec.strong_passes()
-        gh = psec.make_fakes()["github"]
-        meta = {"a": [{"b": f"tok {gh}"}], "n": 3}
+    def test_metadata_values_and_keys_are_redacted_at_any_depth(self):
+        passes, ph = self._passes()
+        fakes = psec.make_fakes()
+        meta = {
+            "a": [{"b": f"tok {fakes['github']}"}],
+            "n": 3,
+            fakes["aws"]: "ordinary text",
+        }
         out, kinds = psec.strong_redact_value(meta, passes, ph)
-        self.assertNotIn(gh, json.dumps(out))
+        self.assertNotIn(fakes["github"], json.dumps(out))
+        self.assertNotIn(fakes["aws"], json.dumps(out))
         self.assertEqual(out["n"], 3)
-        self.assertEqual(dict(kinds), {"github": 1})
+        self.assertEqual(dict(kinds), {"github": 1, "aws": 1})
+
+    def test_a_redacted_key_never_overwrites_another(self):
+        passes, ph = self._passes()
+        aws = psec.make_fakes()["aws"]
+        placeholder_key = ph("aws", aws)
+        out, _k = psec.strong_redact_value(
+            {placeholder_key: "kept", aws: "also kept"}, passes, ph
+        )
+        self.assertEqual(sorted(out.values()), ["also kept", "kept"])
+
+    def test_a_wing_shaped_like_a_secret_never_reaches_the_line(self):
+        passes, ph = self._passes()
+        aws = psec.make_fakes()["aws"]
+        text = psec.assess(
+            {(aws, "aws"): 1}, 0, 0, 10, 5, 0, ("ok", "x"), False, None, 0, passes, ph
+        )
+        self.assertNotIn(aws, text)
+        self.assertIn("<wing name holds a secret shape>", text)
 
     def test_the_line(self):
         ok = ("ok", "1 probe drawer(s)")
@@ -924,20 +952,13 @@ class PalaceSecrets(unittest.TestCase):
                 {("money", "aws"): 2}, 0, 0, 100, 50, 0, ok, False
             ),
             "warn_probe": psec.assess(
-                {}, 0, 0, 100, 50, 0, ("not measured", "mining paused: x"), False
+                {}, 0, 0, 100, 50, 0, ("not measured", "mining paused"), False
             ),
+            "warn_left": psec.assess({}, 0, 0, 100, 50, 0, ok, False, None, 2),
             "fail_miner": psec.assess({}, 0, 0, 100, 50, 0, ("FAIL", "raw aws"), False),
             "fail_left": psec.assess({("jp", "pem"): 1}, 0, 1, 100, 50, 0, ok, True),
             "fail_error": psec.assess(
-                {},
-                0,
-                0,
-                0,
-                0,
-                0,
-                ("not measured", "the scan failed first"),
-                False,
-                "OperationalError",
+                {}, 0, 0, 0, 0, 0, ("not measured", "x"), False, "OperationalError"
             ),
         }
         for name, text in cases.items():
@@ -947,18 +968,31 @@ class PalaceSecrets(unittest.TestCase):
         self.assertIn(" warn · ", cases["warn_hits"])
         self.assertIn("money (aws×2)", cases["warn_hits"])
         self.assertIn("PALACE_SECRETS_REDACT=1", cases["warn_hits"])
-        self.assertIn(" warn · ", cases["warn_probe"])
         self.assertIn(
-            "miner redaction: not measured (mining paused: x)", cases["warn_probe"]
+            "miner redaction: not measured (mining paused)", cases["warn_probe"]
         )
+        self.assertIn(" warn · ", cases["warn_left"])
+        self.assertIn("2 probe leftover(s)", cases["warn_left"])
         self.assertIn(" fail · ", cases["fail_miner"])
         self.assertIn(" fail · ", cases["fail_left"])
         self.assertIn("1 NOT redacted", cases["fail_left"])
         self.assertIn(" fail · ", cases["fail_error"])
 
+    def test_the_skip_reason_is_never_echoed(self):
+        with (
+            tempfile.TemporaryDirectory() as d,
+            mock.patch.object(
+                psec,
+                "_daemon",
+                return_value=(200, {"skipped": True, "reason": "anything at all"}),
+            ),
+        ):
+            _f, path, early = psec.probe_start("k", Path(d))
+            self.assertEqual(early, ("not measured", "mining paused"))
+            self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
+
     def test_no_credential_shaped_literal_in_the_check(self):
         # the strong passes (provider shapes, keys) find nothing in the source: every fake is assembled at run time
-        self._redact()
-        passes, ph = psec.strong_passes()
+        passes, ph = self._passes()
         src = (CHECKS / "palace_secrets.py").read_text(encoding="utf-8")
         self.assertEqual(dict(psec.strong_redact(src, passes, ph)[1]), {})

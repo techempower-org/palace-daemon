@@ -6,23 +6,25 @@ Every write is redacted (mempalace.redact). This check measures both ends of tha
 
 1. **Miner positive control.** Fake credentials are built at run time (an AWS access key id, a GitHub token, an
    "sk-" key; never a literal in this file), written into a throwaway transcript, and mined through the daemon's
-   own ``POST /mine`` into wing ``palace_probe``, the path every hook save takes. The probe drawers must hold
-   none of the fake values and a placeholder for each kind. They are deleted afterwards (``DELETE /memory/{id}``),
-   with the probe file. "miner redaction: ok | FAIL | not measured (<why>)": mining paused, or the probe not mined
-   within ``PROBE_WAIT_S``, is not a pass.
-2. **Scan.** Every drawer (shared and private: document and metadata) and every graph Entity name is run through
-   the STRONG passes only: the built-in provider shapes (aws, github, openai, litellm, digitalocean, jwt, pem, …),
-   configured patterns, and vault needles. The broad shapes (token, hex, quoted, assignment) are not judged here:
-   they redact identifiers too often to act on unseen (CHECK palace-secret-drawers counts them).
-3. **Redact** (``PALACE_SECRETS_REDACT=1``): each hit is replaced with its placeholder by compare-and-set on
-   md5(document, metadata, embedding), re-embedded, after a 0600 COPY backup of the rows as read (it holds the
-   secret; kept ``BACKUP_DAYS`` days, then pruned). Entities are renamed, never deleted. Without the switch the
-   check only reports.
+   own ``POST /mine`` into wing ``palace_probe``, the path every hook save takes. The check waits until the mine has
+   filed every chunk (the drawers' ``chunk_total``), then judges THIS run's drawers only: none may hold a fake value,
+   and each must have been replaced by exactly its own placeholder. Then the probe drawers and file are deleted, in a
+   ``finally``, together with any a past run left; leftovers are reported. "miner redaction: ok | FAIL | not measured
+   (<why>)": mining paused, or the probe not filed within ``PROBE_WAIT_S``, is not a pass.
+2. **Scan.** Every drawer (shared and private: document, metadata values AND keys) and every graph Entity name is
+   run through the STRONG passes only: the built-in provider shapes (aws, github, openai, litellm, digitalocean,
+   jwt, pem, …), configured patterns, and vault needles. The broad shapes (token, hex, quoted, assignment) are not
+   judged here: they redact identifiers too often to act on unseen (CHECK palace-secret-drawers counts them).
+3. **Redact** (``PALACE_SECRETS_REDACT=1``): per table, one transaction locks the hit rows (``FOR UPDATE``), checks
+   each is still the version the scan judged (md5 of document, metadata, embedding), writes those exact rows to a
+   0600 backup, and updates them (re-embedded). Entity names are renamed, never deleted, after a 0600 backup of their
+   properties, each by compare-and-set. Backups hold the secret and are pruned after ``BACKUP_DAYS`` days on every
+   run. Without the switch the check only reports.
 
-- **fail**: miner redaction FAIL, or a hit that could not be redacted (or the scan could not run).
+- **fail**: miner redaction FAIL, a hit that could not be redacted, or the scan could not run.
 - **warn**: hits found (a secret reached the palace: its owner rotates it; wings and kinds are named, never a
-  value), or the positive control was not measured.
-- **ok**: 0 hits and miner redaction ok.
+  value), the positive control not measured, or probe leftovers.
+- **ok**: 0 hits, miner redaction ok, nothing left behind.
 
 Why (2026-11-16, realmwatch findings #489): nothing measured whether the miner still redacts, and the palace
 held 24 drawers of private-key text no rule caught.
@@ -32,7 +34,6 @@ from __future__ import annotations
 
 import collections
 import datetime as dt
-import hashlib
 import json
 import os
 import secrets as _secrets
@@ -53,10 +54,6 @@ BACKUP_DAYS = 7
 PAGE = 2000
 TABLES = ("mempalace_drawers", "mempalace_private_drawers")
 ROW_MD5 = "md5(coalesce(document, '')), md5(coalesce(metadata::text, '')), md5(coalesce(embedding::text, ''))"
-ROW_MD5_EQ = (
-    "md5(coalesce(document, '')) = %s AND md5(coalesce(metadata::text, '')) = %s "
-    "AND md5(coalesce(embedding::text, '')) = %s"
-)
 
 
 # ---- the fakes (built at run time; this file holds no credential-shaped literal) ----
@@ -110,16 +107,16 @@ def probe_transcript(fakes: dict, session: str) -> str:
     return "\n".join(json.dumps(r) for r in rows) + "\n"
 
 
-def judge_probe(docs: list, fakes: dict) -> tuple:
-    """(state, detail) from the probe drawers' text (document + metadata, as strings). ok: no fake value anywhere,
-    and a placeholder for every kind. FAIL: a fake value is present (named by kind only)."""
+def judge_probe(docs: list, fakes: dict, placeholder) -> tuple:
+    """(state, detail) from THIS run's probe drawers' text (document + metadata). ok: no fake value anywhere, and
+    each fake's own placeholder (its kind and the hash of its value) present. FAIL names kinds only."""
     if not docs:
         return "not measured", "no probe drawer"
     blob = "\n".join(docs)
     leaked = sorted(k for k, v in fakes.items() if v in blob)
     if leaked:
         return "FAIL", "raw " + ",".join(leaked)
-    missing = sorted(k for k in fakes if f"[redacted {k} sha256:" not in blob)
+    missing = sorted(k for k, v in fakes.items() if placeholder(k, v) not in blob)
     if missing:
         return "FAIL", "no placeholder for " + ",".join(missing)
     return "ok", f"{len(docs)} probe drawer(s)"
@@ -158,15 +155,26 @@ def strong_redact(text, passes, placeholder) -> tuple:
 
 
 def strong_redact_value(value, passes, placeholder) -> tuple:
-    """A JSON value (metadata) with its strings strong-redacted at any depth; (value, Counter)."""
+    """A JSON value (metadata) with its strings strong-redacted at any depth, dict KEYS included; (value, Counter).
+    A redacted key that collides with another key keeps both, the later one suffixed ``#2``, ``#3``…"""
     hit = collections.Counter()
     if isinstance(value, str):
-        out, k = strong_redact(value, passes, placeholder)
-        return out, k
+        return strong_redact(value, passes, placeholder)
     if isinstance(value, dict):
         out = {}
         for key, v in value.items():
-            out[key], k = strong_redact_value(v, passes, placeholder)
+            nk, kk = (
+                strong_redact(key, passes, placeholder)
+                if isinstance(key, str)
+                else (key, collections.Counter())
+            )
+            hit += kk
+            if nk in out:
+                n = 2
+                while f"{nk}#{n}" in out:
+                    n += 1
+                nk = f"{nk}#{n}"
+            out[nk], k = strong_redact_value(v, passes, placeholder)
             hit += k
         return out, hit
     if isinstance(value, list):
@@ -182,6 +190,14 @@ def strong_redact_value(value, passes, placeholder) -> tuple:
 # ---- the line ----
 
 
+def safe_label(text, passes=None, placeholder=None) -> str:
+    """A wing or kind for the line: checklib.label, and never a value a strong pass would take."""
+    out = label(text)
+    if passes is not None and strong_redact(out, passes, placeholder)[1]:
+        return "<wing name holds a secret shape>"
+    return out
+
+
 def assess(
     hits: dict,
     redacted: int,
@@ -192,25 +208,29 @@ def assess(
     miner: tuple,
     redact_on: bool,
     error: str | None = None,
+    leftovers: int = 0,
+    passes=None,
+    placeholder=None,
 ) -> str:
-    """hits: {(wing, kind): n} over drawers; miner: (state, detail)."""
+    """hits: {(wing, kind): n} over drawers; miner: (state, detail); redacted/failed count drawers and entities."""
     mstate, mdetail = miner
     miner_txt = f"miner redaction: {mstate}" + (
         f" ({mdetail})" if mstate != "ok" else ""
     )
+    left_txt = f"; {leftovers} probe leftover(s)" if leftovers else ""
     if error:
         return line(
             NAME,
             "fail",
-            f"scan failed: {error}; {miner_txt}",
+            f"scan failed: {error}; {miner_txt}{left_txt}",
             "owner palace lane: fix the check",
         )
     n = sum(hits.values())
     by_wing = collections.defaultdict(collections.Counter)
     for (wing, kind), k in hits.items():
-        by_wing[wing][kind] += k
+        by_wing[safe_label(wing, passes, placeholder)][kind] += k
     parts = [
-        f"{label(w)} ({','.join(f'{label(k)}×{c}' for k, c in sorted(ks.items()))})"
+        f"{w} ({','.join(f'{label(k)}×{c}' for k, c in sorted(ks.items()))})"
         for w, ks in sorted(by_wing.items(), key=lambda x: (-sum(x[1].values()), x[0]))
     ]
     where = "; ".join(parts[:6]) + (
@@ -219,7 +239,7 @@ def assess(
     fact = (
         f"{n} hits in drawers{': ' + where if where else ''}, {ent_hits} in entity names; {redacted} redacted"
         f"{', ' + str(failed) + ' NOT redacted' if failed else ''}; {scanned:,} drawers and {entities:,} entities "
-        f"scanned; {miner_txt}"
+        f"scanned; {miner_txt}{left_txt}"
     )
     if mstate == "FAIL" or failed:
         return line(
@@ -233,14 +253,14 @@ def assess(
         if not redact_on:
             nxt += "; palace lane: redact (PALACE_SECRETS_REDACT=1)"
         return line(NAME, "warn", fact, nxt)
-    if mstate != "ok":
+    if mstate != "ok" or leftovers:
         return line(
-            NAME, "warn", fact, "owner palace lane: the miner control did not run"
+            NAME, "warn", fact, "owner palace lane: the miner control did not run clean"
         )
     return line(NAME, "ok", fact)
 
 
-# ---- the daemon ----
+# ---- the daemon and the probe ----
 
 
 def _daemon(method, path, key, body=None, timeout=60):
@@ -256,25 +276,20 @@ def _daemon(method, path, key, body=None, timeout=60):
         return r.status, (json.loads(raw) if raw else {})
 
 
-def probe_dir() -> Path:
-    d = Path(
-        os.environ.get("PALACE_SECRETS_PROBE_DIR")
-        or "~/.local/state/palace-secrets/probe"
+def state_dir(sub: str) -> Path:
+    root = Path(
+        os.environ.get("PALACE_SECRETS_STATE_DIR") or "~/.local/state/palace-secrets"
     ).expanduser()
+    d = root / sub
     d.mkdir(parents=True, exist_ok=True)
+    os.chmod(root, 0o700)
     os.chmod(d, 0o700)
     return d
 
 
-def _probe_rows(conn, pdir: Path):
-    return conn.execute(
-        "SELECT id, document, metadata::text FROM mempalace_drawers WHERE metadata->>'source_file' LIKE %s",
-        (str(pdir) + "/%",),
-    ).fetchall()
-
-
 def probe_start(key, pdir: Path) -> tuple:
-    """(fakes, path, state or None): writes the probe transcript and queues its mine."""
+    """(fakes, path, early verdict or None): writes the probe transcript and queues its mine. The skip reason the
+    daemon gives is never echoed (it is text from elsewhere): only "mining paused"."""
     fakes = make_fakes()
     session = _secrets.token_hex(16)
     path = pdir / f"{session}.jsonl"
@@ -296,48 +311,59 @@ def probe_start(key, pdir: Path) -> tuple:
     except (urllib.error.URLError, OSError, ValueError) as exc:
         return fakes, path, ("not measured", f"POST /mine failed: {type(exc).__name__}")
     if isinstance(out, dict) and out.get("skipped"):
-        return (
-            fakes,
-            path,
-            (
-                "not measured",
-                "mining paused: " + label(str(out.get("reason", ""))[:40]),
-            ),
-        )
+        return fakes, path, ("not measured", "mining paused")
     if status not in (200, 202):
         return fakes, path, ("not measured", f"POST /mine answered {status}")
     return fakes, path, None
 
 
-def probe_finish(conn, key, pdir: Path, fakes, path, deadline) -> tuple:
-    rows = []
+def _rows_for(conn, source: str):
+    return conn.execute(
+        "SELECT id, document, metadata::text, (metadata->>'chunk_total')::int FROM mempalace_drawers "
+        "WHERE metadata->>'source_file' = %s",
+        (source,),
+    ).fetchall()
+
+
+def probe_wait(conn, path: Path, fakes: dict, placeholder, deadline: float) -> tuple:
+    """Wait until THIS run's probe has every chunk filed (count == chunk_total, stable across two reads), then
+    judge it."""
+    seen = None
     while time.time() < deadline:
-        rows = [r for r in _probe_rows(conn, pdir) if r[0]]
-        if rows:
-            time.sleep(15)  # let the mine write every chunk
-            rows = _probe_rows(conn, pdir)
-            break
-        time.sleep(15)
-    verdict = (
-        judge_probe([f"{d}\n{m}" for _i, d, m in rows], fakes)
-        if rows
-        else ("not measured", f"probe not mined within {PROBE_WAIT_S // 60} min")
-    )
-    probe_cleanup(conn, key, pdir)
+        rows = _rows_for(conn, str(path))
+        total = max((r[3] or 0 for r in rows), default=0)
+        if rows and total and len(rows) >= total:
+            if seen == len(rows):
+                return judge_probe(
+                    [f"{d}\n{m}" for _i, d, m, _t in rows], fakes, placeholder
+                )
+            seen = len(rows)
+        time.sleep(10)
+    return "not measured", f"probe not filed within {PROBE_WAIT_S // 60} min"
+
+
+def probe_cleanup(conn, key, pdir: Path) -> int:
+    """Delete every probe drawer (this run's and any a past run left) and every probe file; the number left."""
+    left = 0
     try:
-        path.unlink()
-    except OSError:
-        pass
-    return verdict
-
-
-def probe_cleanup(conn, key, pdir: Path) -> None:
-    """Delete every probe drawer (this run's, and any a past run left)."""
-    for did, _d, _m in _probe_rows(conn, pdir):
+        rows = conn.execute(
+            "SELECT id FROM mempalace_drawers WHERE metadata->>'source_file' LIKE %s",
+            (str(pdir) + "/%",),
+        ).fetchall()
+    except Exception:  # noqa: BLE001 -- cannot see: count it as left
+        return 1
+    for (did,) in rows:
         try:
-            _daemon("DELETE", f"/memory/{did}", key)
+            status, _out = _daemon("DELETE", f"/memory/{did}", key)
+            left += status != 200
         except (urllib.error.URLError, OSError, ValueError):
-            pass
+            left += 1
+    for f in pdir.glob("*.jsonl"):
+        try:
+            f.unlink()
+        except OSError:
+            left += 1
+    return left
 
 
 # ---- scan and redact ----
@@ -347,7 +373,7 @@ def scan(conn, passes, placeholder):
     """Yield (table, id, wing, new_doc, new_meta, kinds, md5s) for every drawer a strong pass would change."""
     for table in TABLES:
         last = ""
-        while True:  # keyset pages by primary key: short statements, no transaction held open for the whole scan
+        while True:  # keyset pages by primary key: short statements, no transaction held for the whole scan
             rows = conn.execute(
                 f"SELECT id, wing, document, metadata, {ROW_MD5} FROM {table} WHERE id > %s ORDER BY id LIMIT %s",
                 (last, PAGE),
@@ -365,6 +391,130 @@ def scan(conn, passes, placeholder):
 
 def count_rows(conn) -> int:
     return sum(conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in TABLES)
+
+
+def prune_backups(bdir: Path) -> None:
+    cutoff = time.time() - BACKUP_DAYS * 86400
+    for old in list(bdir.glob("*.jsonl")):
+        try:
+            if old.stat().st_mtime < cutoff:
+                old.unlink()
+        except OSError:
+            pass
+
+
+def _backup_file(bdir: Path, name: str):
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    fd = os.open(
+        bdir / f"{stamp}-{name}.jsonl", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+    )
+    return os.fdopen(fd, "w", encoding="utf-8")
+
+
+def redact_rows(conn, found, bdir: Path) -> tuple:
+    """(redacted, failed). Per table, one transaction: lock the rows, check each is the version the scan judged,
+    back up exactly those rows (0600), update them (re-embedded). A mismatch fails the table's batch."""
+    from mempalace.backends.postgres import _embed
+
+    done = bad = 0
+    by_table = collections.defaultdict(list)
+    for row in found:
+        by_table[row[0]].append(row)
+    for table, rows in by_table.items():
+        vectors = list(_embed([r[3] for r in rows]))
+        if len(vectors) != len(rows):
+            bad += len(rows)
+            continue
+        want = {r[1]: r for r in rows}
+        try:
+            with conn.transaction():
+                locked = conn.execute(
+                    f"SELECT id, document, metadata::text, embedding::text, {ROW_MD5} FROM {table} "
+                    "WHERE id = ANY(%s) ORDER BY id FOR UPDATE",
+                    ([r[1] for r in rows],),
+                ).fetchall()
+                if len(locked) != len(rows) or any(
+                    tuple(lk[4:]) != want[lk[0]][6] for lk in locked
+                ):
+                    raise RuntimeError("a row changed since the scan")
+                with _backup_file(bdir, table) as f:
+                    for did, doc, meta, emb, *_m in locked:
+                        f.write(
+                            json.dumps(
+                                {
+                                    "id": did,
+                                    "document": doc,
+                                    "metadata": meta,
+                                    "embedding": emb,
+                                }
+                            )
+                            + "\n"
+                        )
+                    f.flush()
+                    os.fsync(f.fileno())
+                for (_t, did, _w, nd, nm, _k, _md5), vec in zip(rows, vectors):
+                    cur = conn.execute(
+                        f"UPDATE {table} SET document = %s, metadata = %s::jsonb, embedding = %s::vector WHERE id = %s",
+                        (
+                            nd,
+                            json.dumps(nm),
+                            "[" + ",".join(f"{x:f}" for x in vec) + "]",
+                            did,
+                        ),
+                    )
+                    if cur.rowcount != 1:
+                        raise RuntimeError("update touched no row")
+            done += len(rows)
+        except Exception:  # noqa: BLE001 -- the table's batch rolled back; counted and reported
+            bad += len(rows)
+    return done, bad
+
+
+def entity_scan(conn, passes, placeholder, redact_on, bdir: Path) -> tuple:
+    """(entities scanned, entity names a strong pass would change, renamed, failed). Renames only when redact_on,
+    never deletes: a 0600 backup of each vertex's properties first, then compare-and-set on the full properties."""
+    conn.execute("LOAD 'age'")
+    conn.execute('SET search_path = ag_catalog, "$user", public')
+    n = hit = done = bad = 0
+    renames = []
+    # Entity has no btree on id (only a GIN on properties): stream it once, in single-row mode (no named cursor, no
+    # transaction held), rather than page it with a sort per page.
+    cur = conn.cursor()
+    for vid, props in cur.stream(
+        'SELECT id::text, properties::text FROM mempalace_kg."Entity"'
+    ):
+        n += 1
+        try:
+            name = json.loads(props).get("name")
+        except ValueError:
+            continue
+        if isinstance(name, str):
+            new, k = strong_redact(name, passes, placeholder)
+            if k:
+                hit += 1
+                renames.append((vid, props, new))
+    if redact_on and renames:
+        with _backup_file(bdir, "entity") as f:
+            for vid, props, _new in renames:
+                f.write(json.dumps({"id": vid, "properties": props}) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        for vid, props, new in renames:
+            p = json.loads(props)
+            p["name"] = new
+            try:
+                c = conn.execute(
+                    'UPDATE mempalace_kg."Entity" SET properties = %s::agtype '
+                    "WHERE id = %s::graphid AND properties::text = %s",
+                    (json.dumps(p), vid, props),
+                )
+                ok = c.rowcount == 1
+            except Exception:  # noqa: BLE001 -- counted as not redacted
+                ok = False
+            done += ok
+            bad += not ok
+    conn.execute("SET search_path = public")
+    return n, hit, done, bad
 
 
 def body() -> None:
@@ -397,140 +547,62 @@ def body() -> None:
         )
         return
     redact_on = os.environ.get("PALACE_SECRETS_REDACT") == "1"
-    pdir = probe_dir()
-    fakes, path, early = probe_start(key, pdir)
-    deadline = time.time() + PROBE_WAIT_S
-    hits, redacted, failed, scanned, ents, ent_hits, error = (
-        collections.Counter(),
-        0,
-        0,
-        0,
-        0,
-        0,
-        None,
-    )
+    pdir, bdir = state_dir("probe"), state_dir("backup")
+    prune_backups(bdir)
+    hits = collections.Counter()
+    redacted = failed = scanned = ents = ent_hits = leftovers = 0
+    error = None
+    passes = placeholder = None
+    verdict = ("not measured", "the check stopped first")
+    conn = None
     try:
         passes, placeholder = strong_passes()
-        with psycopg.connect(dsn, connect_timeout=20, autocommit=True) as conn:
-            conn.execute(
-                "SET statement_timeout = '0'"
-            )  # a streaming scan; the unit's timeout bounds it
-            found = []
-            for table, did, wing, nd, nm, kinds, md5 in scan(conn, passes, placeholder):
-                if not did.startswith(f"drawer_{PROBE_WING}_"):
-                    found.append((table, did, wing, nd, nm, kinds, md5))
-            scanned = count_rows(conn)
-            for _t, _d, wing, _nd, _nm, kinds, _m in found:
-                for kind, k in kinds.items():
-                    hits[(wing, kind)] += k
-            ents, ent_hits = entity_scan(conn, passes, placeholder, redact_on)
-            if redact_on and found:
-                redacted, failed = redact_rows(conn, found)
-            verdict = early or probe_finish(conn, key, pdir, fakes, path, deadline)
+        fakes, path, early = probe_start(key, pdir)
+        deadline = time.time() + PROBE_WAIT_S
+        conn = psycopg.connect(dsn, connect_timeout=20, autocommit=True)
+        conn.execute(
+            "SET statement_timeout = '120s'"
+        )  # per statement; the scan is many short pages
+        found = list(scan(conn, passes, placeholder))
+        scanned = count_rows(conn)
+        for _t, _d, wing, _nd, _nm, kinds, _m in found:
+            for kind, k in kinds.items():
+                hits[(wing, kind)] += k
+        ents, ent_hits, e_done, e_bad = entity_scan(
+            conn, passes, placeholder, redact_on, bdir
+        )
+        if redact_on and found:
+            redacted, failed = redact_rows(conn, found, bdir)
+        redacted, failed = redacted + e_done, failed + e_bad
+        verdict = early or probe_wait(conn, path, fakes, placeholder, deadline)
     except Exception as exc:  # noqa: BLE001 -- a check reports, it never raises
         error = type(exc).__name__
-        verdict = early or ("not measured", "the scan failed first")
+    finally:
+        if conn is None:
+            try:
+                conn = psycopg.connect(dsn, connect_timeout=20, autocommit=True)
+            except Exception:  # noqa: BLE001
+                conn = None
+        leftovers = probe_cleanup(conn, key, pdir) if conn is not None else 1
+        if conn is not None:
+            conn.close()
     emit(
         NAME,
         assess(
-            hits, redacted, failed, scanned, ents, ent_hits, verdict, redact_on, error
+            hits,
+            redacted,
+            failed,
+            scanned,
+            ents,
+            ent_hits,
+            verdict,
+            redact_on,
+            error,
+            leftovers,
+            passes,
+            placeholder,
         ),
     )
-
-
-def entity_scan(conn, passes, placeholder, redact_on) -> tuple:
-    """(entities scanned, entity names a strong pass would change); renames them when redact_on (never deletes)."""
-    conn.execute("LOAD 'age'")
-    conn.execute('SET search_path = ag_catalog, "$user", public')
-    n = hit = 0
-    renames = []
-    # Entity has no btree on id (only a GIN on properties): stream it once, in single-row mode (no named cursor, no
-    # transaction held), rather than page it with a sort per page.
-    cur = conn.cursor()
-    for vid, props in cur.stream(
-        'SELECT id::text, properties::text FROM mempalace_kg."Entity"'
-    ):
-        n += 1
-        try:
-            name = json.loads(props).get("name")
-        except ValueError:
-            continue
-        if isinstance(name, str):
-            new, k = strong_redact(name, passes, placeholder)
-            if k:
-                hit += 1
-                renames.append((vid, props, new))
-    if redact_on:
-        for vid, props, new in renames:
-            p = json.loads(props)
-            p["name"] = new
-            conn.execute(
-                'UPDATE mempalace_kg."Entity" SET properties = %s::agtype WHERE id = %s::graphid AND properties::text = %s',
-                (json.dumps(p), vid, props),
-            )
-    conn.execute("SET search_path = public")
-    return n, hit
-
-
-def redact_rows(conn, found) -> tuple:
-    """(redacted, failed): backup, re-embed, compare-and-set, one transaction per table."""
-    from mempalace.backends.postgres import _embed
-
-    bdir = Path(
-        os.environ.get("PALACE_SECRETS_BACKUP_DIR")
-        or "~/.local/state/palace-secrets/backup"
-    ).expanduser()
-    bdir.mkdir(parents=True, exist_ok=True)
-    os.chmod(bdir, 0o700)
-    cutoff = time.time() - BACKUP_DAYS * 86400
-    for old in bdir.glob("*.copy"):
-        if old.stat().st_mtime < cutoff:
-            old.unlink()
-    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    done = bad = 0
-    by_table = collections.defaultdict(list)
-    for row in found:
-        by_table[row[0]].append(row)
-    for table, rows in by_table.items():
-        ids = [r[1] for r in rows]
-        fd = os.open(
-            bdir / f"{stamp}-{table}.copy", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
-        )
-        h = hashlib.sha256()
-        with (
-            os.fdopen(fd, "wb") as f,
-            conn.cursor().copy(
-                f"COPY (SELECT id, document, metadata, embedding FROM {table} WHERE id = ANY(%s) ORDER BY id) TO STDOUT",
-                (ids,),
-            ) as cp,
-        ):
-            for chunk in cp:
-                f.write(chunk)
-                h.update(chunk)
-        vectors = list(_embed([r[3] for r in rows]))
-        if len(vectors) != len(rows):
-            bad += len(rows)
-            continue
-        try:
-            with conn.transaction():
-                for (_t, did, _w, nd, nm, _k, md5), vec in zip(rows, vectors):
-                    cur = conn.execute(
-                        f"UPDATE {table} SET document = %s, metadata = %s::jsonb, embedding = %s::vector "
-                        f"WHERE id = %s AND {ROW_MD5_EQ}",
-                        (
-                            nd,
-                            json.dumps(nm),
-                            "[" + ",".join(f"{x:f}" for x in vec) + "]",
-                            did,
-                            *md5,
-                        ),
-                    )
-                    if cur.rowcount != 1:
-                        raise RuntimeError("row changed since read")
-            done += len(rows)
-        except Exception:  # noqa: BLE001 -- the whole table's batch rolled back; counted, reported
-            bad += len(rows)
-    return done, bad
 
 
 def main() -> int:
