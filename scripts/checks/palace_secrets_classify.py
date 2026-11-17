@@ -230,7 +230,7 @@ def source(meta, projects=PROJECTS) -> str:
         rest = sf[len(root):].split("/")
         u = next((p[:8] for p in rest[1:] if _UUID.fullmatch(p.removesuffix(".jsonl"))), None)
         if u:
-            return f"transcript session {u}"
+            return f"transcript session {u} in {rest[0]}"  # PERTURBATION: the directory name is shown
     return "other file"
 
 
