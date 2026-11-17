@@ -1130,6 +1130,16 @@ class PalaceSecretsClassify(unittest.TestCase):
         huge = b64.b64encode(b'{"type": "service_account", "exp": 1' + b"0" * 400 + b"}").decode()
         self.assertIn("invalid exp claim", pclass.shape(huge))
 
+    def test_deeply_nested_json_never_raises(self):
+        # xreview r3: json.loads raises RecursionError on deep nesting
+        import base64 as b64
+
+        deep = b"[" * 60000 + b"0" + b"]" * 60000
+        self.assertIn("base64 of", pclass.shape(b64.b64encode(deep).decode()))
+        nested = b'{"a":' * 60000 + b"0" + b"}" * 60000  # starts with eyJ once encoded
+        seg = b64.urlsafe_b64encode(nested).decode().rstrip("=")
+        self.assertEqual(pclass.shape(".".join((seg, seg, "abc"))), "jwt alg=<other>")
+
     def test_binary_that_starts_with_a_brace_is_called_binary(self):
         import base64 as b64
         import random

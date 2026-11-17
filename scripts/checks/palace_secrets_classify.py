@@ -182,13 +182,13 @@ def shape(value: str) -> str:
             cand = h.get("alg") if isinstance(h, dict) else None
             if isinstance(cand, str) and cand in ALGS:
                 alg = cand
-        except ValueError:
+        except (ValueError, RecursionError):
             pass
         try:
             b = _loads(_b64decode(parts[1]) or b"")
             if isinstance(b, dict) and "exp" in b:
                 exp_s = f", {_exp(b['exp'])}"
-        except ValueError:
+        except (ValueError, RecursionError):
             pass
         return f"jwt alg={alg}{exp_s}"
     for prefix, name in PREFIXES:
@@ -206,7 +206,7 @@ def shape(value: str) -> str:
             if raw[:1] in (b"{", b"[") and _printable(raw[:4096]) > 0.95:
                 try:
                     return f"{size}: " + _json_shape(_loads(raw))
-                except ValueError:
+                except (ValueError, RecursionError):
                     seen = []
                     for k in re.findall(rb'"([^"\\\x00-\x1f]{1,60})"\s*:', raw[:4096]):
                         if k.decode("utf-8", "replace") not in seen:
