@@ -1722,6 +1722,15 @@ async def _drain_pending_mines() -> int:
                         "(tunnels=%r)", directory, payload.get("tunnels"),
                     )
                 async with _mine_sem:
+                    # Again, now the slot is ours: a lock or switch set while this
+                    # entry waited for the semaphore holds it too (xreview #334 r1).
+                    # The check narrows the window to the spawn itself; a mine
+                    # that has started runs to its end.
+                    late_pause = _mine_pause_problem()
+                    if late_pause:
+                        requeue_lines.append(json.dumps(entry))
+                        _log.warning("drain-mine: pausing, %s; entry requeued", late_pause)
+                        continue
                     phase_file = _new_mine_phase_file()
                     try:
                         proc = await asyncio.create_subprocess_exec(

@@ -174,3 +174,33 @@ class TestDrainHonoursThePauseSwitches(TestDrainHoldsTheQueue):
         spawn = await self._drain_with()
         self.assertEqual(spawn.call_count, 3)
         self.assertEqual(self._queued_dirs(), [])
+
+
+class TestDrainRechecksAfterTheSemaphore(TestDrainHoldsTheQueue):
+    """xreview #334 r1: a lock or switch set while an entry waits for the mine semaphore must still hold it: the
+    drain checks again once the slot is its own, before spawning."""
+
+    async def _lock_set_while_waiting(self, switch):
+        await main._enqueue_pending_mine({"dir": "/t/late.jsonl", "wing": "w", "mode": "convos"})
+        calls = []
+
+        def flips():  # clear at the first check (before the semaphore), set by the second (inside it)
+            calls.append(1)
+            return None if len(calls) == 1 else f"{switch} set while waiting"
+
+        with patch.object(main.os, "statvfs", return_value=_statvfs(40.0)), patch.object(
+            main, "_mine_pause_problem", side_effect=flips
+        ), patch("asyncio.create_subprocess_exec", side_effect=self._spawn) as spawn:
+            await main._drain_pending_mines()
+        return spawn, calls
+
+    async def test_a_lock_set_during_the_wait_holds_the_entry(self):
+        spawn, calls = await self._lock_set_while_waiting("bench lock")
+        self.assertGreaterEqual(len(calls), 2)
+        spawn.assert_not_called()
+        self.assertEqual(self._queued_dirs(), ["/t/late.jsonl"])
+
+    async def test_the_switch_set_during_the_wait_holds_the_entry(self):
+        spawn, _calls = await self._lock_set_while_waiting("PALACE_DISABLE_AUTOMINE")
+        spawn.assert_not_called()
+        self.assertEqual(self._queued_dirs(), ["/t/late.jsonl"])
