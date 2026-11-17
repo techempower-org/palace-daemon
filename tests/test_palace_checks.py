@@ -172,6 +172,40 @@ class PalaceChecks(unittest.TestCase):
         assert later.startswith("CHECK palace-dream-night ok"), later
         assert "skipped by its start condition" in later
 
+    def test_dream_skip_edges_from_review(self):
+        # the live 11-17 systemctl show --timestamp=unix output after the skip
+        live = dream.unit_result(
+            "LoadState=loaded\nResult=exec-condition\nExecMainStatus=0\n"
+            "ExecMainExitTimestamp=\nConditionTimestamp=@1794915039\n"
+            "InactiveEnterTimestamp=@1794915039\n"
+        )
+        assert dream.skipped_at(live) == dt.datetime(
+            2026, 11, 17, 11, 30, 39, tzinfo=dt.timezone.utc
+        )
+        at = (NOW - dt.timedelta(hours=5)).replace(microsecond=0)
+        stamp = f"@{int(at.timestamp())}"
+        base = {"LoadState": "loaded", "Result": "exec-condition", "ExecMainStatus": "0"}
+        # an exit timestamp kept from an earlier run, and a night published after the skip: ok
+        kept = {**base, "ExecMainExitTimestamp": "@1", "ConditionTimestamp": stamp}
+        ok = dream.assess([_night("2026-11-15", 1, GOOD)], kept, NOW)
+        assert ok.startswith("CHECK palace-dream-night ok"), ok
+        # a night published at the very second of the skip is not newer: warn
+        same = dream.assess([_night("2026-11-15", 5, GOOD)], kept, NOW)
+        assert same.startswith("CHECK palace-dream-night warn"), same
+        # ConditionTimestamp empty: InactiveEnterTimestamp is used
+        inactive = {
+            **base,
+            "ExecMainExitTimestamp": "",
+            "ConditionTimestamp": "",
+            "InactiveEnterTimestamp": stamp,
+        }
+        assert dream.skipped_at(inactive) == at.astimezone(dt.timezone.utc)
+        # a skip with no readable time: warn, never ok
+        untimed = {**base, "ExecMainExitTimestamp": "", "ConditionTimestamp": "n/a"}
+        out = dream.assess([_night("2026-11-15", 1, GOOD)], untimed, NOW)
+        assert out.startswith("CHECK palace-dream-night warn"), out
+        assert "time unreadable" in out
+
     def test_dream_still_says_no_run_since_boot_when_the_unit_never_started(self):
         never = {"LoadState": "loaded", "Result": "success", "ExecMainStatus": "0",
                  "ExecMainExitTimestamp": "", "ConditionTimestamp": ""}
@@ -581,6 +615,7 @@ class PalaceChecks(unittest.TestCase):
             "ExecMainStatus",
             "ExecMainExitTimestamp",
             "ConditionTimestamp",
+            "InactiveEnterTimestamp",
         } <= props
         assert "--timestamp=unix" in seen["argv"]
         assert out.startswith("CHECK palace-dream-night ok")

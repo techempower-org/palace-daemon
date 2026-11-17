@@ -98,15 +98,22 @@ def judge_state(con: dict) -> str:
     return f"{_num(con.get('judged', 0))} judged, {_num(con.get('cached', 0))} cached"
 
 
+SKIP_UNTIMED = dt.datetime.max.replace(tzinfo=dt.timezone.utc)
+
+
 def skipped_at(unit: dict[str, str]) -> dt.datetime | None:
-    """When the unit's last start was skipped by its ExecCondition (``Result=exec-condition``,
-    the time from ``ConditionTimestamp=@<unix>``); None otherwise or when unreadable."""
+    """When the unit's last start was skipped by its ExecCondition (``Result=exec-condition``);
+    None when it was not. The time is ``ConditionTimestamp`` (systemd stamps it at the start job
+    the condition skipped: 11-17 03:30:39 live), else ``InactiveEnterTimestamp``, both
+    ``@<unix>``. A skip whose time cannot be read is :data:`SKIP_UNTIMED`, never older than a
+    night, so it warns rather than reading as recovered."""
     if unit.get("Result") != "exec-condition":
         return None
-    m = re.fullmatch(r"@(\d{1,12})", unit.get("ConditionTimestamp", ""))
-    if not m:
-        return None
-    return dt.datetime.fromtimestamp(int(m.group(1)), dt.timezone.utc)
+    for key in ("ConditionTimestamp", "InactiveEnterTimestamp"):
+        m = re.fullmatch(r"@(\d{1,12})", unit.get(key, ""))
+        if m:
+            return dt.datetime.fromtimestamp(int(m.group(1)), dt.timezone.utc)
+    return SKIP_UNTIMED
 
 
 def assess(nights: list[dict], unit: dict[str, str], now: dt.datetime) -> str:
@@ -145,8 +152,11 @@ def assess(nights: list[dict], unit: dict[str, str], now: dt.datetime) -> str:
     ran = unit.get("ExecMainExitTimestamp", "")
     status = unit.get("ExecMainStatus", "")
     skip = skipped_at(unit)
-    if skip is not None:
-        exit_part = f"last start {skip.astimezone(now.tzinfo):%a %H:%M} skipped by its start condition"
+    if skip is SKIP_UNTIMED:
+        exit_part = "last start skipped by its start condition (time unreadable)"
+    elif skip is not None:
+        when = skip.astimezone(now.tzinfo)
+        exit_part = f"last start {when:%a %H:%M} skipped by its start condition"
     else:
         exit_part = f"exit {status}" if ran else "no run since boot"
     fact = (
@@ -165,8 +175,11 @@ def assess(nights: list[dict], unit: dict[str, str], now: dt.datetime) -> str:
         warns.append("generated_at is in the future")
     if unit.get("LoadState") != "loaded":
         warns.append("unit state unreadable or the unit is not loaded")
-    elif skip is not None and skip > made:
-        warns.append("no night since the skip: read the unit's ExecCondition")
+    elif skip is not None:
+        # a night published after the skip (by hand) is the recovery; an exit timestamp kept
+        # from an earlier run says nothing about this start, so the branch below is not used
+        if skip >= made:
+            warns.append("no night since the skip: read the unit's ExecCondition")
     elif ran and (unit.get("Result") not in ("success", None) or status != "0"):
         warns.append(f"last run {unit.get('Result')}, exit {status or '?'}")
     if con.get("error"):
@@ -229,6 +242,8 @@ def body() -> None:
                 "ExecMainExitTimestamp",
                 "-p",
                 "ConditionTimestamp",
+                "-p",
+                "InactiveEnterTimestamp",
             ],
             capture_output=True,
             text=True,
