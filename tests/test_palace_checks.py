@@ -1000,26 +1000,15 @@ class PalaceSecrets(unittest.TestCase):
 
     def test_probe_rows_are_judged_never_redacted(self):
         pdir = Path("/x/palace_probe/probe")
-        own = (
-            "t",
-            "drawer_1",
-            "palace_probe",
-            "",
-            {"source_file": "/x/palace_probe/probe/s.jsonl"},
-            {},
-            (),
-        )
-        other = (
-            "t",
-            "drawer_2",
-            "jp",
-            "",
-            {"source_file": "/x/palaceXprobe/probe/s.jsonl"},
-            {},
-            (),
-        )
+        meta = {"source_file": "/x/palace_probe/probe/s.jsonl"}
+        far = {"source_file": "/x/palaceXprobe/probe/s.jsonl"}
+        own = ("mempalace_drawers", "d1", "palace_probe", "", meta, {}, ())
+        other = ("mempalace_drawers", "d2", "jp", "", far, {}, ())
+        private = ("mempalace_private_drawers", "d3", "palace_probe", "", meta, {}, ())
         self.assertTrue(psec._is_probe_row(own, pdir))
         self.assertFalse(psec._is_probe_row(other, pdir))
+        # a private row is never exempt: the probe cleanup does not reach that table
+        self.assertFalse(psec._is_probe_row(private, pdir))
 
     def test_drawer_cleanup_matches_the_probe_dir_literally(self):
         # "_" and "%" in the path must not act as wildcards (LIKE would delete unrelated drawers)

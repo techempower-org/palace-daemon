@@ -400,6 +400,9 @@ def scan(conn, passes, placeholder):
 
 def _is_probe_row(row, pdir: Path) -> bool:
     """A scan row (table, id, wing, doc, meta, kinds, md5) whose drawer a probe transcript filed."""
+    # only the shared table: the probe cleanup deletes there, so a private row is redacted like any other
+    if row[0] != "mempalace_drawers":
+        return False
     meta = row[4] if isinstance(row[4], dict) else {}
     return str(meta.get("source_file", "")).startswith(str(pdir) + "/")
 
