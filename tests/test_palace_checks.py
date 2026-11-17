@@ -1123,6 +1123,12 @@ class PalaceSecretsClassify(unittest.TestCase):
         self.assertEqual(got, "jwt alg=<other>, invalid exp claim")
         got = pclass.shape(".".join((seg({"alg": "none"}), "eyJleHAiOiBOYU59", sig)))  # {"exp": NaN}
         self.assertIn("invalid exp claim", got)
+        # xreview r2: a huge integer exp and a non-string alg never raise
+        big = b64.urlsafe_b64encode(b'{"exp": 1' + b"0" * 400 + b"}").decode().rstrip("=")
+        self.assertEqual(pclass.shape(".".join((seg({"alg": ["HS256"]}), big, sig))), "jwt alg=<other>, invalid exp claim")
+        self.assertEqual(pclass.shape(".".join((seg({"alg": {}}), seg({}), sig))), "jwt alg=<other>")
+        huge = b64.b64encode(b'{"type": "service_account", "exp": 1' + b"0" * 400 + b"}").decode()
+        self.assertIn("invalid exp claim", pclass.shape(huge))
 
     def test_binary_that_starts_with_a_brace_is_called_binary(self):
         import base64 as b64
@@ -1147,13 +1153,16 @@ class PalaceSecretsClassify(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR_TESTS")) as d:
             proj = Path(d)
-            (proj / "-home-u-Projects-alpha").mkdir()
+            (proj / pw).mkdir()  # xreview r2: a directory that exists is not a safe label
             uuid = "0a1b2c3d-1111-2222-3333-444455556666"
+            frag = secret[6:14]
             cases = [
-                (f"# deploy notes\nthe key {secret} was printed", {"source_file": f"{d}/-home-u-Projects-alpha/{uuid}.jsonl"},
-                 "project -home-u-Projects-alpha session 0a1b2c3d", "# deploy notes"),
+                (f"# deploy notes\nthe key {secret} was printed", {"source_file": f"{d}/{pw}/{uuid}.jsonl"},
+                 "transcript session 0a1b2c3d", "# deploy notes"),
                 (f"# password: {pw}\n{secret}", {"source_file": f"{d}/{pw}/x.jsonl"}, "other file", "<withheld>"),
                 (f"# tab\there {pw}{pw}\n{secret}", {"source_file": f"/elsewhere/{pw}.jsonl"}, "other file", "<withheld>"),
+                (f"# {frag}\n{secret}", {}, "none", "<withheld>"),  # a short fragment of the credential
+                (f"# notes {pw[:6]}\n{secret}", {}, "none", "<withheld>"),  # digits: not plain words
             ]
             for doc, meta, want_src, want_head in cases:
                 lines = pclass.classify_row("mempalace_drawers", "d1", doc, meta, passes, safe_fn, proj)

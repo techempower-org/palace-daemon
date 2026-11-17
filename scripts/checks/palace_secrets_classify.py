@@ -7,15 +7,17 @@ decoy by design, dead, or live (rotate) WITHOUT reading the drawer, which would 
 One tab-separated line per hit (the same strong passes the check runs): table, drawer id, source, where, kind,
 length, shape, heading. Text from a drawer is printed only through an allowlist, never as it is:
 
-- source: "project <dir> session <uuid8>" when the drawer's source_file is a transcript under a project directory
-  that exists on this host (~/.claude/projects/<dir>/…), else the source kind only ("other file", "none");
+- source: "transcript session <uuid8>" when the drawer's source_file is a session transcript under
+  ~/.claude/projects (the first 8 hex of its UUID, format-checked), else the source kind only ("other file",
+  "none"); the directory name is never shown;
 - where: "document", or "metadata.<key>" for a known mempalace metadata key, else "metadata.<other>";
 - shape: an ENCODING observation, never a verdict on validity: hex length, a key prefix's documented meaning, an
   exact match of a published documentation example, a JWT's algorithm (from a fixed list) and its UNVERIFIED exp
   claim, base64 with its decoded size and, for base64 JSON (the "blob" kind), its top-level key names from a fixed
   schema list (any other name counts as "<other>"); otherwise the character classes and the entropy per character;
-- heading: the drawer's first markdown heading, fully redacted, and only when it holds no credential word and no
-  long token-shaped run (else "<withheld>").
+- heading: the drawer's first markdown heading, only when it is plain words (letters only, at most 12 each, at most
+  10 words, no credential word) and the full redactor leaves it unchanged, else "<withheld>". LIMIT: a password made
+  only of plain words could pass this filter; the other columns hold no drawer text outside the fixed lists.
 
 Every column is one line: tabs and line breaks are replaced. Reads the DSN from MEMPALACE_POSTGRES_DSN, else from
 the daemon env file (PALACE_CHECKS_DSN_FILE).
@@ -82,7 +84,7 @@ META_KEYS = frozenset(
     convo_chunker_version aaak_source agent source_kind""".split()
 )
 CRED_WORDS = re.compile(r"(?i)pass(?:word|wd|phrase)?|secret|token|api.?key|private|bearer|credential|auth")
-TOKEN_RUN = re.compile(r"[A-Za-z0-9+/=_.-]{16,}")
+PLAIN_HEADING = re.compile(r"#{1,6}( [A-Za-z]{1,12}){1,10}")
 _HEX = re.compile(r"[0-9a-fA-F]+")
 _B64 = re.compile(r"[A-Za-z0-9+/_-]+={0,2}")
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -129,9 +131,12 @@ def _b64decode(s: str):
 
 def _exp(value) -> str:
     """An UNVERIFIED exp claim, described; never raises."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return "invalid exp claim"
-    if not 0 <= value <= _MAX_TS:
+    if isinstance(value, int):
+        if not 0 <= value <= _MAX_TS:  # integer compare first: a huge int never becomes a float
+            return "invalid exp claim"
+    elif not math.isfinite(value) or not 0 <= value <= _MAX_TS:
         return "invalid exp claim"
     try:
         when = dt.datetime.fromtimestamp(value, dt.timezone.utc)
@@ -174,8 +179,9 @@ def shape(value: str) -> str:
         alg, exp_s = "<other>", ""
         try:
             h = _loads(_b64decode(parts[0]) or b"")
-            if isinstance(h, dict) and h.get("alg") in ALGS:
-                alg = h["alg"]
+            cand = h.get("alg") if isinstance(h, dict) else None
+            if isinstance(cand, str) and cand in ALGS:
+                alg = cand
         except ValueError:
             pass
         try:
@@ -222,9 +228,9 @@ def source(meta, projects=PROJECTS) -> str:
     root = str(projects).rstrip("/") + "/"
     if sf.startswith(root):
         rest = sf[len(root):].split("/")
-        if rest and rest[0] and (projects / rest[0]).is_dir() and rest[0] in os.listdir(projects):
-            u = next((m.group(0) for p in rest[1:] for m in [_UUID.match(p)] if m), None)
-            return f"project {rest[0]}" + (f" session {u[:8]}" if u else "")
+        u = next((p[:8] for p in rest[1:] if _UUID.fullmatch(p.removesuffix(".jsonl"))), None)
+        if u:
+            return f"transcript session {u}"
     return "other file"
 
 
@@ -240,7 +246,7 @@ def heading(doc: str, safe_fn) -> str:
     first = next((ln.strip() for ln in (doc or "").splitlines() if ln.strip().startswith("#")), "")
     if not first:
         return ""
-    if CRED_WORDS.search(first) or TOKEN_RUN.search(first):
+    if not PLAIN_HEADING.fullmatch(first) or CRED_WORDS.search(first):
         return "<withheld>"
     clean = safe_fn(first)
     if clean != first:
