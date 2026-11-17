@@ -153,6 +153,31 @@ class PalaceChecks(unittest.TestCase):
         )
         assert err.startswith("CHECK palace-dream-night warn") and "judge error" in err
 
+    def test_dream_warns_when_the_timer_start_was_skipped_after_the_newest_night(self):
+        # 2026-11-16 and 11-17: the unit's ExecCondition (a MemAvailable floor) skipped the
+        # 03:30 start. A skip leaves no exit timestamp, so the line read "ok ... no run since
+        # boot" for a day and only failed once the night went stale.
+        skip = {
+            "LoadState": "loaded",
+            "Result": "exec-condition",
+            "ExecMainStatus": "0",
+            "ExecMainExitTimestamp": "",
+            "ConditionTimestamp": f"@{int((NOW - dt.timedelta(hours=5)).timestamp())}",
+        }
+        out = dream.assess([_night("2026-11-14", 25, GOOD)], skip, NOW)
+        assert out.startswith("CHECK palace-dream-night warn"), out
+        assert "skipped by its start condition" in out and "no run since boot" not in out
+        # a night published by hand after the skip: ok, and the line still names the skip
+        later = dream.assess([_night("2026-11-15", 1, GOOD)], skip, NOW)
+        assert later.startswith("CHECK palace-dream-night ok"), later
+        assert "skipped by its start condition" in later
+
+    def test_dream_still_says_no_run_since_boot_when_the_unit_never_started(self):
+        never = {"LoadState": "loaded", "Result": "success", "ExecMainStatus": "0",
+                 "ExecMainExitTimestamp": "", "ConditionTimestamp": ""}
+        out = dream.assess([_night("2026-11-15", 5, GOOD)], never, NOW)
+        assert out.startswith("CHECK palace-dream-night ok") and "no run since boot" in out
+
     def test_dream_warns_only_after_three_nights_with_the_judge_off(self):
         two = [
             _night("2026-11-15", 5, OFF),
@@ -555,7 +580,9 @@ class PalaceChecks(unittest.TestCase):
             "Result",
             "ExecMainStatus",
             "ExecMainExitTimestamp",
+            "ConditionTimestamp",
         } <= props
+        assert "--timestamp=unix" in seen["argv"]
         assert out.startswith("CHECK palace-dream-night ok")
 
     def test_known_public_hashes_are_ignored_and_the_list_takes_only_kind_sha8(self):
