@@ -165,7 +165,7 @@ class SnapshotCache:
             self._sync.release()
         last, age = self._last()
         _quiet_warning("status snapshot recompute failed (%s); serving the last good one, %.0f s old",
-                       type(failed).__name__, age)
+                       _error_text(failed), age)
         self._notify_failure(failed)
         self._start_refresh()
         return last, age
@@ -203,7 +203,7 @@ class SnapshotCache:
         except Exception as e:
             with self._lock:
                 self._refreshing = False
-            _quiet_warning("status snapshot refresh could not start (%s)", type(e).__name__)
+            _quiet_warning("status snapshot refresh could not start (%s)", _error_text(e))
 
     def _refresh(self) -> None:
         try:

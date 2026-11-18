@@ -25,6 +25,17 @@ class _Unprintable(Exception):
         raise ValueError("no str for you")
 
 
+class _NamelessMeta(type):
+    def __getattribute__(cls, name):
+        if name == "__name__":
+            raise ValueError("no name for you")
+        return super().__getattribute__(name)
+
+
+class _Nameless(Exception, metaclass=_NamelessMeta):
+    """An exception whose class name cannot even be read."""
+
+
 class _Compute:
     def __init__(self, delay=0.0, fail_after=None, exc=None):
         self.calls = 0
@@ -370,6 +381,24 @@ class TestSnapshotCache(unittest.TestCase):
             self.assertEqual(cache.get()[0], {"n": 1})
             _settle(cache)
         self.assertIn("_Unprintable", cache._last_error)
+
+    def test_a_failure_whose_type_name_raises_still_serves_the_last_good(self):
+        c = _Compute(fail_after=1, exc=_Nameless)
+        cache = status_snapshot.SnapshotCache(c, ttl_s=60, max_age_s=0.01)
+        cache.get()
+        time.sleep(0.03)
+        with patch.object(status_snapshot._log, "exception"):
+            self.assertEqual(cache.get()[0], {"n": 1})
+            _settle(cache)
+        self.assertEqual(cache._last_error[:9], "Exception")
+
+    def test_a_thread_start_error_whose_type_name_raises_neither_raises_nor_sticks(self):
+        c = _Compute()
+        cache = status_snapshot.SnapshotCache(c, ttl_s=0.0)
+        cache.get()
+        with patch.object(threading.Thread, "start", side_effect=_Nameless()):
+            self.assertEqual(cache.get()[0], {"n": 1})
+        self.assertFalse(cache._refreshing)
 
     def test_an_unprintable_cold_failure_is_still_shared(self):
         c = _Compute(fail_after=0, exc=_Unprintable)
