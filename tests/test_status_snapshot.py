@@ -20,11 +20,17 @@ if _ROOT not in sys.path:
 import status_snapshot  # noqa: E402
 
 
+class _Unprintable(Exception):
+    def __str__(self):
+        raise ValueError("no str for you")
+
+
 class _Compute:
-    def __init__(self, delay=0.0, fail_after=None):
+    def __init__(self, delay=0.0, fail_after=None, exc=None):
         self.calls = 0
         self.delay = delay
         self.fail_after = fail_after
+        self.exc = exc or (lambda: RuntimeError("db down"))
         self.gate = None
 
     def __call__(self):
@@ -34,8 +40,42 @@ class _Compute:
         if self.delay:
             time.sleep(self.delay)
         if self.fail_after is not None and self.calls > self.fail_after:
-            raise RuntimeError("db down")
+            raise self.exc()
         return {"n": self.calls}
+
+
+class _CountingLock:
+    """The cache's computation slot, counting callers that reached it, so a test can release a
+    gated computation only once every caller has captured its entry state and is queued."""
+
+    def __init__(self):
+        self._l = threading.Lock()
+        self._c = threading.Lock()
+        self.entered = 0
+
+    def acquire(self, blocking=True):
+        with self._c:
+            self.entered += 1
+        return self._l.acquire(blocking)
+
+    def release(self):
+        self._l.release()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *a):
+        self.release()
+
+
+def _wait_entered(lock, n, tries=2500):
+    # counts tries, not the clock: one test freezes time.monotonic
+    for _ in range(tries):
+        if lock.entered >= n:
+            return
+        time.sleep(0.002)
+    raise AssertionError(f"only {lock.entered} of {n} callers reached the slot")
 
 
 def _settle(cache, timeout=5.0):
@@ -250,35 +290,13 @@ class TestSnapshotCache(unittest.TestCase):
             self.assertEqual(cache.get()[0], {"n": 1})
         self.assertFalse(cache._refreshing)
 
-    def test_cold_callers_queued_behind_a_failed_first_computation_share_its_failure(self):
-        c = _Compute(fail_after=0)
-        c.gate = threading.Event()
-        cache = status_snapshot.SnapshotCache(c)
-        errors = []
-
-        def call():
-            try:
-                cache.get()
-            except RuntimeError as e:
-                errors.append(e)
-
-        ts = [threading.Thread(target=call) for _ in range(4)]
-        for t in ts:
-            t.start()
-        time.sleep(0.1)  # all four are in get(): one computing, three queued on the slot
-        c.gate.set()
-        for t in ts:
-            t.join(5)
-        self.assertEqual(len(errors), 4)
-        self.assertEqual(c.calls, 1)
-
     def _cold_callers(self, cache, n):
         errors, out = [], []
 
         def call():
             try:
                 out.append(cache.get())
-            except RuntimeError as e:
+            except Exception as e:  # noqa: BLE001 - collect every failure, the computing caller's included
                 errors.append(e)
 
         ts = [threading.Thread(target=call) for _ in range(n)]
@@ -286,16 +304,38 @@ class TestSnapshotCache(unittest.TestCase):
             t.start()
         return ts, errors, out
 
+    def _gated_cold_run(self, c, cache, callers, already_in_slot=0):
+        """Start ``callers`` cold get()s and release the gated computation only once each has
+        reached the slot (so each captured its entry state first); no sleeps."""
+        lock = _CountingLock()
+        lock.entered = already_in_slot
+        cache._sync = lock
+        ts, errors, out = self._cold_callers(cache, callers)
+        _wait_entered(lock, already_in_slot + callers)
+        c.gate.set()
+        for t in ts:
+            t.join(5)
+        return errors, out
+
+    def test_cold_callers_queued_behind_a_failed_first_computation_share_its_failure(self):
+        c = _Compute(fail_after=0)
+        c.gate = threading.Event()
+        cache = status_snapshot.SnapshotCache(c)
+        errors, _ = self._gated_cold_run(c, cache, 4)
+        self.assertEqual((len(errors), c.calls), (4, 1))
+
     def test_cold_callers_queued_behind_a_failed_warm_share_its_failure(self):
         sync = _Compute()
         bg = _Compute(fail_after=0)
         bg.gate = threading.Event()
         cache = status_snapshot.SnapshotCache(sync, refresh_compute=bg)
+        lock = _CountingLock()
+        cache._sync = lock
         with patch.object(status_snapshot._log, "exception"):
             cache.warm()
-            time.sleep(0.05)  # the warm computation holds the slot on the gate
+            _wait_entered(lock, 1)  # the warm computation holds the slot on the gate
             ts, errors, out = self._cold_callers(cache, 3)
-            time.sleep(0.1)
+            _wait_entered(lock, 4)
             bg.gate.set()
             for t in ts:
                 t.join(5)
@@ -308,26 +348,36 @@ class TestSnapshotCache(unittest.TestCase):
         c.gate = threading.Event()
         cache = status_snapshot.SnapshotCache(c)
         with patch.object(status_snapshot.time, "monotonic", lambda: 1000.0):  # every reading equal
-            ts, errors, _ = self._cold_callers(cache, 4)
-            time.sleep(0.1)
-            c.gate.set()
-            for t in ts:
-                t.join(5)
+            errors, _ = self._gated_cold_run(c, cache, 4)
         self.assertEqual((len(errors), c.calls), (4, 1))
 
     def test_each_caller_gets_its_own_exception_and_a_success_clears_the_failure(self):
         c = _Compute(fail_after=0)
         c.gate = threading.Event()
         cache = status_snapshot.SnapshotCache(c)
-        ts, errors, _ = self._cold_callers(cache, 3)
-        time.sleep(0.1)
-        c.gate.set()
-        for t in ts:
-            t.join(5)
+        errors, _ = self._gated_cold_run(c, cache, 3)
         self.assertEqual(len({id(e) for e in errors}), 3)
         c.fail_after = None
         self.assertEqual(cache.get()[0], {"n": 2})
         self.assertIsNone(cache._last_error)
+
+    def test_an_unprintable_failure_past_max_age_still_serves_the_last_good(self):
+        c = _Compute(fail_after=1, exc=_Unprintable)
+        cache = status_snapshot.SnapshotCache(c, ttl_s=60, max_age_s=0.01)
+        cache.get()
+        time.sleep(0.03)
+        with patch.object(status_snapshot._log, "warning"), patch.object(status_snapshot._log, "exception"):
+            self.assertEqual(cache.get()[0], {"n": 1})
+            _settle(cache)
+        self.assertIn("_Unprintable", cache._last_error)
+
+    def test_an_unprintable_cold_failure_is_still_shared(self):
+        c = _Compute(fail_after=0, exc=_Unprintable)
+        c.gate = threading.Event()
+        cache = status_snapshot.SnapshotCache(c)
+        errors, _ = self._gated_cold_run(c, cache, 3)
+        self.assertEqual(c.calls, 1)
+        self.assertEqual(sum(isinstance(e, status_snapshot.SnapshotUnavailable) for e in errors), 2)
 
     def test_a_cold_call_after_a_failed_first_computation_tries_again(self):
         c = _Compute(fail_after=0)

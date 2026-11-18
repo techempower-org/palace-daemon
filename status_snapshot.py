@@ -40,6 +40,19 @@ class SnapshotUnavailable(RuntimeError):
     """No snapshot exists, and the computation this request waited for failed."""
 
 
+def _error_text(e: BaseException) -> str:
+    """``Type: message``, at most 300 characters; an exception whose ``__str__`` raises gets its
+    type name alone, so recording a failure can never itself fail."""
+    try:
+        name = type(e).__name__
+    except Exception:  # noqa: BLE001
+        name = "Exception"
+    try:
+        return f"{name}: {e}"[:300]
+    except Exception:  # noqa: BLE001
+        return f"{name} (unprintable)"[:300]
+
+
 def _quiet_warning(msg: str, *args) -> None:
     """Log on a fallback path without letting a failing log handler turn the fallback into a 500."""
     try:
@@ -116,9 +129,10 @@ class SnapshotCache:
             return value, 0.0
 
     def _record_failure(self, e: Exception) -> None:
+        text = _error_text(e)  # formatted outside the lock; never raises
         with self._lock:
             self._done += 1
-            self._last_error = f"{type(e).__name__}: {e}"[:300]
+            self._last_error = text
 
     def _last(self) -> "tuple[dict, float]":
         with self._lock:
