@@ -29,6 +29,7 @@ helpers stay where the tests expect them.
 """
 from __future__ import annotations
 
+import math
 import os
 import threading
 import time
@@ -56,11 +57,12 @@ def fast_status_payload(statement_timeout_s: float = 3) -> dict:
     from postgres import postgres_dsn
     from db_errors import record_db_error
 
-    if isinstance(statement_timeout_s, bool):
+    # Validate the seconds as given, then convert: whole milliseconds, at least 1.
+    if isinstance(statement_timeout_s, bool) or not isinstance(statement_timeout_s, (int, float)):
         raise TypeError("statement_timeout_s must be a number of seconds")
-    timeout_ms = int(round(float(statement_timeout_s) * 1000))
-    if not 0 < timeout_ms <= 600_000:
-        raise ValueError(f"statement_timeout_s out of range: {statement_timeout_s!r}")
+    if not math.isfinite(statement_timeout_s) or not 0 < statement_timeout_s <= 600:
+        raise ValueError(f"statement_timeout_s out of range (0, 600]: {statement_timeout_s!r}")
+    timeout_ms = max(1, round(statement_timeout_s * 1000))
 
     dsn = postgres_dsn()
     if not dsn:

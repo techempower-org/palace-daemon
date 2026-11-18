@@ -192,6 +192,63 @@ class TestSnapshotCache(unittest.TestCase):
         # one synchronous attempt and at most one background one, not one per request
         self.assertLessEqual(c.calls, 3)
 
+    def test_an_expired_request_never_waits_behind_a_background_refresh(self):
+        sync = _Compute()
+        bg = _Compute()
+        cache = status_snapshot.SnapshotCache(sync, ttl_s=0.0, max_age_s=0.05, refresh_compute=bg)
+        cache.get()
+        bg.gate = threading.Event()
+        cache.get()  # past ttl: starts the background refresh, which now holds the slot on the gate
+        time.sleep(0.08)  # past max_age while the refresh is still running
+        t0 = time.monotonic()
+        value, age = cache.get()
+        waited = time.monotonic() - t0
+        bg.gate.set()
+        _settle(cache)
+        self.assertLess(waited, 0.5)
+        self.assertEqual(value, {"n": 1})
+        self.assertGreaterEqual(age, 0.05)
+        self.assertEqual(sync.calls, 1)  # no synchronous attempt queued behind the refresh
+
+    def test_a_request_after_a_failed_background_refresh_is_not_held_by_it(self):
+        sync = _Compute(fail_after=1)
+        bg = _Compute(fail_after=0)
+        cache = status_snapshot.SnapshotCache(sync, ttl_s=0.0, max_age_s=0.05, refresh_compute=bg)
+        cache.get()
+        bg.gate = threading.Event()
+        with patch.object(status_snapshot._log, "exception"), patch.object(status_snapshot._log, "warning"):
+            cache.get()
+            time.sleep(0.08)
+            t0 = time.monotonic()
+            value, _ = cache.get()
+            waited = time.monotonic() - t0
+            bg.gate.set()
+            _settle(cache)
+        self.assertLess(waited, 0.5)
+        self.assertEqual(value, {"n": 1})
+
+    def test_a_thread_that_cannot_start_neither_raises_nor_stops_refreshes(self):
+        c = _Compute()
+        cache = status_snapshot.SnapshotCache(c, ttl_s=0.0)
+        cache.get()
+        with patch.object(threading.Thread, "start", side_effect=RuntimeError("can't start new thread")), \
+                patch.object(status_snapshot._log, "warning"):
+            self.assertEqual(cache.get()[0], {"n": 1})
+        self.assertFalse(cache._refreshing)
+        cache.get()  # threads work again: this one refreshes
+        _settle(cache)
+        self.assertEqual(c.calls, 2)
+
+    def test_past_max_age_with_a_thread_that_cannot_start_still_serves_the_last_good(self):
+        c = _Compute(fail_after=1)
+        cache = status_snapshot.SnapshotCache(c, ttl_s=60, max_age_s=0.01)
+        cache.get()
+        time.sleep(0.03)
+        with patch.object(threading.Thread, "start", side_effect=RuntimeError("can't start new thread")), \
+                patch.object(status_snapshot._log, "warning"):
+            self.assertEqual(cache.get()[0], {"n": 1})
+        self.assertFalse(cache._refreshing)
+
     def test_the_background_refresh_uses_its_own_compute(self):
         sync = _Compute()
         bg = _Compute()
@@ -299,8 +356,18 @@ class TestStatementTimeouts(unittest.TestCase):
         self.assertEqual(self._run(statement_timeout_s=30), ["SET LOCAL statement_timeout = '30000ms'"])
 
     def test_a_non_number_timeout_is_refused(self):
-        with self.assertRaises((TypeError, ValueError)):
-            self._run(statement_timeout_s="3s; DROP TABLE x")
+        for bad in ("3s; DROP TABLE x", "30", True, None):
+            with self.assertRaises(TypeError, msg=repr(bad)):
+                self._run(statement_timeout_s=bad)
+
+    def test_the_range_is_checked_on_the_seconds_given(self):
+        for bad in (0, -1, 600.0004, float("nan"), float("inf")):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                self._run(statement_timeout_s=bad)
+
+    def test_a_sub_millisecond_timeout_becomes_one_millisecond(self):
+        self.assertEqual(self._run(statement_timeout_s=0.0004), ["SET LOCAL statement_timeout = '1ms'"])
+        self.assertEqual(self._run(statement_timeout_s=600), ["SET LOCAL statement_timeout = '600000ms'"])
 
     def test_main_wires_3s_for_requests_and_30s_for_the_background_refresh(self):
         import main

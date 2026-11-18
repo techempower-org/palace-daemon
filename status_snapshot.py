@@ -9,14 +9,13 @@ it. The counts only need to be roughly current for a status line, so:
   than ``max_age_s``; if it is older than ``ttl_s`` or was invalidated (a mine
   finished), the same request starts ONE background refresh and still returns
   at once;
-- only a request with no usable snapshot (first call, or past ``max_age_s``)
-  waits for the computation, and concurrent such requests share one;
-- past ``max_age_s``, if that synchronous computation fails, the request is
-  answered with the last good snapshot and its true age (``get()`` returns it;
-  the route marks it ``snapshot_stale``) and a background refresh starts:
-  a status endpoint never answers 500 because one query was slow while it
-  holds an answer. Requests queued behind the failed attempt do not each
-  retry it. It raises only when no snapshot was ever computed;
+- only a request with no snapshot at all (the first call) waits for the
+  computation, and concurrent such requests share one; it raises if that fails;
+- past ``max_age_s`` a request makes ONE synchronous attempt (3 s) if no other
+  computation is running; if one is, or the attempt fails, it is answered at
+  once with the last good snapshot and its true age (the route marks it
+  ``snapshot_stale``) and a background refresh starts: a status endpoint never
+  answers 500, and never queues, because a query is slow while it holds an answer;
 - the background refresh may use its own ``refresh_compute`` (main.py gives
   it a 30 s statement timeout; the synchronous path keeps 3 s), since no
   request waits on it.
@@ -44,7 +43,6 @@ class SnapshotCache:
         # the background refresh's computation; no request waits on it, so it may run longer
         self._refresh_compute = refresh_compute if refresh_compute is not None else compute
         self._on_failure = on_failure  # called with the exception of a failed refresh
-        self._failed_at = 0.0  # monotonic time the last synchronous computation failed
         self.ttl_s = ttl_s
         self.max_age_s = max_age_s
         self._lock = threading.Lock()  # guards the fields below
@@ -66,7 +64,7 @@ class SnapshotCache:
         self._start_refresh()
 
     def get(self) -> "tuple[dict, float]":
-        """``(payload, age_s)``. Blocks only when no usable snapshot exists.
+        """``(payload, age_s)``. Blocks only when no snapshot exists yet.
 
         Past ``max_age_s`` a failed recomputation answers with the last good snapshot and its
         age (``age_s >= max_age_s`` tells the caller it is stale); it raises only when there is none.
@@ -78,31 +76,52 @@ class SnapshotCache:
             if stale or now - at >= self.ttl_s:
                 self._start_refresh()
             return value, now - at
+        if value is not None:
+            return self._get_expired()
+        # No snapshot yet: wait, and share the first computation with concurrent callers.
         with self._sync:
             with self._lock:
-                # Another caller may have filled it while this one waited.
-                if self._value is not None and time.monotonic() - self._at < self.max_age_s:
+                if self._value is not None:  # another caller filled it while this one waited
                     return self._value, time.monotonic() - self._at
-                # Or tried and failed while this one waited: do not queue another attempt.
-                if self._value is not None and self._failed_at > now:
+            gen = self._generation()
+            value = self._compute()
+            self._store(value, gen)
+            return value, 0.0
+
+    def _last(self) -> "tuple[dict, float]":
+        with self._lock:
+            return self._value, time.monotonic() - self._at
+
+    def _get_expired(self) -> "tuple[dict, float]":
+        """Past ``max_age_s`` with a last good snapshot: one synchronous attempt, never a wait.
+
+        If any computation (a background refresh, or another request's attempt) holds the slot,
+        answer at once with the last good snapshot instead of queueing behind it: a background
+        refresh may run up to 2 x 30 s. A failed attempt answers the same way. Either way a
+        background refresh is (re)started, outside the slot."""
+        if not self._sync.acquire(blocking=False):
+            self._start_refresh()
+            return self._last()
+        try:
+            with self._lock:
+                if time.monotonic() - self._at < self.max_age_s:  # refreshed since we looked
                     return self._value, time.monotonic() - self._at
             gen = self._generation()
             try:
                 value = self._compute()
             except Exception as e:
-                with self._lock:
-                    self._failed_at = time.monotonic()
-                    last, last_at = self._value, self._at
-                if last is None:
-                    raise
-                _log.warning("status snapshot recompute failed (%s); serving the last good one, %.0f s old",
-                             type(e).__name__, time.monotonic() - last_at)
-                self._notify_failure(e)
-                # Safe while holding _sync: this only spawns the thread, which takes _sync after us.
-                self._start_refresh()
-                return last, time.monotonic() - last_at
-            self._store(value, gen)
-            return value, 0.0
+                failed = e
+            else:
+                self._store(value, gen)
+                return value, 0.0
+        finally:
+            self._sync.release()
+        last, age = self._last()
+        _log.warning("status snapshot recompute failed (%s); serving the last good one, %.0f s old",
+                     type(failed).__name__, age)
+        self._notify_failure(failed)
+        self._start_refresh()
+        return last, age
 
     def _notify_failure(self, e: Exception) -> None:
         if self._on_failure is not None:
@@ -124,11 +143,18 @@ class SnapshotCache:
             self._stale = gen != self._gen
 
     def _start_refresh(self) -> None:
+        """Best effort: never raises. A thread that cannot start (``can't start new thread``)
+        clears the flag again, so a later request retries instead of refreshes stopping for good."""
         with self._lock:
             if self._refreshing:
                 return
             self._refreshing = True
-        threading.Thread(target=self._refresh, name="status-snapshot", daemon=True).start()
+        try:
+            threading.Thread(target=self._refresh, name="status-snapshot", daemon=True).start()
+        except Exception as e:
+            with self._lock:
+                self._refreshing = False
+            _log.warning("status snapshot refresh could not start (%s)", type(e).__name__)
 
     def _refresh(self) -> None:
         try:
