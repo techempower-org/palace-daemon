@@ -43,7 +43,14 @@ _CANCEL = "canceling statement due to statement timeout"
 # a record header: "2026-11-18 22:46:40.123 UTC [77] ERROR:  message"
 _HEAD = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? \S+ \[(\d+)\] ([A-Z]+):\s*(.*)$")
 _STAMP = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d")
-_LITERAL = re.compile(r"'(?:[^']|'')*'")
+# literals, masked before classifying: dollar-quoted ($$…$$, $tag$…$tag$; not $1), escape strings
+# (E'…' with backslash escapes), then standard strings ('…' with '' doubling)
+_LITERAL = re.compile(
+    r"\$([A-Za-z_][A-Za-z_0-9]*)?\$.*?\$\1\$"
+    r"|(?<![A-Za-z0-9_])[Ee]'(?:[^'\\]|\\.|'')*'"
+    r"|'(?:[^']|'')*'",
+    re.DOTALL,
+)
 _SPACE = re.compile(r"\s+")
 # first match wins; patterns see one statement, whitespace collapsed, quoted literals removed
 KINDS = (
@@ -83,22 +90,30 @@ def records(log: list[str]) -> list[tuple[str, str, str]]:
     return [(p, lvl, msg) for p, lvl, msg in out]
 
 
+_SAME_ERROR = ("DETAIL", "HINT", "CONTEXT", "QUERY", "LOCATION")  # parts of one error report
+
+
 def cancellations(log: list[str]) -> Counter:
-    """Kinds of the statements cancelled in ``log``, each from the next STATEMENT record of its own backend."""
-    recs = records(log)
+    """Kinds of the statements cancelled in ``log``, each from its own backend's STATEMENT record. One pass,
+    no window: a cancellation stays pending per backend pid until that backend's STATEMENT (its kind), or
+    any other record of that backend that is not part of the same error report (``unknown``)."""
     out: Counter = Counter()
-    for i, (pid, lvl, msg) in enumerate(recs):
-        if lvl != "ERROR" or msg.strip() != _CANCEL:
-            continue
-        code = "unknown"
-        for pid2, lvl2, msg2 in recs[i + 1:i + 200]:
-            if pid2 != pid:
+    pending: dict[str, int] = {}
+    for pid, lvl, msg in records(log):
+        if pid in pending:
+            if lvl == "STATEMENT":
+                out[kind(msg)] += 1
+                pending[pid] -= 1
+                if not pending[pid]:
+                    del pending[pid]
                 continue
-            if lvl2 == "STATEMENT":
-                code = kind(msg2)
-            if lvl2 in ("STATEMENT", "ERROR", "LOG", "FATAL"):
-                break  # this backend's next record after the error: its statement, or none was logged
-        out[code] += 1
+            if lvl not in _SAME_ERROR:
+                out["unknown"] += pending.pop(pid)
+        if lvl == "ERROR" and msg.strip() == _CANCEL:
+            pending[pid] = pending.get(pid, 0) + 1
+    out["unknown"] += sum(pending.values())
+    if not out["unknown"]:
+        del out["unknown"]
     return out
 
 

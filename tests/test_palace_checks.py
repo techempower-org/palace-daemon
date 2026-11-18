@@ -1262,6 +1262,28 @@ class PgTimeouts(unittest.TestCase):
         long = ["SELECT"] + [f"  col{i}," for i in range(80)] + ["  array_agg(DISTINCT wing ORDER BY wing)", "FROM g"]
         self.assertEqual(pgt.cancellations(_pg_log(long))["graph-room-aggregate"], 1)
 
+    def test_pairing_has_no_window(self):
+        a = "2026-11-18 22:46:40.100 UTC [101] "
+        log = [a + "ERROR:  canceling statement due to statement timeout"]
+        log += [f"2026-11-18 22:46:40.200 UTC [{300 + i}] LOG:  connection received" for i in range(500)]
+        log += [a + "DETAIL:  while scanning", a + "STATEMENT:  " + self.META]
+        self.assertEqual(dict(pgt.cancellations(log)), {"metadata-lookup": 1})
+
+    def test_a_backend_that_moves_on_without_a_statement_is_unknown_once(self):
+        a = "2026-11-18 22:46:40.100 UTC [101] "
+        log = [a + "ERROR:  canceling statement due to statement timeout", a + "LOG:  duration: 1 ms",
+               a + "STATEMENT:  " + self.META]
+        self.assertEqual(dict(pgt.cancellations(log)), {"unknown": 1})
+
+    def test_escape_and_dollar_quoted_literals_are_masked(self):
+        esc = "SELECT E'can\\'t metadata->>' AS x"
+        dollar = "SELECT $body$ metadata->> <=> cypher( $body$ AS y"
+        cyph = "SELECT * FROM cypher('mempalace_kg', $$ MATCH (n) WHERE n.x = 'metadata->>' RETURN n $$) AS (n agtype)"
+        c = pgt.cancellations(_pg_log(esc, dollar, cyph, self.PAGE))
+        self.assertEqual(c["other"], 2)
+        self.assertEqual(c["kg-cypher"], 1)
+        self.assertEqual(c["wing-page"], 1)  # $1 / $2 parameters are not dollar quotes
+
     def test_thresholds(self):
         self.assertEqual(pgt.assess(_pg_log())[0], "ok")
         self.assertEqual(pgt.assess(_pg_log(*[self.WING] * 10))[0], "ok")
