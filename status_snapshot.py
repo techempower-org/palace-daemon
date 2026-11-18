@@ -41,16 +41,17 @@ class SnapshotUnavailable(RuntimeError):
 
 
 def _error_text(e: BaseException) -> str:
-    """``Type: message``, at most 300 characters; an exception whose ``__str__`` raises gets its
-    type name alone, so recording a failure can never itself fail."""
+    """``Type: message``, at most 300 characters. Total: whatever the exception (or its class, or
+    its metaclass) does when read or formatted, this returns a str and never raises, so neither
+    recording a failure nor a fallback's warning can turn a last good snapshot into a 500."""
     try:
-        name = type(e).__name__
+        return f"{type(e).__name__}: {e}"[:300]
     except Exception:  # noqa: BLE001
-        name = "Exception"
+        pass
     try:
-        return f"{name}: {e}"[:300]
+        return f"{type(e).__name__} (unprintable)"[:300]
     except Exception:  # noqa: BLE001
-        return f"{name} (unprintable)"[:300]
+        return "Exception (unprintable)"
 
 
 def _quiet_warning(msg: str, *args) -> None:

@@ -36,6 +36,24 @@ class _Nameless(Exception, metaclass=_NamelessMeta):
     """An exception whose class name cannot even be read."""
 
 
+class _BadName:
+    def __str__(self):
+        raise ValueError("cannot format name")
+
+    __format__ = lambda self, spec: (_ for _ in ()).throw(ValueError("cannot format name"))  # noqa: E731
+
+
+class _BadNameMeta(type):
+    def __getattribute__(cls, name):
+        if name == "__name__":
+            return _BadName()
+        return super().__getattribute__(name)
+
+
+class _BadlyNamed(Exception, metaclass=_BadNameMeta):
+    """An exception whose class name reads fine but cannot be formatted."""
+
+
 class _Compute:
     def __init__(self, delay=0.0, fail_after=None, exc=None):
         self.calls = 0
@@ -397,6 +415,28 @@ class TestSnapshotCache(unittest.TestCase):
         cache = status_snapshot.SnapshotCache(c, ttl_s=0.0)
         cache.get()
         with patch.object(threading.Thread, "start", side_effect=_Nameless()):
+            self.assertEqual(cache.get()[0], {"n": 1})
+        self.assertFalse(cache._refreshing)
+
+    def test_error_text_is_total(self):
+        for e in (RuntimeError("x"), _Unprintable(), _Nameless(), _BadlyNamed()):
+            self.assertIsInstance(status_snapshot._error_text(e), str)
+        self.assertEqual(status_snapshot._error_text(_BadlyNamed()), "Exception (unprintable)")
+
+    def test_a_failure_whose_type_name_cannot_be_formatted_still_serves_the_last_good(self):
+        c = _Compute(fail_after=1, exc=_BadlyNamed)
+        cache = status_snapshot.SnapshotCache(c, ttl_s=60, max_age_s=0.01)
+        cache.get()
+        time.sleep(0.03)
+        with patch.object(status_snapshot._log, "exception"):
+            self.assertEqual(cache.get()[0], {"n": 1})
+            _settle(cache)
+
+    def test_a_thread_start_error_whose_type_name_cannot_be_formatted_neither_raises_nor_sticks(self):
+        c = _Compute()
+        cache = status_snapshot.SnapshotCache(c, ttl_s=0.0)
+        cache.get()
+        with patch.object(threading.Thread, "start", side_effect=_BadlyNamed()):
             self.assertEqual(cache.get()[0], {"n": 1})
         self.assertFalse(cache._refreshing)
 
