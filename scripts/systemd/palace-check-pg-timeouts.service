@@ -5,7 +5,6 @@ Documentation=file://%h/Projects/palace-daemon/docs/CHECKS.md
 [Service]
 Type=oneshot
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-EnvironmentFile=%h/.config/palace-checks/env
 ExecStart=%h/.local/share/palace-daemon/venv/bin/python %h/Projects/palace-daemon/scripts/checks/pg_timeouts.py
 Nice=10
 IOSchedulingClass=idle
@@ -13,5 +12,6 @@ TimeoutStartSec=5min
 NoNewPrivileges=yes
 UMask=0077
 LimitCORE=0
-# No read-only filesystem here: the probe fetches the needles through bw, which writes its own
-# data file under ~/.config/Bitwarden CLI.
+# Reads the database container log through the docker socket (the user is in the docker group) and writes
+# only its line under ~/.local/state/checks (checklib). A failed docker call is a fail line, never a zero.
+# No secrets file is loaded: thresholds come from PG_TIMEOUTS_* in this unit's environment if ever needed.

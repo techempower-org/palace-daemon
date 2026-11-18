@@ -6,16 +6,22 @@ The database role's ``statement_timeout`` (30 s) cancels a query that runs too l
 an error or a stale answer. Nothing counted them: on 2026-11-18 JP asked "why did the palace time out?"
 and the answer was 1,289 cancellations in 24 h (810 the status per-wing count, before a VACUUM; then the
 room-graph aggregate, 100 s against 30 s). This check reads the database container's log for the last
-``WINDOW_MIN`` minutes and counts ``canceling statement due to statement timeout``, by kind.
+``WINDOW_MIN`` minutes and counts the ``ERROR:  canceling statement due to statement timeout`` records,
+by kind. It is a sampled rolling hour (the timer runs hourly without a random delay), a rate, not an
+exact ledger: a record that falls between two reads by a late start is not counted.
 
-Kinds are fixed codes matched on the statement that follows each cancellation (``status-wing-count``,
-``graph-room-aggregate``, ``metadata-lookup`` …, else ``other``). No statement text, parameter or value
-ever reaches the line: a statement can carry drawer text.
+Parsing works on log RECORDS, not lines: a record starts with the ``log_line_prefix`` stamp
+(``YYYY-MM-DD HH:MM:SS.mmm TZ [pid] LEVEL:``) and continues on unstamped lines. Only an ERROR record whose
+message is the cancellation counts (the phrase inside a statement, a DETAIL or drawer text does not). Its
+kind comes from the next STATEMENT record of the SAME backend pid. Kinds are fixed codes matched on that
+statement with whitespace collapsed and quoted literals removed (``status-wing-count``,
+``graph-room-aggregate``, ``metadata-lookup`` …, else ``other``; ``unknown`` when no statement was logged).
+No statement text, parameter or value ever reaches the line: a statement can carry drawer text.
 
-- **fail**: the log could not be read, or at least ``FAIL_PER_H`` cancellations.
-- **warn**: more than ``OK_PER_H`` cancellations.
+- **fail**: the log could not be read, the thresholds are invalid, or at least ``FAIL_PER_H`` cancellations.
+- **warn**: more than ``OK_PER_H`` cancellations, or a window with no record at all (postgres logs a
+  checkpoint every few minutes, so an empty window is blind).
 - **ok**: at most ``OK_PER_H``.
-A log window with no line at all is blind (postgres logs a checkpoint every few minutes): warn.
 """
 
 from __future__ import annotations
@@ -32,68 +38,90 @@ from checklib import emit, line, run
 
 NAME = "palace-pg-timeouts"
 WINDOW_MIN = 60
-OK_PER_H = int(os.environ.get("PG_TIMEOUTS_OK_PER_H", "10"))
-FAIL_PER_H = int(os.environ.get("PG_TIMEOUTS_FAIL_PER_H", "60"))
 CONTAINER = os.environ.get("PG_TIMEOUTS_CONTAINER", "mempalace-db")
 _CANCEL = "canceling statement due to statement timeout"
+# a record header: "2026-11-18 22:46:40.123 UTC [77] ERROR:  message"
+_HEAD = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? \S+ \[(\d+)\] ([A-Z]+):\s*(.*)$")
 _STAMP = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d")
-# first match wins; patterns see the statement joined onto one line
+_LITERAL = re.compile(r"'(?:[^']|'')*'")
+_SPACE = re.compile(r"\s+")
+# first match wins; patterns see one statement, whitespace collapsed, quoted literals removed
 KINDS = (
     ("status-wing-count", re.compile(r"SELECT wing, count\(\*\) FROM mempalace_drawers GROUP BY wing", re.IGNORECASE)),
     ("status-room-count", re.compile(r"SELECT room, count\(\*\) FROM mempalace_drawers WHERE room", re.IGNORECASE)),
+    ("drawer-insert", re.compile(r"^INSERT INTO", re.IGNORECASE)),
     ("graph-room-aggregate", re.compile(r"array_agg\(DISTINCT wing", re.IGNORECASE)),
     ("kg-count", re.compile(r'count\(\*\) FROM [\w"]+\."(RELATION|Entity|MENTIONS)"', re.IGNORECASE)),
     ("kg-cypher", re.compile(r"\bcypher\(", re.IGNORECASE)),
-    ("drawer-insert", re.compile(r"^\s*INSERT INTO", re.IGNORECASE)),
     ("keyword-search", re.compile(r"ts_rank_cd|plainto_tsquery", re.IGNORECASE)),
     ("vector-search", re.compile(r"<=>", re.IGNORECASE)),
     ("metadata-lookup", re.compile(r"metadata->>", re.IGNORECASE)),
     ("wing-page", re.compile(r'WHERE \(*"?wing"? = \$\d', re.IGNORECASE)),
     ("drawer-count", re.compile(r"COUNT\(\*\) FROM \"?mempalace_drawers", re.IGNORECASE)),
-    ("schema-change", re.compile(r"^\s*ALTER TABLE", re.IGNORECASE)),
+    ("schema-change", re.compile(r"^ALTER TABLE", re.IGNORECASE)),
 )
 
 
 def kind(statement: str) -> str:
+    s = _SPACE.sub(" ", _LITERAL.sub("?", statement)).strip()
+    s = re.sub(r"\( ", "(", s)  # "count( *)" wrapped across lines
     for code, rx in KINDS:
-        if rx.search(statement):
+        if rx.search(s):
             return code
     return "other"
 
 
+def records(log: list[str]) -> list[tuple[str, str, str]]:
+    """``(pid, level, message)`` per record; unstamped lines continue the record before them."""
+    out: list[list[str]] = []
+    for row in log:
+        m = _HEAD.match(row)
+        if m:
+            out.append([m.group(1), m.group(2), m.group(3)])
+        elif out and not _STAMP.match(row):
+            out[-1][2] += " " + row.strip()
+    return [(p, lvl, msg) for p, lvl, msg in out]
+
+
 def cancellations(log: list[str]) -> Counter:
-    """Kinds of the statements cancelled in ``log``: each cancellation's following ``STATEMENT:`` line,
-    plus its continuation lines (a multi-line statement), up to the next stamped line."""
+    """Kinds of the statements cancelled in ``log``, each from the next STATEMENT record of its own backend."""
+    recs = records(log)
     out: Counter = Counter()
-    i = 0
-    while i < len(log):
-        if _CANCEL in log[i]:
-            stmt, j = "", i + 1
-            while j < len(log) and j <= i + 3 and "STATEMENT:" not in log[j]:
-                j += 1
-            if j < len(log) and "STATEMENT:" in log[j]:
-                stmt = log[j].split("STATEMENT:", 1)[1]
-                k = j + 1
-                while k < len(log) and not _STAMP.match(log[k]) and k < j + 40:
-                    stmt += " " + log[k].strip()
-                    k += 1
-            out[kind(stmt) if stmt.strip() else "unknown"] += 1
-        i += 1
+    for i, (pid, lvl, msg) in enumerate(recs):
+        if lvl != "ERROR" or msg.strip() != _CANCEL:
+            continue
+        code = "unknown"
+        for pid2, lvl2, msg2 in recs[i + 1:i + 200]:
+            if pid2 != pid:
+                continue
+            if lvl2 == "STATEMENT":
+                code = kind(msg2)
+            if lvl2 in ("STATEMENT", "ERROR", "LOG", "FATAL"):
+                break  # this backend's next record after the error: its statement, or none was logged
+        out[code] += 1
     return out
 
 
-def assess(log: list[str] | None) -> tuple[str, str]:
+def thresholds() -> tuple[int, int]:
+    ok = int(os.environ.get("PG_TIMEOUTS_OK_PER_H", "10"))
+    fail = int(os.environ.get("PG_TIMEOUTS_FAIL_PER_H", "60"))
+    if not 0 <= ok < fail:
+        raise ValueError("need 0 <= PG_TIMEOUTS_OK_PER_H < PG_TIMEOUTS_FAIL_PER_H")
+    return ok, fail
+
+
+def assess(log: list[str] | None, ok_per_h: int = 10, fail_per_h: int = 60) -> tuple[str, str]:
     if log is None:
-        return "fail", f"the {CONTAINER} log could not be read"
-    if not log:
-        return "warn", f"the {CONTAINER} log returned 0 lines in {WINDOW_MIN} min (blind?)"
+        return "fail", "the database container log could not be read"
+    if not records(log):
+        return "warn", f"the database container log has 0 records in {WINDOW_MIN} min (blind?)"
     c = cancellations(log)
     n = sum(c.values())
     top = ", ".join(f"{k}×{v}" for k, v in c.most_common(5)) or "none"
     fact = f"{n} statement timeout(s) in the last {WINDOW_MIN} min ({top})"
-    if n >= FAIL_PER_H:
+    if n >= fail_per_h:
         return "fail", fact
-    if n > OK_PER_H:
+    if n > ok_per_h:
         return "warn", fact
     return "ok", fact
 
@@ -103,16 +131,21 @@ LOG_CMD = ["docker", "logs", "--since", f"{WINDOW_MIN}m", CONTAINER]
 
 def _log() -> list[str] | None:
     try:
-        out = subprocess.run(LOG_CMD, capture_output=True, text=True, errors="replace", timeout=120, check=False)
+        # postgres logs to stderr; merge the streams in arrival order
+        out = subprocess.run(LOG_CMD, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                             errors="replace", timeout=120, check=False)
     except (OSError, subprocess.SubprocessError):
         return None
-    if out.returncode != 0:
-        return None
-    return (out.stdout + out.stderr).splitlines()  # postgres writes its log to stderr
+    return out.stdout.splitlines() if out.returncode == 0 else None
 
 
 def body() -> None:
-    state, fact = assess(_log())
+    try:
+        ok_per_h, fail_per_h = thresholds()
+    except ValueError:
+        emit(NAME, line(NAME, "fail", "invalid thresholds (PG_TIMEOUTS_OK_PER_H / _FAIL_PER_H)"))
+        return
+    state, fact = assess(_log(), ok_per_h, fail_per_h)
     emit(NAME, line(NAME, state, fact))
 
 

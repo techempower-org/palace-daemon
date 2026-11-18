@@ -1196,19 +1196,21 @@ class PalaceSecretsClassify(unittest.TestCase):
             self.assertEqual(pclass.main([]), 22)
 
 
-def _pg_log(*statements, stamp="2026-11-18 22:46:40.123 UTC [77] "):
-    """A fictional postgres log: a checkpoint line, then one cancellation per statement (a list = lines)."""
-    out = [stamp + "LOG:  checkpoint starting: time"]
+def _pg_log(*statements, pid=77, t="22:46:40.123"):
+    """A fictional postgres log: a checkpoint record, then per statement an ERROR (cancellation) record and its
+    STATEMENT record; a statement given as a list spans continuation lines."""
+    head = f"2026-11-18 {t} UTC [{pid}] "
+    out = ["2026-11-18 22:40:00.000 UTC [33] LOG:  checkpoint starting: time"]
     for st in statements:
         lines = st if isinstance(st, list) else [st]
-        out.append(stamp + "ERROR:  canceling statement due to statement timeout")
-        out.append(stamp + "STATEMENT:  " + lines[0])
+        out.append(head + "ERROR:  canceling statement due to statement timeout")
+        out.append(head + "STATEMENT:  " + lines[0])
         out.extend("\t" + x for x in lines[1:])
     return out
 
 
 class PgTimeouts(unittest.TestCase):
-    """palace-pg-timeouts: cancellations by fixed kind code; never statement text."""
+    """palace-pg-timeouts: cancellation RECORDS by fixed kind code, paired by backend pid; never statement text."""
 
     WING = "SELECT wing, count(*) FROM mempalace_drawers GROUP BY wing ORDER BY count(*) DESC"
     GRAPH = ["", "SELECT", "room,", "array_agg(DISTINCT wing ORDER BY wing) AS wings,", "FROM g GROUP BY room"]
@@ -1223,18 +1225,67 @@ class PgTimeouts(unittest.TestCase):
         self.assertEqual(c["wing-page"], 2)
         self.assertEqual(sum(c.values()), 5)
 
+    def test_the_phrase_inside_a_statement_or_detail_is_not_a_cancellation(self):
+        log = _pg_log("SELECT 'canceling statement due to statement timeout'")
+        log.append("2026-11-18 22:46:41.000 UTC [77] DETAIL:  parameters: $1 = 'canceling statement due to statement timeout'")
+        log.append("\tcanceling statement due to statement timeout")  # a continuation line of drawer text
+        self.assertEqual(sum(pgt.cancellations(log).values()), 1)
+
+    def test_statements_pair_with_their_own_backend(self):
+        a = "2026-11-18 22:46:40.100 UTC [101] "
+        b = "2026-11-18 22:46:40.100 UTC [202] "
+        log = [
+            a + "ERROR:  canceling statement due to statement timeout",
+            b + "ERROR:  canceling statement due to statement timeout",
+            b + "STATEMENT:  " + self.WING,
+            a + "STATEMENT:  " + self.META,
+        ]
+        c = pgt.cancellations(log)
+        self.assertEqual(c["status-wing-count"], 1)
+        self.assertEqual(c["metadata-lookup"], 1)
+
+    def test_a_cancellation_without_a_statement_is_unknown(self):
+        log = ["2026-11-18 22:46:40.100 UTC [5] ERROR:  canceling statement due to statement timeout",
+               "2026-11-18 22:46:41.100 UTC [5] LOG:  disconnection: session time"]
+        self.assertEqual(pgt.cancellations(log)["unknown"], 1)
+
+    def test_wrapped_sql_and_misleading_literals(self):
+        wrapped = ["SELECT wing,", "   count(*)   FROM   mempalace_drawers", "GROUP   BY wing"]
+        insert = "INSERT INTO \"mempalace_drawers\" (id, document) VALUES ($1, 'array_agg(DISTINCT wing text')"
+        literal_only = "SELECT 1 WHERE 'x' = 'metadata->> cypher( <=>'"
+        c = pgt.cancellations(_pg_log(wrapped, insert, literal_only))
+        self.assertEqual(c["status-wing-count"], 1)
+        self.assertEqual(c["drawer-insert"], 1)
+        self.assertEqual(c["other"], 1)
+
+    def test_a_long_statement_is_not_truncated(self):
+        long = ["SELECT"] + [f"  col{i}," for i in range(80)] + ["  array_agg(DISTINCT wing ORDER BY wing)", "FROM g"]
+        self.assertEqual(pgt.cancellations(_pg_log(long))["graph-room-aggregate"], 1)
+
     def test_thresholds(self):
         self.assertEqual(pgt.assess(_pg_log())[0], "ok")
-        self.assertEqual(pgt.assess(_pg_log(*[self.WING] * pgt.OK_PER_H))[0], "ok")
-        self.assertEqual(pgt.assess(_pg_log(*[self.WING] * (pgt.OK_PER_H + 1)))[0], "warn")
-        state, fact = pgt.assess(_pg_log(*[self.WING] * pgt.FAIL_PER_H))
+        self.assertEqual(pgt.assess(_pg_log(*[self.WING] * 10))[0], "ok")
+        self.assertEqual(pgt.assess(_pg_log(*[self.WING] * 11))[0], "warn")
+        state, fact = pgt.assess(_pg_log(*[self.WING] * 60))
         self.assertEqual(state, "fail")
-        self.assertIn(f"{pgt.FAIL_PER_H} statement timeout(s)", fact)
+        self.assertIn("60 statement timeout(s)", fact)
         self.assertRegex(checklib.line(pgt.NAME, state, fact), SHAPE)
+        self.assertEqual(pgt.assess(_pg_log(self.WING, self.WING), ok_per_h=0, fail_per_h=2)[0], "fail")
+
+    def test_invalid_thresholds_are_a_fail_line_not_a_crash(self):
+        for ok, fail in (("x", "60"), ("-1", "60"), ("10", "10"), ("20", "5")):
+            with mock.patch.dict(os.environ, {"PG_TIMEOUTS_OK_PER_H": ok, "PG_TIMEOUTS_FAIL_PER_H": fail}):
+                with self.assertRaises(ValueError):
+                    pgt.thresholds()
+                with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"PALACE_CHECKS_DIR": d}), \
+                        contextlib.redirect_stdout(io.StringIO()) as out:
+                    self.assertEqual(pgt.run(pgt.NAME, pgt.body), 0)
+                self.assertIn("fail · invalid thresholds", out.getvalue())
 
     def test_unreadable_is_fail_and_an_empty_window_is_blind_warn(self):
         self.assertEqual(pgt.assess(None)[0], "fail")
         self.assertEqual(pgt.assess([])[0], "warn")
+        self.assertEqual(pgt.assess(["\tjust a continuation"])[0], "warn")
 
     def test_no_statement_text_or_parameter_reaches_the_line(self):
         secret = "plainlettersecretvalue"
