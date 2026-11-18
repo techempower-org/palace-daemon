@@ -37,6 +37,7 @@ gs = _load("gs_auth")
 needles = _load("redact_needles")
 psec = _load("palace_secrets")
 pclass = _load("palace_secrets_classify")
+pgt = _load("pg_timeouts")
 
 NOW = dt.datetime(2026, 11, 15, 9, 0, tzinfo=dt.timezone(dt.timedelta(hours=-8)))
 SHAPE = r"^CHECK [a-z-]+ (ok|warn|fail) · .+ · .+$"
@@ -1193,3 +1194,58 @@ class PalaceSecretsClassify(unittest.TestCase):
     def test_usage_without_a_wing(self):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(pclass.main([]), 22)
+
+
+def _pg_log(*statements, stamp="2026-11-18 22:46:40.123 UTC [77] "):
+    """A fictional postgres log: a checkpoint line, then one cancellation per statement (a list = lines)."""
+    out = [stamp + "LOG:  checkpoint starting: time"]
+    for st in statements:
+        lines = st if isinstance(st, list) else [st]
+        out.append(stamp + "ERROR:  canceling statement due to statement timeout")
+        out.append(stamp + "STATEMENT:  " + lines[0])
+        out.extend("\t" + x for x in lines[1:])
+    return out
+
+
+class PgTimeouts(unittest.TestCase):
+    """palace-pg-timeouts: cancellations by fixed kind code; never statement text."""
+
+    WING = "SELECT wing, count(*) FROM mempalace_drawers GROUP BY wing ORDER BY count(*) DESC"
+    GRAPH = ["", "SELECT", "room,", "array_agg(DISTINCT wing ORDER BY wing) AS wings,", "FROM g GROUP BY room"]
+    META = "SELECT id, NULL::text, wing, room, metadata FROM \"mempalace_drawers\" WHERE (metadata->>$1 = $2) ORDER BY id LIMIT $3"
+    PAGE = "SELECT id, document, wing, room, metadata FROM \"mempalace_drawers\" WHERE ((\"wing\" = $1) AND (\"room\" = $2)) ORDER BY id LIMIT $3"
+
+    def test_kinds_are_counted_including_a_multi_line_statement(self):
+        c = pgt.cancellations(_pg_log(self.WING, self.GRAPH, self.META, self.PAGE, self.PAGE))
+        self.assertEqual(c["status-wing-count"], 1)
+        self.assertEqual(c["graph-room-aggregate"], 1)
+        self.assertEqual(c["metadata-lookup"], 1)
+        self.assertEqual(c["wing-page"], 2)
+        self.assertEqual(sum(c.values()), 5)
+
+    def test_thresholds(self):
+        self.assertEqual(pgt.assess(_pg_log())[0], "ok")
+        self.assertEqual(pgt.assess(_pg_log(*[self.WING] * pgt.OK_PER_H))[0], "ok")
+        self.assertEqual(pgt.assess(_pg_log(*[self.WING] * (pgt.OK_PER_H + 1)))[0], "warn")
+        state, fact = pgt.assess(_pg_log(*[self.WING] * pgt.FAIL_PER_H))
+        self.assertEqual(state, "fail")
+        self.assertIn(f"{pgt.FAIL_PER_H} statement timeout(s)", fact)
+        self.assertRegex(checklib.line(pgt.NAME, state, fact), SHAPE)
+
+    def test_unreadable_is_fail_and_an_empty_window_is_blind_warn(self):
+        self.assertEqual(pgt.assess(None)[0], "fail")
+        self.assertEqual(pgt.assess([])[0], "warn")
+
+    def test_no_statement_text_or_parameter_reaches_the_line(self):
+        secret = "plainlettersecretvalue"
+        st = f"SELECT count(*) FROM mempalace_drawers WHERE wing=$1 AND document ~ '{secret}'"
+        log = _pg_log(st, f"UPDATE x SET y = '{secret}'")
+        log.append("2026-11-18 22:46:40.123 UTC [77] DETAIL:  parameters: $1 = '" + secret + "'")
+        state, fact = pgt.assess(log)
+        self.assertNotIn(secret, fact)
+        self.assertNotIn("SELECT", fact)
+        self.assertIn("2 statement timeout(s)", fact)
+
+    def test_reads_the_container_log_for_the_window(self):
+        self.assertEqual(pgt.LOG_CMD[:2], ["docker", "logs"])
+        self.assertIn(f"{pgt.WINDOW_MIN}m", pgt.LOG_CMD)

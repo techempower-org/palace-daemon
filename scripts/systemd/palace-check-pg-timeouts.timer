@@ -1,0 +1,10 @@
+[Unit]
+Description=palace lane check: postgres statement timeouts in the last hour, by kind (hourly)
+
+[Timer]
+OnCalendar=*:07
+RandomizedDelaySec=30
+Persistent=true
+
+[Install]
+WantedBy=timers.target
