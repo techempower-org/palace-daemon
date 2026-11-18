@@ -1283,6 +1283,11 @@ class PgTimeouts(unittest.TestCase):
         self.assertEqual(c["other"], 2)
         self.assertEqual(c["kg-cypher"], 1)
         self.assertEqual(c["wing-page"], 1)  # $1 / $2 parameters are not dollar quotes
+        # bare $$…$$ directly, with nothing misleading in ordinary quotes (xreview r3)
+        self.assertEqual(pgt.kind("SELECT $$ metadata->> $$"), "other")
+        self.assertEqual(pgt.kind("SELECT * FROM cypher('g', $$ array_agg(DISTINCT wing) $$)"), "kg-cypher")
+        self.assertEqual(pgt.kind("SELECT $q$ <=> $q$, $$ ts_rank_cd $$"), "other")
+        self.assertEqual(pgt.kind('SELECT id FROM "mempalace_drawers" WHERE ("wing" = $1) AND id > $2'), "wing-page")
 
     def test_thresholds(self):
         self.assertEqual(pgt.assess(_pg_log())[0], "ok")

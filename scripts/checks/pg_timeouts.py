@@ -46,7 +46,7 @@ _STAMP = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d")
 # literals, masked before classifying: dollar-quoted ($$…$$, $tag$…$tag$; not $1), escape strings
 # (E'…' with backslash escapes), then standard strings ('…' with '' doubling)
 _LITERAL = re.compile(
-    r"\$([A-Za-z_][A-Za-z_0-9]*)?\$.*?\$\1\$"
+    r"(\$(?:[A-Za-z_][A-Za-z_0-9]*)?\$).*?\1"  # the whole delimiter: an unmatched group never backreferences
     r"|(?<![A-Za-z0-9_])[Ee]'(?:[^'\\]|\\.|'')*'"
     r"|'(?:[^']|'')*'",
     re.DOTALL,
