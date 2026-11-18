@@ -272,6 +272,63 @@ class TestSnapshotCache(unittest.TestCase):
         self.assertEqual(len(errors), 4)
         self.assertEqual(c.calls, 1)
 
+    def _cold_callers(self, cache, n):
+        errors, out = [], []
+
+        def call():
+            try:
+                out.append(cache.get())
+            except RuntimeError as e:
+                errors.append(e)
+
+        ts = [threading.Thread(target=call) for _ in range(n)]
+        for t in ts:
+            t.start()
+        return ts, errors, out
+
+    def test_cold_callers_queued_behind_a_failed_warm_share_its_failure(self):
+        sync = _Compute()
+        bg = _Compute(fail_after=0)
+        bg.gate = threading.Event()
+        cache = status_snapshot.SnapshotCache(sync, refresh_compute=bg)
+        with patch.object(status_snapshot._log, "exception"):
+            cache.warm()
+            time.sleep(0.05)  # the warm computation holds the slot on the gate
+            ts, errors, out = self._cold_callers(cache, 3)
+            time.sleep(0.1)
+            bg.gate.set()
+            for t in ts:
+                t.join(5)
+            _settle(cache)
+        self.assertEqual((len(errors), out, sync.calls), (3, [], 0))
+        self.assertTrue(all(isinstance(e, status_snapshot.SnapshotUnavailable) for e in errors))
+
+    def test_failure_sharing_does_not_depend_on_the_clock(self):
+        c = _Compute(fail_after=0)
+        c.gate = threading.Event()
+        cache = status_snapshot.SnapshotCache(c)
+        with patch.object(status_snapshot.time, "monotonic", lambda: 1000.0):  # every reading equal
+            ts, errors, _ = self._cold_callers(cache, 4)
+            time.sleep(0.1)
+            c.gate.set()
+            for t in ts:
+                t.join(5)
+        self.assertEqual((len(errors), c.calls), (4, 1))
+
+    def test_each_caller_gets_its_own_exception_and_a_success_clears_the_failure(self):
+        c = _Compute(fail_after=0)
+        c.gate = threading.Event()
+        cache = status_snapshot.SnapshotCache(c)
+        ts, errors, _ = self._cold_callers(cache, 3)
+        time.sleep(0.1)
+        c.gate.set()
+        for t in ts:
+            t.join(5)
+        self.assertEqual(len({id(e) for e in errors}), 3)
+        c.fail_after = None
+        self.assertEqual(cache.get()[0], {"n": 2})
+        self.assertIsNone(cache._last_error)
+
     def test_a_cold_call_after_a_failed_first_computation_tries_again(self):
         c = _Compute(fail_after=0)
         cache = status_snapshot.SnapshotCache(c)
