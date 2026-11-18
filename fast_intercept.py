@@ -34,12 +34,18 @@ import threading
 import time
 
 
-def fast_status_payload() -> dict:
+def fast_status_payload(statement_timeout_s: float = 3) -> dict:
     """Per-wing / per-room counts via direct SQL — no MCP, no AGE, no locks.
 
     Shared between ``GET /status/fast`` and the ``/mcp`` fast-intercept
     path (issue #49); the latter wraps this into the ``tool_status``
     envelope shape, the former returns it as-is.
+
+    ``statement_timeout_s`` bounds each query (default 3 s, for a caller that
+    is waiting); the status snapshot's background refresh passes 30 s, since
+    no request waits on it (2026-11-17: under I/O load the GROUP BY over
+    1.5M drawers outlived 3 s for two hours). It must be a number of seconds
+    in (0, 600]; SET takes no bind parameters, so anything else is refused.
 
     Extracted from main.py per #101 (thirteenth slice). main.py
     re-exports under ``_fast_status_payload`` so existing test patches
@@ -49,6 +55,12 @@ def fast_status_payload() -> dict:
     """
     from postgres import postgres_dsn
     from db_errors import record_db_error
+
+    if isinstance(statement_timeout_s, bool):
+        raise TypeError("statement_timeout_s must be a number of seconds")
+    timeout_ms = int(round(float(statement_timeout_s) * 1000))
+    if not 0 < timeout_ms <= 600_000:
+        raise ValueError(f"statement_timeout_s out of range: {statement_timeout_s!r}")
 
     dsn = postgres_dsn()
     if not dsn:
@@ -70,7 +82,7 @@ def fast_status_payload() -> dict:
     try:
         with conn:
             with conn.cursor() as cur:
-                cur.execute("SET LOCAL statement_timeout = '3s'")
+                cur.execute(f"SET LOCAL statement_timeout = '{timeout_ms}ms'")
                 # The total is the sum of the per-wing groups (GROUP BY keeps
                 # the NULL wing as its own group), so no separate count(*):
                 # each full count costs ~400 ms at 1.3M drawers (2026-11-04).

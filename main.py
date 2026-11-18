@@ -2677,7 +2677,11 @@ app.add_middleware(_instruments.AuthRejectionCounter)
 import status_snapshot as _status_snapshot  # noqa: E402
 
 _STATUS_SNAPSHOT = _status_snapshot.SnapshotCache(
+    # A waiting request keeps the 3 s statement timeout; the background refresh,
+    # which nobody waits on, gets 30 s (2026-11-17: under I/O load every 3 s refresh
+    # timed out for two hours, and /status/fast went 500 everywhere).
     lambda: _fast_status_payload(),
+    refresh_compute=lambda: _fast_status_payload(statement_timeout_s=30),
     # A refresh that fails while a stale snapshot is served still counts as a
     # fast-path failure: it is the same timeout, seen earlier (#323).
     on_failure=lambda e: _instruments.record_fast_failure("status_snapshot", e),
@@ -3363,7 +3367,10 @@ async def status_fast(x_api_key: str | None = Header(default=None)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     if isinstance(payload, dict):
-        payload = {**payload, "snapshot_age_s": round(age, 1)}
+        # Past max_age_s the cache answers with its last good snapshot when a recount fails
+        # (a slow query never makes this endpoint 500); the age and this flag say so.
+        payload = {**payload, "snapshot_age_s": round(age, 1),
+                   "snapshot_stale": age >= _STATUS_SNAPSHOT.max_age_s}
         payload["auth_rejections"] = _instruments.auth_rejection_summary()
         payload["fast_path_timeouts"] = _instruments.fast_failure_summary()
     return payload
