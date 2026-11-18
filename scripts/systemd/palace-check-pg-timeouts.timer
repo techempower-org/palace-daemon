@@ -1,0 +1,11 @@
+[Unit]
+Description=palace lane check: postgres statement timeouts in the last hour, by kind (hourly)
+
+[Timer]
+OnCalendar=*:07
+# no random delay: the check reads a 60-min window, so reads stay ~60 min apart (a sampled rolling hour)
+AccuracySec=1s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
