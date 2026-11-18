@@ -36,6 +36,14 @@ import time
 _log = logging.getLogger("palace-daemon")
 
 
+def _quiet_warning(msg: str, *args) -> None:
+    """Log on a fallback path without letting a failing log handler turn the fallback into a 500."""
+    try:
+        _log.warning(msg, *args)
+    except Exception:  # noqa: BLE001 - a broken handler must not break the answer
+        pass
+
+
 class SnapshotCache:
     def __init__(self, compute, ttl_s: float = 60.0, max_age_s: float = 900.0, on_failure=None,
                  refresh_compute=None):
@@ -43,6 +51,7 @@ class SnapshotCache:
         # the background refresh's computation; no request waits on it, so it may run longer
         self._refresh_compute = refresh_compute if refresh_compute is not None else compute
         self._on_failure = on_failure  # called with the exception of a failed refresh
+        self._cold_failure = (0.0, None)  # (monotonic time, exception) of the last failed first computation
         self.ttl_s = ttl_s
         self.max_age_s = max_age_s
         self._lock = threading.Lock()  # guards the fields below
@@ -78,13 +87,23 @@ class SnapshotCache:
             return value, now - at
         if value is not None:
             return self._get_expired()
-        # No snapshot yet: wait, and share the first computation with concurrent callers.
+        # No snapshot yet: wait, and share the first computation with concurrent callers,
+        # its failure included: a caller that queued behind a failed attempt raises that
+        # failure instead of running another one.
         with self._sync:
             with self._lock:
                 if self._value is not None:  # another caller filled it while this one waited
                     return self._value, time.monotonic() - self._at
+                failed_at, failed = self._cold_failure
+            if failed is not None and failed_at > now:
+                raise failed
             gen = self._generation()
-            value = self._compute()
+            try:
+                value = self._compute()
+            except Exception as e:
+                with self._lock:
+                    self._cold_failure = (time.monotonic(), e)
+                raise
             self._store(value, gen)
             return value, 0.0
 
@@ -117,8 +136,8 @@ class SnapshotCache:
         finally:
             self._sync.release()
         last, age = self._last()
-        _log.warning("status snapshot recompute failed (%s); serving the last good one, %.0f s old",
-                     type(failed).__name__, age)
+        _quiet_warning("status snapshot recompute failed (%s); serving the last good one, %.0f s old",
+                       type(failed).__name__, age)
         self._notify_failure(failed)
         self._start_refresh()
         return last, age
@@ -154,7 +173,7 @@ class SnapshotCache:
         except Exception as e:
             with self._lock:
                 self._refreshing = False
-            _log.warning("status snapshot refresh could not start (%s)", type(e).__name__)
+            _quiet_warning("status snapshot refresh could not start (%s)", type(e).__name__)
 
     def _refresh(self) -> None:
         try:

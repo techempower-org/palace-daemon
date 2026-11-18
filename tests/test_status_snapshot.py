@@ -4,6 +4,7 @@ Run with::
 
     python -m unittest tests.test_status_snapshot -v
 """
+import logging
 import os
 import sys
 import threading
@@ -249,6 +250,54 @@ class TestSnapshotCache(unittest.TestCase):
             self.assertEqual(cache.get()[0], {"n": 1})
         self.assertFalse(cache._refreshing)
 
+    def test_cold_callers_queued_behind_a_failed_first_computation_share_its_failure(self):
+        c = _Compute(fail_after=0)
+        c.gate = threading.Event()
+        cache = status_snapshot.SnapshotCache(c)
+        errors = []
+
+        def call():
+            try:
+                cache.get()
+            except RuntimeError as e:
+                errors.append(e)
+
+        ts = [threading.Thread(target=call) for _ in range(4)]
+        for t in ts:
+            t.start()
+        time.sleep(0.1)  # all four are in get(): one computing, three queued on the slot
+        c.gate.set()
+        for t in ts:
+            t.join(5)
+        self.assertEqual(len(errors), 4)
+        self.assertEqual(c.calls, 1)
+
+    def test_a_cold_call_after_a_failed_first_computation_tries_again(self):
+        c = _Compute(fail_after=0)
+        cache = status_snapshot.SnapshotCache(c)
+        for _ in range(2):
+            with self.assertRaises(RuntimeError):
+                cache.get()
+        self.assertEqual(c.calls, 2)
+
+    def test_a_raising_log_handler_does_not_break_either_fallback(self):
+        class Boom(logging.Handler):
+            def emit(self, record):
+                raise RuntimeError("handler down")
+
+        h = Boom()
+        h.handleError = lambda record: (_ for _ in ()).throw(RuntimeError("handleError too"))
+        status_snapshot._log.addHandler(h)
+        try:
+            c = _Compute(fail_after=1)
+            cache = status_snapshot.SnapshotCache(c, ttl_s=60, max_age_s=0.01)
+            cache.get()
+            time.sleep(0.03)
+            with patch.object(threading.Thread, "start", side_effect=RuntimeError("can't start new thread")):
+                self.assertEqual(cache.get()[0], {"n": 1})
+        finally:
+            status_snapshot._log.removeHandler(h)
+
     def test_the_background_refresh_uses_its_own_compute(self):
         sync = _Compute()
         bg = _Compute()
@@ -361,7 +410,7 @@ class TestStatementTimeouts(unittest.TestCase):
                 self._run(statement_timeout_s=bad)
 
     def test_the_range_is_checked_on_the_seconds_given(self):
-        for bad in (0, -1, 600.0004, float("nan"), float("inf")):
+        for bad in (0, -1, 600.0004, float("nan"), float("inf"), 10**1000):
             with self.assertRaises(ValueError, msg=repr(bad)):
                 self._run(statement_timeout_s=bad)
 

@@ -60,7 +60,9 @@ def fast_status_payload(statement_timeout_s: float = 3) -> dict:
     # Validate the seconds as given, then convert: whole milliseconds, at least 1.
     if isinstance(statement_timeout_s, bool) or not isinstance(statement_timeout_s, (int, float)):
         raise TypeError("statement_timeout_s must be a number of seconds")
-    if not math.isfinite(statement_timeout_s) or not 0 < statement_timeout_s <= 600:
+    # The range first: it also refuses NaN (every comparison is false), inf, and an int too
+    # large for a float, which math.isfinite would raise OverflowError on.
+    if not 0 < statement_timeout_s <= 600 or not math.isfinite(statement_timeout_s):
         raise ValueError(f"statement_timeout_s out of range (0, 600]: {statement_timeout_s!r}")
     timeout_ms = max(1, round(statement_timeout_s * 1000))
 
