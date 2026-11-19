@@ -933,6 +933,10 @@ def _drain_batch_size() -> int:
 # transcript is also "a single file" — the distinction that matters is what
 # the mine costs, and that tracks the mode.
 _DRAIN_SMALL_MODES = frozenset({"projects"})
+# Wings whose mines are small whatever their mode: CHECK palace-secrets' miner control files a two-line
+# transcript into palace_probe and waits for it. Queued behind whole-transcript re-mines it was not filed
+# within its 20 min on 2026-11-18/19, so the check reported "not measured" instead of a result.
+_DRAIN_SMALL_WINGS = frozenset({"palace_probe"})
 
 # A low-priority entry deferred this many passes outranks everything.
 #
@@ -948,6 +952,8 @@ def _drain_entry_priority(entry: dict) -> int:
     if int(entry.get("drain_deferrals", 0) or 0) >= _DRAIN_PRIORITY_ESCAPE_DEFERRALS:
         return 0
     payload = entry.get("payload") or {}
+    if payload.get("wing") in _DRAIN_SMALL_WINGS:
+        return 1
     return 1 if payload.get("mode", "convos") in _DRAIN_SMALL_MODES else 2
 
 

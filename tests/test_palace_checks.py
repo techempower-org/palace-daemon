@@ -1054,6 +1054,33 @@ class PalaceSecrets(unittest.TestCase):
             self.assertEqual(sorted(x.name for x in Path(d).iterdir()), ["new.jsonl"])
 
 
+class PalaceSecretsProbeWait(unittest.TestCase):
+    """A not-measured miner control says what the wait saw at its deadline (counts only)."""
+
+    def _wait(self, rows):
+        conn = mock.MagicMock()
+        with mock.patch.object(psec, "_rows_for", return_value=rows), mock.patch.object(psec.time, "sleep"), \
+                mock.patch.object(psec.time, "time", side_effect=[0, 0, 10**9]):
+            return psec.probe_wait(conn, Path("/p/x.jsonl"), {}, None, deadline=1)
+
+    def test_not_mined(self):
+        state, why = self._wait([])
+        self.assertEqual(state, "not measured")
+        self.assertIn("not mined: 0 drawers", why)
+
+    def test_fewer_chunks_than_chunk_total(self):
+        state, why = self._wait([("d1", "doc", "{}", 2)])
+        self.assertEqual(state, "not measured")
+        self.assertIn("1 of 2 chunk(s) filed", why)
+
+    def test_drawers_without_chunk_total(self):
+        self.assertIn("1 drawer(s) without chunk_total", self._wait([("d1", "doc", "{}", None)])[1])
+
+    def test_no_drawer_text_in_the_reason(self):
+        why = self._wait([("d1", "plainlettersecretvalue", "{}", 3)])[1]
+        self.assertNotIn("plainlettersecretvalue", why)
+
+
 class PalaceSecretsClassify(unittest.TestCase):
     """palace-secrets classify: an encoding observation per hit, never a value (Sen 2026-11-17; xreview r1)."""
 

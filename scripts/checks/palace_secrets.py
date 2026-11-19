@@ -330,6 +330,8 @@ def probe_wait(conn, path: Path, fakes: dict, placeholder, deadline: float) -> t
     """Wait until THIS run's probe has every chunk filed (count == chunk_total, stable across two reads), then
     judge it."""
     seen = None
+    rows: list = []
+    total = 0
     while time.time() < deadline:
         rows = _rows_for(conn, str(path))
         total = max((r[3] or 0 for r in rows), default=0)
@@ -340,7 +342,16 @@ def probe_wait(conn, path: Path, fakes: dict, placeholder, deadline: float) -> t
                 )
             seen = len(rows)
         time.sleep(10)
-    return "not measured", f"probe not filed within {PROBE_WAIT_S // 60} min"
+    return "not measured", f"probe not filed within {PROBE_WAIT_S // 60} min ({wait_state(rows, total)})"
+
+
+def wait_state(rows: list, total: int) -> str:
+    """What the wait saw at its deadline, in counts only: why a probe did not count as filed."""
+    if not rows:
+        return "not mined: 0 drawers"
+    if not total:
+        return f"{len(rows)} drawer(s) without chunk_total"
+    return f"{len(rows)} of {total} chunk(s) filed"
 
 
 def probe_files_cleanup(pdir: Path) -> int:

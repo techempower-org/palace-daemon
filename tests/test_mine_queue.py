@@ -1010,3 +1010,20 @@ class TestSkipUnchangedTranscriptRemines(unittest.IsolatedAsyncioTestCase):
             {"dir": "/definitely/not/here.jsonl", "wing": "w", "mode": "convos"}
         )
         self.assertEqual(await self._drain(), 1)
+
+
+
+class TestProbeWingDrainsFirst(unittest.TestCase):
+    """CHECK palace-secrets' miner control (wing palace_probe) is small: it must not wait behind transcripts."""
+
+    def test_probe_wing_is_small_class_whatever_its_mode(self):
+        probe = {"payload": {"dir": "/s/p.jsonl", "wing": "palace_probe", "mode": "convos"}}
+        transcript = {"payload": {"dir": "/t/a.jsonl", "wing": "jp", "mode": "convos"}}
+        self.assertEqual(main._drain_entry_priority(probe), 1)
+        self.assertEqual(main._drain_entry_priority(transcript), 2)
+
+    def test_the_probe_sorts_ahead_of_earlier_transcripts(self):
+        entries = [("l1", {"payload": {"dir": f"/t/{i}.jsonl", "wing": "jp", "mode": "convos"}}) for i in range(5)]
+        entries.append(("l6", {"payload": {"dir": "/s/p.jsonl", "wing": "palace_probe", "mode": "convos"}}))
+        order = sorted(range(len(entries)), key=lambda i: (main._drain_entry_priority(entries[i][1]), i))
+        self.assertEqual(order[0], 5)
