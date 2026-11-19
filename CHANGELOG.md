@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Changed — *mempalace_drawers gets a (wing, room, id) index: the 45 s room page now takes 0.15 s*
+
+The wing/room page query (`WHERE wing = $1 AND room = $2 ORDER BY id LIMIT n`) walked the primary key and
+filtered row by row. On an 84,629-drawer room it took 45.4 s, past the role's 30 s statement timeout. On
+2026-11-18 at 23:05, `CREATE INDEX CONCURRENTLY mempalace_drawers_wing_room_id_idx ON mempalace_drawers (wing,
+room, id)` was built in 1 min (141 MB), load-guarded, with the building backend in the idle I/O class.
+
+The same page now takes 4.5 ms warm and 146 ms cold. Timeouts of that shape went from 73 in the 48 h before the
+build to 0 in the 12 h after. Rollback is `DROP INDEX CONCURRENTLY`. Runbook, measurements and the shape that is
+still not covered (paging by wing alone): docs/ops/mempalace-drawers-wing-room-id-index.md.
+
 ### Changed — *upstream rboarescu/palace-daemon is archived; this fork is canonical*
 
 Upstream's README marks it **archived on 2026-09-05** ("superseded by upstream MemPalace… kept for reference only;
