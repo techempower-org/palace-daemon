@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Fixed — *the unit arms the hang watchdog and caps malloc arenas*
+
+- **Watchdog:** `palace-daemon.service` sets `WatchdogSec=180` and `NotifyAccess=main`.
+  - `sd_watchdog.watchdog_loop` has pinged `WATCHDOG=1` (after the collection probe on the fast executor) since #101.
+  - The unit never set `WatchdogSec`, though, and `Type=simple` drops notifications without `NotifyAccess`, so a hung daemon stayed "active".
+  - On 2026-11-19 it stayed hung for 7 h.
+- **Malloc arenas:** `MALLOC_ARENA_MAX=2`.
+  - 12 h after a restart at 381 MB, the daemon held 6.8 GB of anonymous memory (RSS + swap).
+  - 4.8 GB of that sat in 131 glibc per-thread 64 MB arenas, on a 24-core host that allows 192.
+  - That growth is what reached `MemoryHigh` the day before.
+- `tests/test_service_unit.py` reads the shipped unit: the watchdog is armed, notifications reach systemd, restart follows an abort, and arenas are capped.
+
 ### Changed — *mempalace_drawers gets a (wing, room, id) index: the 45 s room page now takes 0.15 s*
 
 The wing/room page query (`WHERE wing = $1 AND room = $2 ORDER BY id LIMIT n`) walked the primary key and
