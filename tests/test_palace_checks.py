@@ -1375,13 +1375,40 @@ class PalaceBackup(unittest.TestCase):
         self.assertIn("no dump run finished after the last trigger", fact)
         self.assertIn("wrote no dump", fact)
 
-    def test_a_dump_still_running_soon_after_its_trigger_is_not_a_miss(self):
+    def test_a_dump_still_running_soon_after_its_trigger_warns_never_ok(self):
+        # review r2 (1): a hung backup inside the grace window must not read ok on yesterday's dump
         trig = self.NOW - 1800
         unit = self.unit(ActiveState="active", LastTriggerUSec=f"@{int(trig)}",
                          ExecMainExitTimestamp=f"@{int(trig - 86400 + 600)}")
         state, fact = self._assess([4e9, 4e9, 4e9], unit=unit, newest_mtime=trig - 86400 + 600)
-        self.assertEqual(state, "ok", fact)
-        self.assertIn("dump running", fact)
+        self.assertEqual(state, "warn", fact)
+        self.assertIn("backup still running since", fact)
+
+    def test_the_integrity_mode_judges_the_state_after_its_run(self):
+        # review r2 (2): the run takes up to an hour; the line must use a fresh inventory and unit state
+        before = [("mempalace-20261119.sql.gz", 4e9, self.NOW - 30 * 3600)]
+        after = before + [("mempalace-20261120.sql.gz", 4.1e9, self.NOW - 60)]
+        unit_before = {"Result": "success", "ExecMainStatus": "0", "ActiveState": "inactive",
+                       "LastTriggerUSec": f"@{int(self.NOW - 54 * 3600)}",
+                       "ExecMainExitTimestamp": f"@{int(self.NOW - 54 * 3600 + 600)}"}
+        unit_after = {"Result": "exit-code", "ExecMainStatus": "1", "ActiveState": "inactive",
+                      "LastTriggerUSec": f"@{int(self.NOW - 3600)}",
+                      "ExecMainExitTimestamp": f"@{int(self.NOW - 60)}"}
+        shows = iter([unit_before, {}, unit_after, {}])
+        lines = []
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.dict(os.environ, {"PALACE_CHECKS_DIR": d, "PALACE_BACKUP_DIR": d}), \
+                mock.patch.object(pbk, "dumps", side_effect=[before, after]), \
+                mock.patch.object(pbk, "show", side_effect=lambda *a: dict(next(shows))), \
+                mock.patch.object(pbk, "integrity_run", return_value=None), \
+                mock.patch.object(pbk.subprocess, "run", return_value=mock.Mock(stdout="active\n")), \
+                mock.patch.object(pbk.dt, "datetime", wraps=dt.datetime) as fake_dt, \
+                mock.patch.object(pbk, "emit", side_effect=lambda _n, text: lines.append(text)):
+            fake_dt.now.return_value = dt.datetime.fromtimestamp(self.NOW)
+            pbk.body(True)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("newest 20261120", lines[0])
+        self.assertIn("last run failed", lines[0])
 
     def test_a_timer_that_stopped_triggering(self):
         old = self.NOW - 60 * 3600

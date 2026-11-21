@@ -89,7 +89,7 @@ def schedule(found, now: float, unit: dict, fails: list, warns: list, fact: list
         warns.append(f"the dump timer has not triggered for {since_h:.0f} h")
     running = unit.get("ActiveState") in ("activating", "active", "deactivating")
     if running and since_h <= RUN_GRACE_H:
-        fact.append("dump running")
+        warns.append(f"backup still running since {hhmm(trig)}")   # review r2: never ok on yesterday's dump
         return
     exited = stamp(unit.get("ExecMainExitTimestamp"))
     if exited is None or exited < trig:
@@ -237,9 +237,19 @@ def body(do_integrity: bool) -> None:
     except OSError as exc:
         emit(NAME, line(NAME, "fail", f"backup directory unreadable ({type(exc).__name__})"))
         return
-    unit = show(UNIT, "Result", "ExecMainStatus", "ExecMainExitTimestamp", "ActiveState")
-    unit.update(show(TIMER, "LastTriggerUSec"))
+    def snapshot():
+        u = show(UNIT, "Result", "ExecMainStatus", "ExecMainExitTimestamp", "ActiveState")
+        u.update(show(TIMER, "LastTriggerUSec"))
+        return u
+    unit = snapshot()
     deferred = integrity_run(directory, found, unit, dt.datetime.now().timestamp()) if do_integrity else None
+    if do_integrity:                                   # review r2: the run can take an hour; judge the state now
+        try:
+            found = dumps(directory)
+        except OSError as exc:
+            emit(NAME, line(NAME, "fail", f"backup directory unreadable ({type(exc).__name__})"))
+            return
+        unit = snapshot()
     timer = subprocess.run(["systemctl", "is-active", TIMER], capture_output=True, text=True,
                            timeout=30, check=False).stdout.strip()
     rec = read_integrity()
