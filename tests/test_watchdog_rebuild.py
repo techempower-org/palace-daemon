@@ -94,6 +94,37 @@ class TestWatchdogRebuild(unittest.IsolatedAsyncioTestCase):
             await main._watchdog_loop(180)
         notify.assert_not_called()
 
+    def _two_ticks(self, clock_values):
+        """Run two loop iterations with sd_watchdog's clock reading ``clock_values`` in turn."""
+        calls = {"n": 0}
+
+        async def _sleep(_secs):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                return None
+            raise asyncio.CancelledError()
+
+        return (patch("asyncio.sleep", side_effect=_sleep),
+                patch.object(sd_watchdog, "_clock", side_effect=list(clock_values)))
+
+    async def test_a_rebuild_without_progress_fails_closed(self):
+        # review #345 r5: progress None, or a dict without its timestamps, used to read as "quiet 0 s" and ping
+        # forever; now it counts as quiet since the watchdog first saw the rebuild, and the budget applies
+        budget = sd_watchdog.rebuild_stall_s()
+        for progress in (None, {"beat": 3}, {"beat_at": "soon", "started_at_monotonic": None}):
+            main._repair_state.update(in_progress=True, mode="rebuild", progress=progress)
+            sleep_p, clock_p = self._two_ticks([1000.0, 1000.0, 1000.0 + budget + 61])
+            with sleep_p, clock_p, \
+                 patch.object(main, "_sd_notify") as notify, \
+                 patch.object(sd_watchdog, "self_health", return_value=200):
+                await main._watchdog_loop(180)
+            # first tick: just seen, quiet 0, pings; second tick: past the budget, no ping
+            notify.assert_called_once_with("WATCHDOG=1\n")
+
+    def test_rebuild_quiet_without_any_time_is_infinite(self):
+        self.assertEqual(sd_watchdog.rebuild_quiet_s(None, now=5.0), float("inf"))
+        self.assertEqual(sd_watchdog.rebuild_quiet_s({"beat_at": True}, now=5.0, since=2.0), 3.0)
+
     def test_every_rebuild_line_is_a_heartbeat(self):
         from rebuild_progress import RebuildProgressBuffer, make_rebuild_progress_state
         state = make_rebuild_progress_state()

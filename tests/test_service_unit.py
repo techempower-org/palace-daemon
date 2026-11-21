@@ -60,19 +60,23 @@ class ServiceUnit(unittest.TestCase):
                                 5 * _seconds(_service()["WatchdogSec"]))
 
     def test_the_start_limit_window_holds_every_watchdog_storm(self):
-        # review #345 r3/r4: each abort cycle is a feed bound + WatchdogSec + RestartSec (running 190 s,
-        # startup 790 s, rebuild 1990 s); Burst of the longest must fit inside the window, or the counter never
-        # reaches the burst and that storm never ends.
+        # review #345 r3-r5: Burst of the longest abort cycle must fit inside the window, or the counter never
+        # reaches the burst and that storm never ends. One activation can spend every feed bound in sequence
+        # (a slow start, then a silent rebuild), so the longest cycle is their SUM, plus one tick of detection
+        # lag, plus WatchdogSec + RestartSec: 600 + 1800 + 60 + 180 + 10 = 2650 s.
         cp = configparser.ConfigParser(strict=False, interpolation=None, delimiters=("=",))
         cp.optionxform = str
         cp.read_string(UNIT.read_text())
         svc = _service()
         burst = int(cp["Unit"]["StartLimitBurst"])
         window = _seconds(cp["Unit"]["StartLimitIntervalSec"])
-        base = _seconds(svc["WatchdogSec"]) + _seconds(svc["RestartSec"])
-        cycles = {name: bound + base for name, bound in sd_watchdog.FEED_BOUNDS_S.items()}
-        self.assertEqual(set(cycles), {"running", "startup", "rebuild"})
-        self.assertLess(burst * max(cycles.values()), window, cycles)
+        wdog = _seconds(svc["WatchdogSec"])
+        base = wdog + _seconds(svc["RestartSec"])
+        self.assertEqual(set(sd_watchdog.FEED_BOUNDS_S), {"running", "startup", "rebuild"})
+        longest = sum(sd_watchdog.FEED_BOUNDS_S.values()) + sd_watchdog.watchdog_tick(wdog) + base
+        self.assertLess(burst * longest, window, {"longest_cycle_s": longest, "burst": burst})
+        # the weaker per-bound check, kept as a second guard
+        self.assertLess(burst * (max(sd_watchdog.FEED_BOUNDS_S.values()) + base), window)
 
     def test_every_feed_bound_in_the_module_is_counted(self):
         # a *_MAX_S bound added to sd_watchdog without an entry in FEED_BOUNDS_S would escape the window test

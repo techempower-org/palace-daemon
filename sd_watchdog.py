@@ -131,10 +131,11 @@ def startup_keepalive(interval_secs: int, max_secs: int = STARTUP_FEED_MAX_S,
 # against it (review #345 r4); PALACE_REBUILD_STALL_S can only tighten it.
 REBUILD_STALL_MAX_S = 1800
 
-# Every bound for which this module feeds the watchdog without the request path's /health: an abort cycle is
-# the bound + WatchdogSec + RestartSec, and the unit's start-limit window must hold StartLimitBurst of the
-# longest. tests/test_service_unit.py takes the max over this dict and fails on a *_MAX_S constant missing
-# from it, so a new feed bound cannot land without its window.
+# Every bound for which this module feeds the watchdog without the request path's /health. One activation can
+# spend them in sequence (a slow start, then a rebuild that goes silent), so the longest abort cycle is their
+# SUM + one tick of detection lag + WatchdogSec + RestartSec, and the unit's start-limit window must hold
+# StartLimitBurst of it (review #345 r5). tests/test_service_unit.py asserts that, and fails on a *_MAX_S
+# constant missing from this dict, so a new feed bound cannot land without its window.
 FEED_BOUNDS_S = {"running": 0, "startup": STARTUP_FEED_MAX_S, "rebuild": REBUILD_STALL_MAX_S}
 
 
@@ -150,14 +151,29 @@ def rebuild_stall_s() -> int:
         return REBUILD_STALL_MAX_S
 
 
-def rebuild_quiet_s(progress, now: float | None = None) -> float:
-    """Seconds since the rebuild last printed (its start, before the first line); 0 before progress exists."""
-    if not isinstance(progress, dict):
-        return 0.0
-    last = progress.get("beat_at") or progress.get("started_at_monotonic")
-    if not isinstance(last, (int, float)):
-        return 0.0
-    return max(0.0, (time.monotonic() if now is None else now) - last)
+# The watchdog's clock (a seam for tests: patching time.monotonic itself would stop the event loop's clock).
+_clock = time.monotonic
+
+
+def _stamp(v) -> float | None:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def rebuild_quiet_s(progress, now: float | None = None, since: float | None = None) -> float:
+    """Seconds since the rebuild last printed: its last line, else its own start, else ``since`` (when the
+    watchdog first saw mode=rebuild). Fails closed (review #345 r5): progress that is missing or malformed
+    counts as quiet since the rebuild began, so the stall budget still applies; with no time at all, infinite."""
+    now = _clock() if now is None else now
+    last = None
+    if isinstance(progress, dict):
+        last = _stamp(progress.get("beat_at"))
+        if last is None:
+            last = _stamp(progress.get("started_at_monotonic"))
+    if last is None:
+        last = since
+    if last is None:
+        return float("inf")
+    return max(0.0, now - last)
 
 
 async def watchdog_loop(interval_secs: int) -> None:
@@ -170,6 +186,7 @@ async def watchdog_loop(interval_secs: int) -> None:
     import main  # lazy — preserves patch.object(main, "_sd_notify") and live mutation
     #              of main._repair_state in tests/test_watchdog_rebuild.py.
     tick = watchdog_tick(interval_secs)
+    rebuild_seen_at = None  # when this loop first saw the current rebuild: the fail-closed start (review r5)
     while True:
         try:
             await asyncio.sleep(tick)
@@ -182,7 +199,9 @@ async def watchdog_loop(interval_secs: int) -> None:
         # ping needs both (a) the rebuild printed within rebuild_stall_s(), and (b) the request path answers
         # /repair/status, which reads _repair_state only and never touches the collection.
         if main._repair_state.get("in_progress") and main._repair_state.get("mode") == "rebuild":
-            quiet = rebuild_quiet_s(main._repair_state.get("progress"))
+            if rebuild_seen_at is None:
+                rebuild_seen_at = _clock()
+            quiet = rebuild_quiet_s(main._repair_state.get("progress"), since=rebuild_seen_at)
             if quiet > rebuild_stall_s():
                 main._log.warning("Watchdog: the rebuild printed nothing for %ds: skipping WATCHDOG=1", int(quiet))
                 continue
@@ -193,6 +212,7 @@ async def watchdog_loop(interval_secs: int) -> None:
             else:
                 main._log.warning("Watchdog: /repair/status did not answer during the rebuild: skipping WATCHDOG=1")
             continue
+        rebuild_seen_at = None
         try:
             # /health runs its probes on the FAST pool (#286), so a default pool starved by MCP tool execution does
             # not stop WATCHDOG=1; a stuck loop, listener or fast pool does.
