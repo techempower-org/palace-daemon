@@ -94,9 +94,14 @@ class FastExecutorIsolationTests(unittest.IsolatedAsyncioTestCase):
 
         import sd_watchdog
 
+        # #345: the loop no longer probes the collection itself. It asks this process's own /health over
+        # loopback (self_health), and /health runs its probes on the fast pool, so a starved default pool still
+        # cannot stop WATCHDOG=1. During a rebuild it asks /repair/status, which uses no executor at all.
         src = inspect.getsource(sd_watchdog.watchdog_loop)
-        self.assertIn("_FAST_EXECUTOR", src)
-        self.assertNotIn("run_in_executor(None", src)
+        self.assertIn("self_health(", src)
+        self.assertNotIn("run_in_executor", src)
+        self.assertIn("_FAST_EXECUTOR", inspect.getsource(main.health))
+        self.assertNotIn("run_in_executor", inspect.getsource(main.repair_status))
 
     async def test_the_fast_routes_do_not_use_the_default_executor(self):
         """status_fast / search_fast / health must name the fast pool."""
