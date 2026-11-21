@@ -7,9 +7,10 @@ wedged daemon gets killed by systemd. But a ``mode=rebuild`` repair holds
 (6-9h) operation, so that probe would return None and starve the keepalive —
 SIGABRT-ing the daemon mid-rebuild.
 
-The fix: during ``in_progress + mode=rebuild``, send ``WATCHDOG=1``
-unconditionally and skip the probe entirely. Outside a rebuild, the original
-health-gated behavior is preserved.
+The fix (#135, tightened in review #345 r2): during ``in_progress + mode=rebuild``
+skip the /health probe, but ping only while the rebuild keeps printing (within
+``PALACE_REBUILD_STALL_S``) and ``/repair/status``, which never touches the
+collection, still answers. Outside a rebuild, /health gates the ping.
 
 These drive exactly one loop iteration by stubbing ``asyncio.sleep`` to return
 once and then raise ``CancelledError`` (which the loop catches to exit). No
@@ -60,16 +61,46 @@ class TestWatchdogRebuild(unittest.IsolatedAsyncioTestCase):
         main._repair_state.clear()
         main._repair_state.update(self._orig_repair)
 
-    async def test_rebuild_sends_keepalive_without_probing(self):
+    def _rebuilding(self, quiet_s):
+        import time
         main._repair_state["in_progress"] = True
         main._repair_state["mode"] = "rebuild"
+        main._repair_state["progress"] = {"beat": 7, "beat_at": time.monotonic() - quiet_s,
+                                          "started_at_monotonic": time.monotonic() - 3600}
+
+    async def test_a_progressing_rebuild_pings_without_touching_the_collection(self):
+        self._rebuilding(quiet_s=420)                   # one 5000-drawer batch at ~11/s: a healthy gap
         with patch("asyncio.sleep", side_effect=_one_iteration_sleep()), \
              patch.object(main, "_sd_notify") as notify, \
-             patch.object(sd_watchdog, "self_health") as probe:
-            await main._watchdog_loop(20)
-        # Keepalive fed, probe skipped entirely.
+             patch.object(sd_watchdog, "self_health", return_value=200) as probe:
+            await main._watchdog_loop(180)
         notify.assert_called_once_with("WATCHDOG=1\n")
-        probe.assert_not_called()
+        self.assertEqual(probe.call_args.kwargs["path"], "/repair/status")
+
+    async def test_a_hung_rebuild_stops_the_pings(self):
+        # review #345 r2: a daemon hung mid-rebuild must not keep pinging
+        self._rebuilding(quiet_s=sd_watchdog.rebuild_stall_s() + 60)
+        with patch("asyncio.sleep", side_effect=_one_iteration_sleep()), \
+             patch.object(main, "_sd_notify") as notify, \
+             patch.object(sd_watchdog, "self_health", return_value=200):
+            await main._watchdog_loop(180)
+        notify.assert_not_called()
+
+    async def test_a_rebuild_whose_request_path_is_dead_stops_the_pings(self):
+        self._rebuilding(quiet_s=5)
+        with patch("asyncio.sleep", side_effect=_one_iteration_sleep()), \
+             patch.object(main, "_sd_notify") as notify, \
+             patch.object(sd_watchdog, "self_health", return_value=None):
+            await main._watchdog_loop(180)
+        notify.assert_not_called()
+
+    def test_every_rebuild_line_is_a_heartbeat(self):
+        from rebuild_progress import RebuildProgressBuffer, make_rebuild_progress_state
+        state = make_rebuild_progress_state()
+        state["beat_at"] -= 999
+        RebuildProgressBuffer(state).write("  Extracting drawers...\n")
+        self.assertEqual(state["beat"], 1)
+        self.assertLess(sd_watchdog.rebuild_quiet_s(state), 5)
 
     async def test_healthy_outside_rebuild_probes_and_pings(self):
         main._repair_state["in_progress"] = False
@@ -160,16 +191,28 @@ class TestWatchdogRequestPath(unittest.IsolatedAsyncioTestCase):
             await main._watchdog_loop(180)
         notify.assert_called_once_with("WATCHDOG=1\n")
 
-    async def test_startup_keepalive_feeds_until_cancelled_and_is_bounded(self):
+    def test_startup_keepalive_feeds_through_a_blocked_event_loop(self):
+        # review #345 r2: a synchronous lifespan step blocks the loop; a 200 s one must survive. Scaled: tick
+        # 0.05 s, the loop blocked 0.4 s by a plain time.sleep, with no await anywhere.
+        import time
         sent = []
-        with patch.object(main, "_sd_notify", side_effect=sent.append), \
-             patch("asyncio.sleep", side_effect=[None, None, asyncio.CancelledError()]):
-            await sd_watchdog.startup_keepalive(180)
-        self.assertEqual(sent, ["WATCHDOG=1\n"] * 3)
-        sent.clear()
-        with patch.object(main, "_sd_notify", side_effect=sent.append), patch("asyncio.sleep"):
-            await sd_watchdog.startup_keepalive(180, max_secs=120)
-        self.assertEqual(len(sent), 2)                  # 120 s / 60 s tick, then it stops feeding
+        with patch.object(main, "_sd_notify", side_effect=sent.append):
+            stop = sd_watchdog.startup_keepalive(180, tick=0.05)
+            time.sleep(0.4)
+            stop.set()
+            time.sleep(0.1)
+            fed = len(sent)
+            time.sleep(0.2)
+        self.assertGreaterEqual(fed, 5)
+        self.assertEqual(len(sent), fed)                # stopped means stopped
+
+    def test_startup_keepalive_is_bounded(self):
+        import time
+        sent = []
+        with patch.object(main, "_sd_notify", side_effect=sent.append):
+            sd_watchdog.startup_keepalive(180, max_secs=0.12, tick=0.05)
+            time.sleep(0.4)
+        self.assertLessEqual(len(sent), 3)              # a startup past max_secs stops being fed
 
 
 class TestNotifySender(unittest.TestCase):

@@ -11,12 +11,11 @@ The three helpers here drive the systemd integration:
   WATCHDOG=1, …) with no external dependency. No-op off systemd.
 - ``watchdog_interval`` — translate ``WATCHDOG_USEC`` (set by systemd when
   ``WatchdogSec=`` is configured) into a seconds budget, 0 if unset.
-- ``watchdog_loop`` — the keepalive coroutine. Pings the watchdog at half
-  the interval, health-gated on the palace collection probe, except during a
-  ``mode=rebuild`` repair where it feeds the watchdog unconditionally (the
-  rebuild nulls the caches for hours; the gate would otherwise starve the
-  keepalive and let systemd SIGABRT the daemon mid-rebuild — #135 / the
-  test_watchdog_rebuild.py rationale).
+- ``watchdog_loop`` — the keepalive coroutine. Pings the watchdog every
+  ``watchdog_tick`` seconds when this process's own loopback ``/health``
+  answers. During a ``mode=rebuild`` repair (which nulls the caches for hours,
+  #135) it probes ``/repair/status`` instead, and pings only while the rebuild
+  keeps printing within ``rebuild_stall_s()`` (review #345 r2).
 
 **Why the lazy ``import main`` in ``watchdog_loop``**
 
@@ -39,6 +38,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
+import time
 
 
 def sd_notify(msg: str) -> None:
@@ -76,16 +77,18 @@ def watchdog_tick(interval_secs: int) -> int:
 SERVED = (200, 503)
 
 
-async def self_health(port: int | None = None, timeout: float = 20.0) -> int | None:
-    """GET /health from this process over loopback; the HTTP status, or None when nothing came back in time.
+async def self_health(port: int | None = None, timeout: float = 20.0, path: str = "/health",
+                      api_key: str | None = None) -> int | None:
+    """GET ``path`` from this process over loopback; the HTTP status, or None when nothing came back in time.
 
     The request goes through the same listener, event loop and handler as a client's, so a ping that depends on
     it proves the path that hung on 2026-11-19, not just that a side thread is alive (review #345 r1)."""
     port = port or int(os.environ.get("PALACE_PORT", "8085"))
     writer = None
+    key = f"X-Api-Key: {api_key}\r\n" if api_key else ""
     try:
         reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), timeout)
-        writer.write(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        writer.write(f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{key}Connection: close\r\n\r\n".encode())
         await asyncio.wait_for(writer.drain(), timeout)
         status = await asyncio.wait_for(reader.readline(), timeout)
         parts = status.split()
@@ -97,20 +100,46 @@ async def self_health(port: int | None = None, timeout: float = 20.0) -> int | N
             writer.close()
 
 
-async def startup_keepalive(interval_secs: int, max_secs: int = 1800) -> None:
-    """Feed the watchdog while the lifespan startup runs (review #345 r1: Type=simple arms the watchdog at exec,
-    and a legitimately long start, such as a cold index load, must not be killed). Bounded: a startup that hangs
-    past ``max_secs`` stops being fed and the watchdog ends it. Cancelled by the lifespan once startup is done."""
+def startup_keepalive(interval_secs: int, max_secs: int = 1800, tick: float | None = None) -> threading.Event:
+    """Feed the watchdog from a plain thread while the lifespan startup runs; set the returned event to stop.
+
+    Review #345 r1: Type=simple arms the watchdog at exec, and a long cold start is not a hang. Review r2: an
+    asyncio task cannot do this, because a synchronous lifespan step (a blocking call on the event loop) starves
+    it; a thread keeps feeding through one. Bounded: a startup that runs past ``max_secs`` stops being fed and
+    the watchdog ends it."""
     import main
-    tick = watchdog_tick(interval_secs)
-    waited = 0
-    while waited < max_secs:
-        main._sd_notify("WATCHDOG=1\n")
-        try:
-            await asyncio.sleep(tick)
-        except asyncio.CancelledError:
-            return
-        waited += tick
+    tick = tick or watchdog_tick(interval_secs)
+    stop = threading.Event()
+
+    def feed():
+        deadline = time.monotonic() + max_secs
+        while not stop.is_set() and time.monotonic() < deadline:
+            main._sd_notify("WATCHDOG=1\n")
+            stop.wait(tick)
+
+    threading.Thread(target=feed, name="watchdog-startup", daemon=True).start()
+    return stop
+
+
+def rebuild_stall_s() -> int:
+    """How long a rebuild may print nothing before the watchdog stops feeding it (review #345 r2).
+
+    Not two ticks: rebuild_index prints one line per 5000-drawer batch (minutes apart at its measured
+    ~11 drawers/s) and nothing at all while it extracts, so a short window would kill a healthy rebuild."""
+    try:
+        return int(os.environ.get("PALACE_REBUILD_STALL_S", "1800"))
+    except ValueError:
+        return 1800
+
+
+def rebuild_quiet_s(progress, now: float | None = None) -> float:
+    """Seconds since the rebuild last printed (its start, before the first line); 0 before progress exists."""
+    if not isinstance(progress, dict):
+        return 0.0
+    last = progress.get("beat_at") or progress.get("started_at_monotonic")
+    if not isinstance(last, (int, float)):
+        return 0.0
+    return max(0.0, (time.monotonic() if now is None else now) - last)
 
 
 async def watchdog_loop(interval_secs: int) -> None:
@@ -128,16 +157,23 @@ async def watchdog_loop(interval_secs: int) -> None:
             await asyncio.sleep(tick)
         except asyncio.CancelledError:
             return
-        # During mode=rebuild, send the keepalive unconditionally and skip the
-        # probe. A rebuild holds _exclusive_palace() with the client/collection
-        # caches nulled (see the /repair handler), so _get_collection() can
-        # return None or block for the whole 6-9h operation. The health-gate
-        # below would then withhold WATCHDOG=1 and systemd would SIGABRT the
-        # daemon mid-rebuild — exactly when a kill is most destructive. Keep
-        # feeding the watchdog; the rebuild is a known long-running operation
-        # we want to run to completion.
+        # During mode=rebuild, /health is the wrong probe: a rebuild holds _exclusive_palace() with the
+        # client/collection caches nulled (see the /repair handler), so _get_collection() can return None or
+        # block for the whole operation, and a kill mid-rebuild is the most destructive kind (#135). Review
+        # #345 r2: an unconditional ping let a daemon hung mid-rebuild live forever. So during a rebuild the
+        # ping needs both (a) the rebuild printed within rebuild_stall_s(), and (b) the request path answers
+        # /repair/status, which reads _repair_state only and never touches the collection.
         if main._repair_state.get("in_progress") and main._repair_state.get("mode") == "rebuild":
-            main._sd_notify("WATCHDOG=1\n")
+            quiet = rebuild_quiet_s(main._repair_state.get("progress"))
+            if quiet > rebuild_stall_s():
+                main._log.warning("Watchdog: the rebuild printed nothing for %ds: skipping WATCHDOG=1", int(quiet))
+                continue
+            status = await self_health(timeout=max(5.0, tick / 3), path="/repair/status",
+                                       api_key=os.environ.get("PALACE_API_KEY"))
+            if status is not None:
+                main._sd_notify("WATCHDOG=1\n")
+            else:
+                main._log.warning("Watchdog: /repair/status did not answer during the rebuild: skipping WATCHDOG=1")
             continue
         try:
             # /health runs its probes on the FAST pool (#286), so a default pool starved by MCP tool execution does

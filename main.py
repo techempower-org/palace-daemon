@@ -2338,8 +2338,8 @@ async def lifespan(app: FastAPI):
     import logging
     logger = logging.getLogger(__name__)
     # Feed the watchdog through startup (Type=simple arms it at exec): a long cold start is not a hang (#345 r1).
-    _startup_feed = (asyncio.create_task(_startup_keepalive(_watchdog_interval()))
-                     if _watchdog_interval() > 0 else None)
+    # A plain thread, not a task: synchronous lifespan steps block the event loop (#345 r2).
+    _startup_feed = _startup_keepalive(_watchdog_interval()) if _watchdog_interval() > 0 else None
 
     _record_restart()
     cl_state = _crash_loop_state()
@@ -2449,7 +2449,7 @@ async def lifespan(app: FastAPI):
         _STATUS_SNAPSHOT.warm()
 
     if _startup_feed is not None:
-        _startup_feed.cancel()
+        _startup_feed.set()
     app.state.watchdog_task = None
     wdog_secs = _watchdog_interval()
     if wdog_secs > 0:
