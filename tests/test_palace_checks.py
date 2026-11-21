@@ -1091,7 +1091,7 @@ class PalaceSecretsProbeWait(unittest.TestCase):
         txt = psec.lane_text({"queued_by_priority": {"2": 14, "1": 0}, "oldest_waiting_s": {"2": 1800}})
         self.assertEqual(txt, "probe lane p1 · queue depth 14 · oldest p2 item waiting 1800s · request path: daemon watchdog")
         self.assertIn("no p2 item waiting", psec.lane_text({"queued_by_priority": {}, "oldest_waiting_s": {}}))
-        self.assertIn("queue: unavailable (no queue fields)", psec.lane_text(None))
+        self.assertIn("queue: unavailable (incomplete status)", psec.lane_text(None))
         out = psec.assess({}, 0, 0, 10, 0, 0, ("ok", txt), True)
         self.assertIn("miner redaction: ok (probe lane p1 · queue depth 14", out)
 
@@ -1106,7 +1106,7 @@ class PalaceSecretsProbeWait(unittest.TestCase):
         with mock.patch.object(psec, "_daemon", side_effect=TimeoutError()):
             self.assertEqual(psec.queue_status("k")[1], "TimeoutError")
         with mock.patch.object(psec, "_daemon", return_value=(200, {})):
-            self.assertEqual(psec.queue_status("k")[1], "no queue fields")
+            self.assertEqual(psec.queue_status("k")[1], "incomplete status")
         txt = psec.lane_text(None, "HTTP 503")
         self.assertNotIn("depth 0", txt)
         self.assertIn("queue: unavailable (HTTP 503)", txt)
@@ -1114,6 +1114,20 @@ class PalaceSecretsProbeWait(unittest.TestCase):
         self.assertTrue(out.startswith("CHECK palace-secrets warn"), out)
         ok = psec.lane_text({"queued_by_priority": {"2": 0}, "oldest_waiting_s": {}})
         self.assertTrue(psec.assess({}, 0, 0, 10, 0, 0, ("ok", ok), True).startswith("CHECK palace-secrets ok"))
+
+    def test_an_incomplete_queue_status_is_unavailable_and_warn(self):
+        # review #344 r3: oldest_waiting_s missing or non-numeric must not read ok
+        for body in ({"queued_by_priority": {"2": 3}},
+                     {"queued_by_priority": {"2": 3}, "oldest_waiting_s": {"2": "soon"}},
+                     {"queued_by_priority": {"2": "3"}, "oldest_waiting_s": {"2": 10}},
+                     {"queued_by_priority": {"2": True}, "oldest_waiting_s": {}}):
+            with mock.patch.object(psec, "_daemon", return_value=(200, body)):
+                got, why = psec.queue_status("k")
+            self.assertIsNone(got, body)
+            self.assertEqual(why, "incomplete status")
+            txt = psec.lane_text(body)
+            self.assertIn("queue: unavailable (incomplete status)", txt)
+            self.assertTrue(psec.assess({}, 0, 0, 10, 0, 0, ("ok", txt), True).startswith("CHECK palace-secrets warn"))
 
     def test_no_drawer_text_in_the_reason(self):
         why = self._wait([("d1", "plainlettersecretvalue", "{}", 3)])[1]

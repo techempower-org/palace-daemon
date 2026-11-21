@@ -272,8 +272,8 @@ def queue_status(key) -> tuple:
         return None, type(exc).__name__
     if code != 200:
         return None, f"HTTP {code}"
-    if not isinstance(body, dict) or not isinstance(body.get("queued_by_priority"), dict):
-        return None, "no queue fields"
+    if not queue_complete(body):
+        return None, "incomplete status"
     return body, None
 
 
@@ -372,17 +372,30 @@ def wait_state(rows: list, total: int) -> str:
 QUEUE_UNAVAILABLE = "queue: unavailable"
 
 
+def queue_complete(status) -> bool:
+    """Both /mine/status queue fields present, each a mapping of priority to a non-negative number (#344 r3)."""
+    if not isinstance(status, dict):
+        return False
+    for field in ("queued_by_priority", "oldest_waiting_s"):
+        value = status.get(field)
+        if not isinstance(value, dict):
+            return False
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0 for v in value.values()):
+            return False
+    return True
+
+
 def lane_text(status: dict | None, why: str | None = None) -> str:
     """The probe's lane and the backlog it skipped (#344 r1), from /mine/status; counts and seconds only.
 
     The probe drains at priority 1, so its timing says nothing about priority-2 transcript work or about
     the request path: the backlog is named here, and the request path is the daemon watchdog's (#345)."""
-    if why or not isinstance(status, dict) or not isinstance(status.get("queued_by_priority"), dict):
-        # review #344 r2: an unavailable snapshot is never an empty queue
-        return f"probe lane p1 · {QUEUE_UNAVAILABLE} ({why or 'no queue fields'}) · request path: daemon watchdog"
+    if why or not queue_complete(status):
+        # review #344 r2/r3: an unavailable or incomplete snapshot is never an empty queue
+        return f"probe lane p1 · {QUEUE_UNAVAILABLE} ({why or 'incomplete status'}) · request path: daemon watchdog"
     by = status.get("queued_by_priority") or {}
     old = status.get("oldest_waiting_s") or {}
-    depth = sum(int(v) for v in by.values() if str(v).isdigit())
+    depth = int(sum(by.values()))
     p2 = old.get("2")
     p2_txt = f"oldest p2 item waiting {int(p2)}s" if p2 is not None else "no p2 item waiting"
     return f"probe lane p1 · queue depth {depth} · {p2_txt} · request path: daemon watchdog"
