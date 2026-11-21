@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Fixed — *the shipped unit is the installed unit: drop-ins folded in, and a CHECK for drift*
+
+- **`palace-daemon.service` now carries the settings that lived only in the palace host's drop-ins,** with the values that were in force:
+  - `MemoryHigh=5G`, `MemoryMax=6G`, `MemorySwapMax=3G`, `OOMPolicy=continue` and `RequiresMountsFor=/home/jp/Projects`.
+  - A stale comment about a 2 G cap is gone.
+  - On 2026-11-21 the installed unit was a May copy under seven drop-ins plus two `systemctl set-property` overrides. #345's watchdog had to ship as an eighth drop-in, and the installed unit lacked the repo's `PALACE_RERANK_MODEL` pin (equal to the code default, so ranking was unaffected).
+- **`CHECK palace-unit-drift`** (`scripts/checks/unit_drift.py`, a daily user timer) compares the installed unit file with this repo's byte for byte, names any drop-in loaded on top, and flags a pending daemon-reload.
+  - Its first run on the old install: `fail · … differs from the repo's in 61 line(s); 9 drop-in(s) on top`.
+- Tests: `FoldedDropIns` in `tests/test_service_unit.py` and `UnitDrift` in `tests/test_palace_checks.py`.
+
 ### Changed — *mempalace_drawers gets a (wing, id) index for the wing-only page*
 
 - **The index:** `CREATE INDEX CONCURRENTLY mempalace_drawers_wing_id_idx ON mempalace_drawers (wing, id)`, built 2026-11-21 in 1 min (125 MB). It serves `WHERE wing = $1 AND id > $2 ORDER BY id LIMIT n`, which the 11-18 (wing, room, id) index can't.

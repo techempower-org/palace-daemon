@@ -40,6 +40,7 @@ pclass = _load("palace_secrets_classify")
 pgt = _load("pg_timeouts")
 pbk = _load("palace_backup")
 pvac = _load("palace_vacuum")
+udrift = _load("unit_drift")
 
 NOW = dt.datetime(2026, 11, 15, 9, 0, tzinfo=dt.timezone(dt.timedelta(hours=-8)))
 SHAPE = r"^CHECK [a-z-]+ (ok|warn|fail) · .+ · .+$"
@@ -1766,3 +1767,41 @@ class PalaceVacuum(unittest.TestCase):
         out = self._run([], Boom())
         self.assertTrue(out.startswith("CHECK palace-vacuum fail · RuntimeError"), out)
         self.assertNotIn("secret-looking", out)
+
+
+class UnitDrift(unittest.TestCase):
+    """palace-unit-drift: the installed unit against the repo's, drop-ins named, no unit text in the line."""
+
+    REPO = "[Service]\nMemoryMax=6G\nEnvironment=EXAMPLE_NOTE=alpha-text\n"
+
+    def test_identical_with_nothing_on_top_is_ok(self):
+        state, fact, _ = udrift.judge(self.REPO, self.REPO, [], False)
+        self.assertEqual(state, "ok", fact)
+
+    def test_a_drop_in_on_an_identical_unit_is_a_named_warning(self):
+        state, fact, _ = udrift.judge(self.REPO, self.REPO, ["/etc/systemd/system/x.service.d/zz-trial.conf"], False)
+        self.assertEqual(state, "warn")
+        self.assertIn("zz-trial.conf", fact)
+        self.assertNotIn("/etc/", fact)
+
+    def test_a_pending_reload_is_a_warning(self):
+        self.assertEqual(udrift.judge(self.REPO, self.REPO, [], True)[0], "warn")
+
+    def test_a_different_file_fails_with_a_count_and_never_its_text(self):
+        installed = self.REPO.replace("6G", "4G").replace("alpha-text", "omega-text")
+        state, fact, _ = udrift.judge(installed, self.REPO, ["/a/b/memory.conf"], False)
+        self.assertEqual(state, "fail")
+        self.assertIn("differs from the repo's in 4 line(s)", fact)
+        self.assertIn("memory.conf", fact)
+        for text in ("4G", "6G", "omega-text", "alpha-text", "EXAMPLE_NOTE"):
+            self.assertNotIn(text, fact)
+
+    def test_whitespace_counts_as_drift(self):
+        self.assertEqual(udrift.judge(self.REPO + "\n# note\n", self.REPO, [], False)[0], "fail")
+
+    def test_a_unit_that_is_not_a_file_fails(self):
+        self.assertEqual(udrift.judge(None, self.REPO, [], False)[0], "fail")
+
+    def test_the_check_compares_against_the_unit_in_its_own_tree(self):
+        self.assertEqual(udrift.REPO_UNIT, CHECKS.parent.parent / "palace-daemon.service")
+        self.assertTrue(udrift.REPO_UNIT.is_file())
