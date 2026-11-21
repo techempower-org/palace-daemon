@@ -425,7 +425,7 @@ class PalaceChecks(unittest.TestCase):
         repo = CHECKS.parent.parent
         files = (
             list(CHECKS.glob("*.py"))
-            + list((CHECKS.parent / "systemd").glob("*"))
+            + [p for p in (CHECKS.parent / "systemd").glob("*") if p.is_file()]  # not a __pycache__ dir
             + [repo / "docs" / "CHECKS.md", Path(__file__)]
         )
         for f in files:
@@ -1772,11 +1772,69 @@ class PalaceVacuum(unittest.TestCase):
 class UnitDrift(unittest.TestCase):
     """palace-unit-drift: the installed unit against the repo's, drop-ins named, no unit text in the line."""
 
-    REPO = "[Service]\nMemoryMax=6G\nEnvironment=EXAMPLE_NOTE=alpha-text\n"
+    REPO = b"[Service]\nMemoryMax=6G\nEnvironment=EXAMPLE_NOTE=alpha-text\n"
+    CTL = "/etc/systemd/system.control/palace-daemon.service.d/"
+    # the Watch's parser (plan.realm.watch checks.py LINE): exactly one fact segment between two " · "
+    WATCH_LINE = re.compile(r"CHECK (\S+) (ok|warn|fail) · (.*?) · (.*)", re.S)
 
     def test_identical_with_nothing_on_top_is_ok(self):
         state, fact, _ = udrift.judge(self.REPO, self.REPO, [], False)
         self.assertEqual(state, "ok", fact)
+
+    def test_line_endings_and_final_newlines_are_drift(self):
+        for installed in (self.REPO.rstrip(b"\n"), self.REPO + b"\n", self.REPO.replace(b"\n", b"\r\n")):
+            state, fact, _ = udrift.judge(installed, self.REPO, [], False)
+            self.assertEqual(state, "fail", installed)
+            self.assertIn("differs from the repo's from byte", fact)
+
+    def test_the_first_differing_offset_is_reported(self):
+        self.assertEqual(udrift.first_difference(b"abcX", b"abcY"), 3)
+        self.assertEqual(udrift.first_difference(b"abc", b"abc\n"), 3)
+        self.assertIsNone(udrift.first_difference(b"abc", b"abc"))
+        fact = udrift.judge(self.REPO.replace(b"6G", b"4G"), self.REPO, [], False)[1]
+        self.assertIn(f"from byte {self.REPO.index(b'6G')}", fact)
+
+    def test_a_pending_reload_shows_on_a_differing_and_a_missing_unit(self):
+        for installed in (self.REPO.replace(b"6G", b"4G"), None):
+            state, fact, _ = udrift.judge(installed, self.REPO, [self.CTL + "50-MemoryMax.conf"], True)
+            self.assertEqual(state, "fail")
+            self.assertIn("systemd needs a daemon-reload", fact)
+            self.assertIn("50-MemoryMax.conf (set-property)", fact)
+
+    def _body_line(self, props, installed):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        frag = tmp / "palace-daemon.service"
+        if installed is not None:
+            frag.write_bytes(installed)
+        props = {"FragmentPath": str(frag), **props}
+        with mock.patch.object(udrift, "show", return_value=props), \
+             mock.patch.object(udrift, "REPO_UNIT", tmp / "repo.service"), \
+             mock.patch.dict(os.environ, {"PALACE_CHECKS_DIR": str(tmp / "c")}):
+            (tmp / "repo.service").write_bytes(self.REPO)
+            with contextlib.redirect_stdout(io.StringIO()):
+                udrift.body()
+            return (tmp / "c" / "palace-unit-drift.line").read_text().strip()
+
+    def test_body_reads_both_set_property_files_from_show_and_publishes_one_fact(self):
+        out = self._body_line({
+            "DropInPaths": f"{self.CTL}50-MemoryMax.conf {self.CTL}50-MemorySwapMax.conf "
+                           "/etc/systemd/system/palace-daemon.service.d/zzz-watchdog-345.conf",
+            "NeedDaemonReload": "yes",
+        }, self.REPO.replace(b"\n", b"\r\n"))
+        m = self.WATCH_LINE.fullmatch(out)
+        self.assertIsNotNone(m, out)
+        self.assertEqual(out.count(" · "), 2, out)
+        self.assertEqual(m.group(1, 2), ("palace-unit-drift", "fail"))
+        for want in ("50-MemoryMax.conf (set-property)", "50-MemorySwapMax.conf (set-property)",
+                     "zzz-watchdog-345.conf", "3 drop-in(s)", "daemon-reload", "from byte"):
+            self.assertIn(want, m.group(3))
+
+    def test_body_ok_line_has_the_watch_shape(self):
+        out = self._body_line({"DropInPaths": "", "NeedDaemonReload": "no"}, self.REPO)
+        m = self.WATCH_LINE.fullmatch(out)
+        self.assertIsNotNone(m, out)
+        self.assertEqual((m.group(2), out.count(" · ")), ("ok", 2))
 
     def test_a_drop_in_on_an_identical_unit_is_a_named_warning(self):
         state, fact, _ = udrift.judge(self.REPO, self.REPO, ["/etc/systemd/system/x.service.d/zz-trial.conf"], False)
@@ -1784,20 +1842,29 @@ class UnitDrift(unittest.TestCase):
         self.assertIn("zz-trial.conf", fact)
         self.assertNotIn("/etc/", fact)
 
+    def test_a_set_property_override_is_named_as_one(self):
+        state, fact, _ = udrift.judge(self.REPO, self.REPO, [
+            "/etc/systemd/system.control/palace-daemon.service.d/50-MemoryMax.conf",
+            "/etc/systemd/system/palace-daemon.service.d/zz-trial.conf",
+        ], False)
+        self.assertEqual(state, "warn")
+        self.assertIn("50-MemoryMax.conf (set-property)", fact)
+        self.assertNotIn("zz-trial.conf (set-property)", fact)
+
     def test_a_pending_reload_is_a_warning(self):
         self.assertEqual(udrift.judge(self.REPO, self.REPO, [], True)[0], "warn")
 
     def test_a_different_file_fails_with_a_count_and_never_its_text(self):
-        installed = self.REPO.replace("6G", "4G").replace("alpha-text", "omega-text")
+        installed = self.REPO.replace(b"6G", b"4G").replace(b"alpha-text", b"omega-text")
         state, fact, _ = udrift.judge(installed, self.REPO, ["/a/b/memory.conf"], False)
         self.assertEqual(state, "fail")
-        self.assertIn("differs from the repo's in 4 line(s)", fact)
+        self.assertIn("(4 line(s) differ)", fact)
         self.assertIn("memory.conf", fact)
         for text in ("4G", "6G", "omega-text", "alpha-text", "EXAMPLE_NOTE"):
             self.assertNotIn(text, fact)
 
     def test_whitespace_counts_as_drift(self):
-        self.assertEqual(udrift.judge(self.REPO + "\n# note\n", self.REPO, [], False)[0], "fail")
+        self.assertEqual(udrift.judge(self.REPO + b"\n# note\n", self.REPO, [], False)[0], "fail")
 
     def test_a_unit_that_is_not_a_file_fails(self):
         self.assertEqual(udrift.judge(None, self.REPO, [], False)[0], "fail")

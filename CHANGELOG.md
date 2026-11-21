@@ -10,6 +10,11 @@
   - On 2026-11-21 the installed unit was a May copy under seven drop-ins plus two `systemctl set-property` overrides. #345's watchdog had to ship as an eighth drop-in, and the installed unit lacked the repo's `PALACE_RERANK_MODEL` pin (equal to the code default, so ranking was unaffected).
 - **`CHECK palace-unit-drift`** (`scripts/checks/unit_drift.py`, a daily user timer) compares the installed unit file with this repo's byte for byte, names any drop-in loaded on top, and flags a pending daemon-reload.
   - Its first run on the old install: `fail · … differs from the repo's in 61 line(s); 9 drop-in(s) on top`.
+- **`scripts/systemd/install_daemon_unit.py`** installs the repo unit. It moves every drop-in, from both drop-in directories, into a dated backup with a manifest, then runs `daemon-reload` only, never a restart.
+  - It diffs `systemctl show` before and after and exits 3 on any effective change.
+  - `--restore <dir>` puts everything back, is safe to rerun, and never overwrites a changed drop-in.
+- **Install run-book:** `docs/ops/palace-daemon-unit.md` covers the backup, the `systemctl show` diff, no drop-ins, and no `set-property`.
+  - `set-property` writes under `/etc/systemd/system.control/`, and the check names those overrides separately.
 - Tests: `FoldedDropIns` in `tests/test_service_unit.py` and `UnitDrift` in `tests/test_palace_checks.py`.
 
 ### Changed — *mempalace_drawers gets a (wing, id) index for the wing-only page*
