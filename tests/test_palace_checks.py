@@ -1055,6 +1055,110 @@ class PalaceSecrets(unittest.TestCase):
             self.assertEqual(sorted(x.name for x in Path(d).iterdir()), ["new.jsonl"])
 
 
+class PalaceSecretsProbeWait(unittest.TestCase):
+    """A not-measured miner control says what the wait saw at its deadline (counts only)."""
+
+    def _wait(self, rows):
+        conn = mock.MagicMock()
+        with mock.patch.object(psec, "_rows_for", return_value=rows), mock.patch.object(psec.time, "sleep"), \
+                mock.patch.object(psec.time, "time", side_effect=[0, 0, 10**9]):
+            return psec.probe_wait(conn, Path("/p/x.jsonl"), {}, None, deadline=1)
+
+    def test_not_mined(self):
+        state, why = self._wait([])
+        self.assertEqual(state, "not measured")
+        self.assertIn("not mined: 0 drawers", why)
+
+    def test_fewer_chunks_than_chunk_total(self):
+        state, why = self._wait([("d1", "doc", "{}", 2)])
+        self.assertEqual(state, "not measured")
+        self.assertIn("1 of 2 chunk(s) filed", why)
+
+    def test_drawers_without_chunk_total(self):
+        self.assertIn("1 drawer(s) without chunk_total", self._wait([("d1", "doc", "{}", None)])[1])
+
+    def test_all_filed_but_not_stable_names_the_unmet_condition(self):
+        # review #344 r1 (2): the deadline expired on stability, not on the count
+        rows = [("d1", "doc", "{}", 2), ("d2", "doc", "{}", 2)]
+        with mock.patch.object(psec, "_rows_for", return_value=rows), mock.patch.object(psec.time, "sleep"), \
+                mock.patch.object(psec.time, "time", side_effect=[0, 10**9, 10**9]):   # one read, then the deadline
+            state, why = psec.probe_wait(mock.MagicMock(), Path("/p/x.jsonl"), {}, None, deadline=1)
+        self.assertEqual(state, "not measured")
+        self.assertIn("2 of 2 filed, count not yet stable", why)
+
+    def test_an_ok_probe_names_its_lane_the_backlog_and_the_request_path_instrument(self):
+        # review #344 r1 (1)+(3): priority 1 hides the p2 backlog unless the line names it; the request path is
+        # the daemon watchdog's job, not this probe's
+        txt = psec.lane_text({"queued_by_priority": {"2": 14, "1": 0}, "oldest_waiting_s": {"2": 1800},
+                              "queue_read_errors": 0})
+        self.assertEqual(txt, "probe lane p1 · queue depth 14 · oldest p2 item waiting 1800s · request path: daemon watchdog")
+        self.assertIn("no p2 item waiting", psec.lane_text({"queued_by_priority": {}, "oldest_waiting_s": {}, "queue_read_errors": 0}))
+        self.assertIn("queue: unavailable (incomplete status)", psec.lane_text(None))
+        out = psec.assess({}, 0, 0, 10, 0, 0, ("ok", txt), True)
+        self.assertIn("miner redaction: ok (probe lane p1 · queue depth 14", out)
+
+    def test_an_unavailable_queue_snapshot_is_warn_never_depth_0(self):
+        # review #344 r2: a 503 (or timeout, or a body without the fields) must not read as an empty queue
+        import urllib.error
+        err = urllib.error.HTTPError("http://x/mine/status", 503, "unavailable", {}, None)
+        with mock.patch.object(psec, "_daemon", side_effect=err):
+            body, why = psec.queue_status("k")
+        self.assertIsNone(body)
+        self.assertEqual(why, "HTTP 503")
+        with mock.patch.object(psec, "_daemon", side_effect=TimeoutError()):
+            self.assertEqual(psec.queue_status("k")[1], "TimeoutError")
+        with mock.patch.object(psec, "_daemon", return_value=(200, {})):
+            self.assertEqual(psec.queue_status("k")[1], "incomplete status")
+        txt = psec.lane_text(None, "HTTP 503")
+        self.assertNotIn("depth 0", txt)
+        self.assertIn("queue: unavailable (HTTP 503)", txt)
+        out = psec.assess({}, 0, 0, 10, 0, 0, ("ok", txt), True)
+        self.assertTrue(out.startswith("CHECK palace-secrets warn"), out)
+        ok = psec.lane_text({"queued_by_priority": {"2": 0}, "oldest_waiting_s": {}, "queue_read_errors": 0})
+        self.assertTrue(psec.assess({}, 0, 0, 10, 0, 0, ("ok", ok), True).startswith("CHECK palace-secrets ok"))
+
+    def test_an_incomplete_queue_status_is_unavailable_and_warn(self):
+        # review #344 r3: oldest_waiting_s missing or non-numeric must not read ok
+        for body in ({"queued_by_priority": {"2": 3}},
+                     {"queued_by_priority": {"2": 3}, "oldest_waiting_s": {"2": "soon"}},
+                     {"queued_by_priority": {"2": "3"}, "oldest_waiting_s": {"2": 10}},
+                     {"queued_by_priority": {"2": True}, "oldest_waiting_s": {}}):
+            with mock.patch.object(psec, "_daemon", return_value=(200, body)):
+                got, why = psec.queue_status("k")
+            self.assertIsNone(got, body)
+            self.assertEqual(why, "incomplete status")
+            txt = psec.lane_text(body)
+            self.assertIn("queue: unavailable (incomplete status)", txt)
+            self.assertTrue(psec.assess({}, 0, 0, 10, 0, 0, ("ok", txt), True).startswith("CHECK palace-secrets warn"))
+
+    def test_a_priority_with_entries_needs_an_oldest_wait(self):
+        # review #344 r4: p2 has entries but no oldest wait: incomplete, never ok
+        for body in ({"queued_by_priority": {"2": 3}, "oldest_waiting_s": {}, "queue_read_errors": 0},
+                     {"queued_by_priority": {"1": 1, "2": 3}, "oldest_waiting_s": {"1": 5}, "queue_read_errors": 0},
+                     {"queued_by_priority": {"2": 3}, "oldest_waiting_s": {"2": 9}}):
+            with mock.patch.object(psec, "_daemon", return_value=(200, body)):
+                self.assertEqual(psec.queue_status("k"), (None, "incomplete status"), body)
+            txt = psec.lane_text(body)
+            self.assertIn("queue: unavailable (incomplete status)", txt)
+            self.assertTrue(psec.assess({}, 0, 0, 10, 0, 0, ("ok", txt), True).startswith("CHECK palace-secrets warn"))
+        whole = {"queued_by_priority": {"1": 0, "2": 3}, "oldest_waiting_s": {"2": 9}, "queue_read_errors": 0}
+        self.assertIsNone(psec.queue_gap(whole))
+
+    def test_queue_read_errors_are_unavailable_and_warn(self):
+        # review #344 r4: an unreadable queue file must not read as an empty queue
+        body = {"queued_by_priority": {}, "oldest_waiting_s": {}, "queue_read_errors": 1}
+        with mock.patch.object(psec, "_daemon", return_value=(200, body)):
+            self.assertEqual(psec.queue_status("k"), (None, "1 read errors"))
+        txt = psec.lane_text(body)
+        self.assertIn("queue: unavailable (1 read errors)", txt)
+        self.assertNotIn("depth 0", txt)
+        self.assertTrue(psec.assess({}, 0, 0, 10, 0, 0, ("ok", txt), True).startswith("CHECK palace-secrets warn"))
+
+    def test_no_drawer_text_in_the_reason(self):
+        why = self._wait([("d1", "plainlettersecretvalue", "{}", 3)])[1]
+        self.assertNotIn("plainlettersecretvalue", why)
+
+
 class PalaceSecretsClassify(unittest.TestCase):
     """palace-secrets classify: an encoding observation per hit, never a value (Sen 2026-11-17; xreview r1)."""
 
