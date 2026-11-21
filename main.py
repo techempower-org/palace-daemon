@@ -3336,7 +3336,7 @@ async def mine_status(x_api_key: str | None = Header(default=None)):
 
     live = _count(path)
     processing = _count(proc_path)
-    by_prio, oldest = await asyncio.to_thread(_queue_by_priority, (path, proc_path))
+    by_prio, oldest, read_errors = await asyncio.to_thread(_queue_by_priority, (path, proc_path))
     active = getattr(app.state, "active_mines", None)
     task = _mine_drain_task
     return {
@@ -3363,13 +3363,18 @@ async def mine_status(x_api_key: str | None = Header(default=None)):
         # these do (entries per drain priority, and the oldest waiting entry's age per priority, seconds).
         "queued_by_priority": by_prio,
         "oldest_waiting_s": oldest,
+        # #344 r4: queue files that exist but could not be read; > 0 means the two maps above are partial.
+        "queue_read_errors": read_errors,
     }
 
 
-def _queue_by_priority(paths) -> tuple[dict, dict]:
-    """({priority: entries}, {priority: oldest wait in s}) over the live queue and the in-processing file."""
+def _queue_by_priority(paths) -> tuple[dict, dict, int]:
+    """({priority: entries}, {priority: oldest wait in s}, read errors) over the live queue and the
+    in-processing file. An absent file is an empty queue; any other OSError is a read error (#344 r4),
+    so an unreadable queue is never reported as an empty one."""
     counts: dict = {}
     oldest: dict = {}
+    errors = 0
     now = datetime.now()
     for p in paths:
         try:
@@ -3390,9 +3395,11 @@ def _queue_by_priority(paths) -> tuple[dict, dict]:
                     except (TypeError, ValueError):
                         continue
                     oldest[prio] = max(oldest.get(prio, 0), int(waited))
-        except OSError:
+        except FileNotFoundError:
             continue
-    return counts, oldest
+        except OSError:
+            errors += 1
+    return counts, oldest, errors
 
 
 @app.get("/status/fast")

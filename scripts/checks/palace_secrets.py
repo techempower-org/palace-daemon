@@ -272,8 +272,9 @@ def queue_status(key) -> tuple:
         return None, type(exc).__name__
     if code != 200:
         return None, f"HTTP {code}"
-    if not queue_complete(body):
-        return None, "incomplete status"
+    gap = queue_gap(body)
+    if gap:
+        return None, gap
     return body, None
 
 
@@ -372,17 +373,31 @@ def wait_state(rows: list, total: int) -> str:
 QUEUE_UNAVAILABLE = "queue: unavailable"
 
 
+def _count(v) -> bool:
+    return not isinstance(v, bool) and isinstance(v, (int, float)) and v >= 0
+
+
 def queue_complete(status) -> bool:
-    """Both /mine/status queue fields present, each a mapping of priority to a non-negative number (#344 r3)."""
+    """Both /mine/status queue fields present, each a mapping of priority to a non-negative number (#344 r3);
+    an oldest wait for every priority that has entries, and ``queue_read_errors`` a count (#344 r4)."""
     if not isinstance(status, dict):
         return False
     for field in ("queued_by_priority", "oldest_waiting_s"):
         value = status.get(field)
-        if not isinstance(value, dict):
+        if not isinstance(value, dict) or not all(_count(v) for v in value.values()):
             return False
-        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0 for v in value.values()):
-            return False
-    return True
+    if any(n > 0 and p not in status["oldest_waiting_s"] for p, n in status["queued_by_priority"].items()):
+        return False
+    return _count(status.get("queue_read_errors"))
+
+
+def queue_gap(status) -> str | None:
+    """Why this /mine/status snapshot cannot be read as the queue, or None when it can."""
+    if not queue_complete(status):
+        return "incomplete status"
+    if status["queue_read_errors"] > 0:
+        return f"{int(status['queue_read_errors'])} read errors"
+    return None
 
 
 def lane_text(status: dict | None, why: str | None = None) -> str:
@@ -390,9 +405,10 @@ def lane_text(status: dict | None, why: str | None = None) -> str:
 
     The probe drains at priority 1, so its timing says nothing about priority-2 transcript work or about
     the request path: the backlog is named here, and the request path is the daemon watchdog's (#345)."""
-    if why or not queue_complete(status):
-        # review #344 r2/r3: an unavailable or incomplete snapshot is never an empty queue
-        return f"probe lane p1 · {QUEUE_UNAVAILABLE} ({why or 'incomplete status'}) · request path: daemon watchdog"
+    why = why or queue_gap(status)
+    if why:
+        # review #344 r2/r3/r4: an unavailable, incomplete or partly read snapshot is never an empty queue
+        return f"probe lane p1 · {QUEUE_UNAVAILABLE} ({why}) · request path: daemon watchdog"
     by = status.get("queued_by_priority") or {}
     old = status.get("oldest_waiting_s") or {}
     depth = int(sum(by.values()))

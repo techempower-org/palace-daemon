@@ -1046,8 +1046,21 @@ class TestQueueByPriority(unittest.TestCase):
             f.write("not json\n")
         with open(proc, "w") as f:
             f.write(json.dumps({"payload": {"dir": "/t/b.jsonl", "wing": "jp", "mode": "convos"}, "enqueued_at": new}) + "\n")
-        counts, oldest = main._queue_by_priority((live, proc))
+        counts, oldest, errors = main._queue_by_priority((live, proc))
+        self.assertEqual(errors, 0)
         self.assertEqual(counts, {"2": 2, "1": 1})
         self.assertGreaterEqual(oldest["2"], 899)
         self.assertLess(oldest["1"], 120)
+
+    def test_an_unreadable_queue_file_is_a_read_error_not_an_empty_queue(self):
+        # review #344 r4: `except OSError: continue` reported an unreadable queue as ({}, {})
+        import tempfile
+        d = tempfile.mkdtemp()
+        absent = os.path.join(d, "absent.jsonl")
+        unreadable = os.path.join(d, "dir-not-file.jsonl")
+        os.mkdir(unreadable)  # open() raises IsADirectoryError, an OSError that is not FileNotFoundError
+        counts, oldest, errors = main._queue_by_priority((absent, unreadable))
+        self.assertEqual((counts, oldest), ({}, {}))
+        self.assertEqual(errors, 1)
+        self.assertEqual(main._queue_by_priority((absent,))[2], 0)
 
