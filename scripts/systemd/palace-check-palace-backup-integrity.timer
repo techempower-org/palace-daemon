@@ -1,0 +1,11 @@
+[Unit]
+Description=palace lane check: palace database dump integrity (weekly, Sunday night)
+
+[Timer]
+# After the 02:15 dump and its 03:10 daily check; a full decompress of ~4 GB at idle I/O, one heavy read at a time
+OnCalendar=Sun *-*-* 03:40
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

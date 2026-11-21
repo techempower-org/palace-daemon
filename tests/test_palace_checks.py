@@ -38,6 +38,7 @@ needles = _load("redact_needles")
 psec = _load("palace_secrets")
 pclass = _load("palace_secrets_classify")
 pgt = _load("pg_timeouts")
+pbk = _load("palace_backup")
 
 NOW = dt.datetime(2026, 11, 15, 9, 0, tzinfo=dt.timezone(dt.timedelta(hours=-8)))
 SHAPE = r"^CHECK [a-z-]+ (ok|warn|fail) · .+ · .+$"
@@ -1327,3 +1328,79 @@ class PgTimeouts(unittest.TestCase):
     def test_reads_the_container_log_for_the_window(self):
         self.assertEqual(pgt.LOG_CMD[:2], ["docker", "logs"])
         self.assertIn(f"{pgt.WINDOW_MIN}m", pgt.LOG_CMD)
+
+
+class PalaceBackup(unittest.TestCase):
+    """palace-backup: the newest dump's age and size, its change, the unit's result, the weekly integrity run."""
+
+    NOW = 1_800_000_000.0
+    OK_UNIT = {"Result": "success", "ExecMainStatus": "0"}
+    GOOD = {"result": "ok", "dump": "20261120", "at": NOW - 2 * 86400}
+
+    def _dumps(self, sizes, newest_age_h=8):
+        n = len(sizes)
+        return [(f"mempalace-202611{10 + i:02d}.sql.gz", s, self.NOW - (newest_age_h + 24 * (n - 1 - i)) * 3600)
+                for i, s in enumerate(sizes)]
+
+    def _assess(self, sizes, **kw):
+        return pbk.assess(self._dumps(sizes, kw.pop("age", 8)), self.NOW, kw.pop("unit", self.OK_UNIT),
+                          kw.pop("timer", "active"), kw.pop("integrity", self.GOOD))
+
+    def test_a_fresh_growing_dump_set_is_ok(self):
+        state, fact = self._assess([4_000_000_000, 4_100_000_000, 4_200_000_000])
+        self.assertEqual(state, "ok", fact)
+        self.assertIn("4.20 GB", fact)
+        self.assertIn("3 kept", fact)
+
+    def test_no_dump_fails(self):
+        self.assertEqual(pbk.assess([], self.NOW, self.OK_UNIT, "active", self.GOOD)[0], "fail")
+
+    def test_a_missed_night_warns_and_two_fail(self):
+        self.assertEqual(self._assess([4e9, 4e9, 4e9], age=30)[0], "warn")
+        self.assertEqual(self._assess([4e9, 4e9, 4e9], age=55)[0], "fail")
+
+    def test_shrinking_warns_then_fails(self):
+        self.assertEqual(self._assess([4e9, 4e9, 3.7e9])[0], "warn")
+        self.assertEqual(self._assess([4e9, 4e9, 3.0e9])[0], "fail")
+
+    def test_a_tiny_dump_fails(self):
+        self.assertEqual(self._assess([5e6, 5e6, 5e6])[0], "fail")
+
+    def test_a_failed_unit_run_fails_even_with_an_old_good_dump(self):
+        state, fact = self._assess([4e9, 4e9, 4e9], unit={"Result": "exit-code", "ExecMainStatus": "1"})
+        self.assertEqual(state, "fail")
+        self.assertIn("last run failed", fact)
+
+    def test_few_dumps_or_an_inactive_timer_warn(self):
+        self.assertEqual(self._assess([4e9, 4e9])[0], "warn")
+        self.assertEqual(self._assess([4e9, 4e9, 4e9], timer="inactive")[0], "warn")
+
+    def test_integrity_missing_old_or_failed(self):
+        self.assertEqual(self._assess([4e9] * 3, integrity=None)[0], "warn")
+        old = dict(self.GOOD, at=self.NOW - 10 * 86400)
+        self.assertEqual(self._assess([4e9] * 3, integrity=old)[0], "warn")
+        bad = dict(self.GOOD, result="fail")
+        self.assertEqual(self._assess([4e9] * 3, integrity=bad)[0], "fail")
+
+    def _opener(self, data, rc=0):
+        class Proc:
+            def __init__(self):
+                self.stdout = io.BytesIO(data)
+
+            def wait(self):
+                return rc
+        return lambda _p: Proc()
+
+    def test_integrity_needs_the_whole_stream_and_the_footer(self):
+        whole = b"x" * (3 << 20) + b"\n--\n-- PostgreSQL database dump complete\n--\n"
+        self.assertEqual(pbk.integrity_of(Path("d"), self._opener(whole))[0], "ok")
+        self.assertEqual(pbk.integrity_of(Path("d"), self._opener(b"x" * (3 << 20)))[0], "fail")
+        self.assertEqual(pbk.integrity_of(Path("d"), self._opener(whole, rc=1)), ("fail", "gzip exit 1"))
+
+    def test_only_dump_names_count_and_oldest_first(self):
+        with tempfile.TemporaryDirectory() as d:
+            for n in ("mempalace-20261120.sql.gz", "mempalace-20261118.sql.gz", ".mempalace-20261121.sql.gz.tmp",
+                      "other.sql.gz"):
+                Path(d, n).write_bytes(b"x")
+            self.assertEqual([x[0] for x in pbk.dumps(Path(d))],
+                             ["mempalace-20261118.sql.gz", "mempalace-20261120.sql.gz"])
