@@ -7,8 +7,9 @@ The nightly dump (a system timer outside this repo writes ``<dir>/mempalace-YYYY
 
 Daily, read on the host that holds the dumps (``PALACE_BACKUP_DIR`` in ``~/.config/palace-checks/env``;
 no path or host is named in this repo):
-- the schedule: the dump timer's last trigger, and whether the dump unit finished after it and a dump
-  was written after it (a missed night fails even while yesterday's dump is still young);
+- the schedule: the most recent SCHEDULED run (the timer's next elapse minus ``PERIOD_H``) must be
+  followed, within 2 h, by a finished run and a dump written after it (a missed night fails even while
+  yesterday's dump is young, and so does a timer that never fired); a timer not active or not enabled fails;
 - the newest dump's age and size, and its size against the dump before it; how many are kept;
 - the dump unit's last result and exit status, and whether its timer is active;
 - the last COMPLETED ``--integrity`` run, bound to the dump it read (name, size, mtime): a dump changed
@@ -44,7 +45,9 @@ WARN_SHRINK, FAIL_SHRINK = 0.05, 0.20
 MIN_KEPT = 3
 INTEGRITY_MAX_DAYS = 8
 INTEGRITY_RUN_MAX_MIN = 70      # the integrity unit's TimeoutStartSec is 60 min
-RUN_GRACE_H = 2.0               # a dump this soon after its trigger may still be running
+RUN_GRACE_H = 2.0               # a dump this soon after its scheduled time may still be running
+# The dump timer's period: the most recent scheduled run is its next elapse minus this (daily OnCalendar).
+PERIOD_H = float(os.environ.get("PALACE_BACKUP_PERIOD_H", "24"))
 SETTLE_MIN = 10
 FOOTER = b"-- PostgreSQL database dump complete"
 TAIL = 4096
@@ -77,26 +80,36 @@ def hhmm(t: float) -> str:
 
 
 def schedule(found, now: float, unit: dict, fails: list, warns: list, fact: list) -> None:
-    """The dump timer's last trigger must be followed by a finished run and a new dump."""
+    """The most recent SCHEDULED run (the timer's next elapse minus its period) must be followed, within
+    ``RUN_GRACE_H``, by a finished run and a new dump. Review r4: the last ACTUAL trigger is not enough, since a
+    timer that never fired (disabled, stopped, the host asleep past Persistent) leaves no new trigger."""
     trig = stamp(unit.get("LastTriggerUSec"))
-    if trig is None:
-        warns.append("the dump timer has never triggered")
+    if trig is not None:
+        fact.append(f"last trigger {hhmm(trig)}")
+    if unit.get("TimerActive") != "active":
+        fails.append(f"the dump timer is {unit.get('TimerActive') or 'unknown'}")
+    if unit.get("TimerEnabled") not in ("enabled", "enabled-runtime", "static", "linked", "linked-runtime"):
+        fails.append(f"the dump timer is {unit.get('TimerEnabled') or 'not enabled'}")
+    nxt = stamp(unit.get("TimerNext"))
+    if nxt is None:
+        fails.append("the dump timer has no next run scheduled")
         return
-    fact.append(f"last trigger {hhmm(trig)}")
-    since_h = (now - trig) / 3600
-    if since_h > FAIL_AGE_H:
-        fails.append(f"the dump timer has not triggered for {since_h:.0f} h")
-    elif since_h > WARN_AGE_H:
-        warns.append(f"the dump timer has not triggered for {since_h:.0f} h")
-    running = unit.get("ActiveState") in ("activating", "active", "deactivating")
-    if running and since_h <= RUN_GRACE_H:
-        warns.append(f"backup still running since {hhmm(trig)}")   # review r2: never ok on yesterday's dump
-        return
+    sched = nxt - PERIOD_H * 3600
+    fact.append(f"scheduled {hhmm(sched)}")
     exited = stamp(unit.get("ExecMainExitTimestamp"))
-    if exited is None or exited < trig:
-        fails.append("no dump run finished after the last trigger")
-    if not found or found[-1][2] < trig:
-        fails.append("the last scheduled run wrote no dump")
+    ran = exited is not None and exited >= sched
+    wrote = bool(found) and found[-1][2] >= sched
+    running = unit.get("ActiveState") in ("activating", "active", "deactivating")
+    if now < sched + RUN_GRACE_H * 3600:
+        if running:
+            warns.append(f"backup still running since {hhmm(trig if trig and trig >= sched else sched)}")
+        elif not (ran and wrote):
+            warns.append(f"the {hhmm(sched)} run has not finished yet")
+        return
+    if not ran:
+        fails.append(f"no dump run finished after the scheduled {hhmm(sched)}")
+    if not wrote:
+        fails.append(f"the run scheduled {hhmm(sched)} wrote no dump")
 
 
 def integrity_facts(rec: dict | None, current: tuple[int, float] | None, newest: str | None, now: float,
@@ -161,8 +174,6 @@ def assess(found: list[tuple[str, int, float]], now: float, unit: dict, timer_ac
     fact.append(f"unit last result {result} (exit {status})")
     if result != "success" or status not in ("0", "?"):
         fails.append("the dump unit's last run failed")
-    if timer_active != "active":
-        warns.append(f"timer {timer_active or 'unknown'}")
     integrity_facts(integrity, integrity_current, found[-1][0] if found else None, now, fails, warns, fact)
     state = "fail" if fails else "warn" if warns else "ok"
     return state, ", ".join(fact) + (f" [{'; '.join(fails + warns)}]" if fails or warns else "")
@@ -246,7 +257,9 @@ def body(do_integrity: bool) -> None:
         return
     def snapshot():
         u = show(UNIT, "Result", "ExecMainStatus", "ExecMainExitTimestamp", "ActiveState")
-        u.update(show(TIMER, "LastTriggerUSec"))
+        t = show(TIMER, "LastTriggerUSec", "NextElapseUSecRealtime", "ActiveState", "UnitFileState")
+        u.update({"LastTriggerUSec": t.get("LastTriggerUSec"), "TimerNext": t.get("NextElapseUSecRealtime"),
+                  "TimerActive": t.get("ActiveState"), "TimerEnabled": t.get("UnitFileState")})
         return u
     unit = snapshot()
     deferred = integrity_run(directory, found, unit, dt.datetime.now().timestamp()) if do_integrity else None
@@ -257,8 +270,7 @@ def body(do_integrity: bool) -> None:
             emit(NAME, line(NAME, "fail", f"backup directory unreadable ({type(exc).__name__})"))
             return
         unit = snapshot()
-    timer = subprocess.run(["systemctl", "is-active", TIMER], capture_output=True, text=True,
-                           timeout=30, check=False).stdout.strip()
+    timer = unit.get("TimerActive") or ""
     rec = read_integrity()
     current = None
     done = (rec or {}).get("last_completed") or {}

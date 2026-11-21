@@ -1338,7 +1338,8 @@ class PalaceBackup(unittest.TestCase):
 
     def unit(self, **kw):
         u = {"Result": "success", "ExecMainStatus": "0", "ActiveState": "inactive",
-             "LastTriggerUSec": f"@{int(self.TRIG)}", "ExecMainExitTimestamp": f"@{int(self.TRIG + 600)}"}
+             "LastTriggerUSec": f"@{int(self.TRIG)}", "ExecMainExitTimestamp": f"@{int(self.TRIG + 600)}",
+             "TimerNext": f"@{int(self.TRIG + 86400)}", "TimerActive": "active", "TimerEnabled": "enabled"}
         u.update(kw)
         return u
 
@@ -1378,17 +1379,39 @@ class PalaceBackup(unittest.TestCase):
         unit = self.unit(ExecMainExitTimestamp=f"@{int(self.TRIG - 86400 + 600)}")
         state, fact = self._assess([4e9, 4e9, 4e9], unit=unit, newest_mtime=self.TRIG - 12 * 3600)
         self.assertEqual(state, "fail", fact)
-        self.assertIn("no dump run finished after the last trigger", fact)
+        self.assertIn("no dump run finished after the scheduled", fact)
         self.assertIn("wrote no dump", fact)
 
     def test_a_dump_still_running_soon_after_its_trigger_warns_never_ok(self):
         # review r2 (1): a hung backup inside the grace window must not read ok on yesterday's dump
         trig = self.NOW - 1800
-        unit = self.unit(ActiveState="active", LastTriggerUSec=f"@{int(trig)}",
+        unit = self.unit(ActiveState="active", LastTriggerUSec=f"@{int(trig)}", TimerNext=f"@{int(trig + 86400)}",
                          ExecMainExitTimestamp=f"@{int(trig - 86400 + 600)}")
         state, fact = self._assess([4e9, 4e9, 4e9], unit=unit, newest_mtime=trig - 86400 + 600)
         self.assertEqual(state, "warn", fact)
         self.assertIn("backup still running since", fact)
+
+    def test_a_timer_that_never_fired_last_night_fails(self):
+        # review r4: last trigger two days old, last night's scheduled time passed with no run: never ok
+        two_days = self.TRIG - 2 * 86400
+        unit = self.unit(LastTriggerUSec=f"@{int(two_days)}", ExecMainExitTimestamp=f"@{int(two_days + 600)}")
+        state, fact = self._assess([4e9, 4e9, 4e9], unit=unit, newest_mtime=two_days + 600)
+        self.assertEqual(state, "fail", fact)
+        self.assertIn("no dump run finished after the scheduled", fact)
+        self.assertIn("wrote no dump", fact)
+
+    def test_the_scheduled_run_not_yet_finished_inside_its_grace_warns(self):
+        sched = self.NOW - 1800
+        unit = self.unit(LastTriggerUSec=f"@{int(sched - 86400)}", TimerNext=f"@{int(sched + 86400)}",
+                         ExecMainExitTimestamp=f"@{int(sched - 86400 + 600)}")
+        state, fact = self._assess([4e9] * 3, unit=unit, newest_mtime=sched - 86400 + 600)
+        self.assertEqual(state, "warn", fact)
+        self.assertIn("has not finished yet", fact)
+
+    def test_an_inactive_or_disabled_timer_fails_on_its_own(self):
+        self.assertEqual(self._assess([4e9] * 3, unit=self.unit(TimerActive="inactive"))[0], "fail")
+        self.assertEqual(self._assess([4e9] * 3, unit=self.unit(TimerEnabled="disabled"))[0], "fail")
+        self.assertEqual(self._assess([4e9] * 3, unit=self.unit(TimerNext=""))[0], "fail")
 
     def test_the_integrity_mode_judges_the_state_after_its_run(self):
         # review r2 (2): the run takes up to an hour; the line must use a fresh inventory and unit state
@@ -1433,9 +1456,8 @@ class PalaceBackup(unittest.TestCase):
         self.assertEqual(state, "fail")
         self.assertIn("last run failed", fact)
 
-    def test_few_dumps_or_an_inactive_timer_warn(self):
+    def test_few_dumps_warn(self):
         self.assertEqual(self._assess([4e9, 4e9])[0], "warn")
-        self.assertEqual(self._assess([4e9] * 3, timer="inactive")[0], "warn")
 
     def test_integrity_is_bound_to_the_dump_it_read(self):
         # review r1 (2): the recorded dump was truncated or rewritten since its ok
