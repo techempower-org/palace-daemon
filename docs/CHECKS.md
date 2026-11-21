@@ -21,6 +21,8 @@ This repo is public, so **no host name appears here or in a line**: `host` names
 
 **palace-secrets classify** (`scripts/checks/palace_secrets_classify.py <wing>…`): for a wing's owner to call each hit a canary or decoy by design, dead, or live (rotate) without reading the drawer. One tab-separated line per hit: table, drawer id, source (a session transcript's first 8 hex of its UUID; never a directory name), where (document, or a known metadata key), kind, length, an encoding observation (hex length, a key prefix's documented meaning, an exact published example, a JWT's listed alg and unverified exp claim, base64 size and, for base64 JSON, its schema key names), and the first markdown heading only when it is plain words (letters, ≤12 each, ≤10 words, no credential word). Limit: a password made only of plain words could pass the heading filter; every other column holds no drawer text outside fixed lists. Nothing here says a value is valid or harmless.
 
+**palace-vacuum** (`scripts/checks/palace_vacuum.py [schema.table …]`, on demand, no timer): a manual `VACUUM (ANALYZE)` that lifts the role's 30 s `statement_timeout` for its own session, reads it back as `0`, and refuses to start otherwise. On 2026-11-21 five of seven hand-run VACUUMs were cancelled at 30 s. `warn` = a table still has autovacuum switched off; `fail` = a refused name, no DSN, or postgres raised (its type only, never its text). Run-book: [ops/manual-vacuum.md](ops/manual-vacuum.md).
+
 ## Running them
 
 Scripts are in `scripts/checks/`: pure functions, tested in `tests/test_palace_checks.py` (unittest) on fictional fixtures. Units are in `scripts/systemd/palace-check-*.{service,timer}`, installed by `scripts/systemd/install-checks.sh`. Every unit:
