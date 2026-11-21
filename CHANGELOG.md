@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added — *a manual VACUUM the role's 30 s statement_timeout cannot cancel*
+
+- **Run-book:** `docs/ops/manual-vacuum.md`. A hand-run `VACUUM`, `REINDEX` or index build first runs `SET statement_timeout = 0`, for that session only and never through `ALTER ROLE`. It reads the setting back, and it runs the postgres backend at idle I/O.
+  - The page also covers reading bloat when the stats have been reset: `n_live_tup` reads 0, so use `reltuples`.
+  - Why: on 2026-11-21, five of seven VACUUMs in a plain session were cancelled at 30 s. Rerun with the timeout lifted, the drawers table took 63 min.
+- **`scripts/checks/palace_vacuum.py`** writes `CHECK palace-vacuum`. It runs on demand, with no timer.
+  - It sets the timeout and confirms it reads `0` with `SHOW statement_timeout` before any VACUUM. Names that aren't plain `schema.table` are refused.
+  - The line is `warn` if a table still has autovacuum off.
+  - It replaces the 2026-11-17 one-shot, which lived outside the repo.
+
 ### Fixed — *the unit arms the hang watchdog*
 
 - **Watchdog:** `palace-daemon.service` sets `WatchdogSec=180` and `NotifyAccess=main`.

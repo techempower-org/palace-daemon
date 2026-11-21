@@ -39,6 +39,7 @@ psec = _load("palace_secrets")
 pclass = _load("palace_secrets_classify")
 pgt = _load("pg_timeouts")
 pbk = _load("palace_backup")
+pvac = _load("palace_vacuum")
 
 NOW = dt.datetime(2026, 11, 15, 9, 0, tzinfo=dt.timezone(dt.timedelta(hours=-8)))
 SHAPE = r"^CHECK [a-z-]+ (ok|warn|fail) · .+ · .+$"
@@ -1667,3 +1668,101 @@ class PalaceBackup(unittest.TestCase):
                 Path(d, n).write_bytes(b"x")
             self.assertEqual([x[0] for x in pbk.dumps(Path(d))],
                              ["mempalace-20261118.sql.gz", "mempalace-20261120.sql.gz"])
+
+
+class _FakeCursor:
+    def __init__(self, row):
+        self._row = row
+
+    def fetchone(self):
+        return self._row
+
+
+class _FakeConn:
+    """Records every statement; the 30 s role timeout cancels a VACUUM unless this session lifted it."""
+
+    def __init__(self, reloptions=None, dead=7):
+        self.sql, self.timeout_off, self.reloptions, self.dead = [], False, reloptions, dead
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self.sql.append(sql)
+        if sql == "SET statement_timeout = 0":
+            self.timeout_off = True
+        if sql.startswith("VACUUM") and not self.timeout_off:
+            raise RuntimeError("canceling statement due to statement timeout")
+        if sql == "SHOW statement_timeout":
+            return _FakeCursor(("0",) if self.timeout_off else ("30s",))
+        return _FakeCursor((self.dead, self.reloptions))
+
+
+class PalaceVacuum(unittest.TestCase):
+    """palace-vacuum: the session lifts the role's statement_timeout before any VACUUM (2026-11-21)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        p = mock.patch.dict(os.environ, {"PALACE_CHECKS_DIR": str(self.tmp)})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _run(self, argv, conn):
+        with contextlib.redirect_stdout(io.StringIO()):
+            pvac.main(argv, connect=lambda: conn)
+        return (self.tmp / "palace-vacuum.line").read_text().strip()
+
+    def test_the_timeout_is_lifted_first_and_only_with_set(self):
+        sql = pvac.statements(["mempalace_kg.MENTIONS"])
+        self.assertEqual(sql[0], "SET statement_timeout = 0")
+        self.assertTrue(sql[1].startswith("SET lock_timeout"))
+        self.assertEqual(sql[2], 'VACUUM (ANALYZE) "mempalace_kg"."MENTIONS"')
+        self.assertFalse(any("ALTER ROLE" in s.upper() for s in sql))
+
+    def test_a_vacuum_runs_past_the_role_timeout(self):
+        conn = _FakeConn()
+        out = self._run(["mempalace_drawers", "mempalace_kg.Drawer"], conn)
+        self.assertTrue(out.startswith("CHECK palace-vacuum ok"), out)
+        vac = [i for i, s in enumerate(conn.sql) if s.startswith("VACUUM")]
+        self.assertEqual(len(vac), 2)
+        self.assertLess(conn.sql.index("SET statement_timeout = 0"), vac[0])
+
+    def test_autovacuum_left_off_is_a_warning(self):
+        out = self._run([], _FakeConn(reloptions=["autovacuum_enabled=false"]))
+        self.assertTrue(out.startswith("CHECK palace-vacuum warn"), out)
+        self.assertIn("autovacuum OFF on public.mempalace_drawers", out)
+
+    def test_a_name_that_is_not_a_plain_identifier_never_reaches_postgres(self):
+        conn = _FakeConn()
+        out = self._run(['mempalace_drawers"; DROP TABLE x; --'], conn)
+        self.assertTrue(out.startswith("CHECK palace-vacuum fail"), out)
+        self.assertEqual(conn.sql, [])
+        for bad in ("a.b.c", "", "1abc", "sch.ta-ble"):
+            with self.assertRaises(ValueError):
+                pvac.parse_table(bad)
+
+    def test_a_session_where_the_timeout_did_not_lift_fails_before_any_vacuum(self):
+        class Ignored(_FakeConn):
+            def execute(self, sql, params=None):
+                if sql == "SET statement_timeout = 0":
+                    self.sql.append(sql)  # accepted, but a pooler reset it
+                    return _FakeCursor(None)
+                return super().execute(sql, params)
+
+        conn = Ignored()
+        out = self._run([], conn)
+        self.assertTrue(out.startswith("CHECK palace-vacuum fail · RuntimeError"), out)
+        self.assertFalse(any(s.startswith("VACUUM") for s in conn.sql))
+
+    def test_postgres_raising_is_a_fail_line_with_no_text_from_it(self):
+        class Boom(_FakeConn):
+            def execute(self, sql, params=None):
+                raise RuntimeError("secret-looking detail")
+
+        out = self._run([], Boom())
+        self.assertTrue(out.startswith("CHECK palace-vacuum fail · RuntimeError"), out)
+        self.assertNotIn("secret-looking", out)
