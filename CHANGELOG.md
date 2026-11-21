@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Changed — *mempalace_drawers gets a (wing, id) index for the wing-only page*
+
+- **The index:** `CREATE INDEX CONCURRENTLY mempalace_drawers_wing_id_idx ON mempalace_drawers (wing, id)`, built 2026-11-21 in 1 min (125 MB). It serves `WHERE wing = $1 AND id > $2 ORDER BY id LIMIT n`, which the 11-18 (wing, room, id) index can't.
+  - That shape had 34 statement-timeout cancellations in 48 h, all in busy hours.
+  - A deep page now reads about 1,000 buffers in 2–6 ms. Without the index it read up to 15,465 buffers and took up to 456 ms.
+  - Run-book: `docs/ops/mempalace-drawers-wing-id-index.md`.
+- **`docs/ops/manual-vacuum.md`:** an idle I/O class set with `ionice` only works when the disk's scheduler honours priority classes. On `none`, `ionice -p` reads back `idle`, but nothing enforces it. On 2026-11-21 the palace database's disk used `none`.
+
 ### Added — *a manual VACUUM the role's 30 s statement_timeout cannot cancel*
 
 - **Run-book:** `docs/ops/manual-vacuum.md`. A hand-run `VACUUM`, `REINDEX` or index build first runs `SET statement_timeout = 0`, for that session only and never through `ALTER ROLE`. It reads the setting back, and it runs the postgres backend at idle I/O.
