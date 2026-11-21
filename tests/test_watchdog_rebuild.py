@@ -31,6 +31,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import main  # noqa: E402
+import sd_watchdog  # noqa: E402
 
 
 def _one_iteration_sleep():
@@ -64,7 +65,7 @@ class TestWatchdogRebuild(unittest.IsolatedAsyncioTestCase):
         main._repair_state["mode"] = "rebuild"
         with patch("asyncio.sleep", side_effect=_one_iteration_sleep()), \
              patch.object(main, "_sd_notify") as notify, \
-             patch.object(main._mp, "_get_collection") as probe:
+             patch.object(sd_watchdog, "self_health") as probe:
             await main._watchdog_loop(20)
         # Keepalive fed, probe skipped entirely.
         notify.assert_called_once_with("WATCHDOG=1\n")
@@ -75,7 +76,7 @@ class TestWatchdogRebuild(unittest.IsolatedAsyncioTestCase):
         main._repair_state["mode"] = None
         with patch("asyncio.sleep", side_effect=_one_iteration_sleep()), \
              patch.object(main, "_sd_notify") as notify, \
-             patch.object(main._mp, "_get_collection", return_value=MagicMock()) as probe:
+             patch.object(sd_watchdog, "self_health", return_value=200) as probe:
             await main._watchdog_loop(20)
         probe.assert_called_once()
         notify.assert_called_once_with("WATCHDOG=1\n")
@@ -87,7 +88,7 @@ class TestWatchdogRebuild(unittest.IsolatedAsyncioTestCase):
         main._repair_state["mode"] = None
         with patch("asyncio.sleep", side_effect=_one_iteration_sleep()), \
              patch.object(main, "_sd_notify") as notify, \
-             patch.object(main._mp, "_get_collection", return_value=None) as probe:
+             patch.object(sd_watchdog, "self_health", return_value=None) as probe:
             await main._watchdog_loop(20)
         probe.assert_called_once()
         notify.assert_not_called()
@@ -100,10 +101,131 @@ class TestWatchdogRebuild(unittest.IsolatedAsyncioTestCase):
         main._repair_state["mode"] = "light"
         with patch("asyncio.sleep", side_effect=_one_iteration_sleep()), \
              patch.object(main, "_sd_notify") as notify, \
-             patch.object(main._mp, "_get_collection", return_value=MagicMock()) as probe:
+             patch.object(sd_watchdog, "self_health", return_value=200) as probe:
             await main._watchdog_loop(20)
         probe.assert_called_once()
         notify.assert_called_once_with("WATCHDOG=1\n")
+
+
+class TestWatchdogRequestPath(unittest.IsolatedAsyncioTestCase):
+    """#345 r1: the keepalive proves the request path (a served /health), at most every 60 s, from this process."""
+
+    def test_tick_is_a_third_capped_at_a_minute(self):
+        self.assertEqual(sd_watchdog.watchdog_tick(180), 60)
+        self.assertEqual(sd_watchdog.watchdog_tick(90), 30)
+        self.assertEqual(sd_watchdog.watchdog_tick(600), 60)
+        self.assertEqual(sd_watchdog.watchdog_tick(12), 10)
+
+    async def _serve(self, handler):
+        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        return server, server.sockets[0].getsockname()[1]
+
+    async def test_a_served_health_answer_is_its_status(self):
+        async def ok(reader, writer):
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}")
+            await writer.drain()
+            writer.close()
+        server, port = await self._serve(ok)
+        async with server:
+            self.assertEqual(await sd_watchdog.self_health(port, timeout=2), 200)
+
+    async def test_a_stalled_request_path_gets_no_status_in_time(self):
+        async def stall(reader, writer):
+            await reader.read()                         # accepts, never answers (the 11-19 hang) until the client hangs up
+            writer.close()
+        server, port = await self._serve(stall)
+        async with server:
+            self.assertIsNone(await sd_watchdog.self_health(port, timeout=0.3))
+
+    async def test_nothing_listening_is_no_status(self):
+        server, port = await self._serve(lambda r, w: None)
+        server.close()
+        await server.wait_closed()
+        self.assertIsNone(await sd_watchdog.self_health(port, timeout=0.3))
+
+    async def test_a_stalled_health_withholds_the_keepalive(self):
+        main._repair_state["in_progress"] = False
+        with patch("asyncio.sleep", side_effect=_one_iteration_sleep()), \
+             patch.object(main, "_sd_notify") as notify, \
+             patch.object(sd_watchdog, "self_health", return_value=None):
+            await main._watchdog_loop(180)
+        notify.assert_not_called()
+
+    async def test_a_503_still_pings(self):
+        main._repair_state["in_progress"] = False
+        with patch("asyncio.sleep", side_effect=_one_iteration_sleep()), \
+             patch.object(main, "_sd_notify") as notify, \
+             patch.object(sd_watchdog, "self_health", return_value=503):
+            await main._watchdog_loop(180)
+        notify.assert_called_once_with("WATCHDOG=1\n")
+
+    async def test_startup_keepalive_feeds_until_cancelled_and_is_bounded(self):
+        sent = []
+        with patch.object(main, "_sd_notify", side_effect=sent.append), \
+             patch("asyncio.sleep", side_effect=[None, None, asyncio.CancelledError()]):
+            await sd_watchdog.startup_keepalive(180)
+        self.assertEqual(sent, ["WATCHDOG=1\n"] * 3)
+        sent.clear()
+        with patch.object(main, "_sd_notify", side_effect=sent.append), patch("asyncio.sleep"):
+            await sd_watchdog.startup_keepalive(180, max_secs=120)
+        self.assertEqual(len(sent), 2)                  # 120 s / 60 s tick, then it stops feeding
+
+
+class TestNotifySender(unittest.TestCase):
+    """#345 r1 (3): NotifyAccess=main accepts only the main pid; the keepalive is sent from this process."""
+
+    def test_the_datagram_carries_this_process_pid(self):
+        import socket
+        import struct
+        import tempfile
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "notify")
+        rx = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            rx.bind(path)
+            rx.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+            with patch.dict(os.environ, {"NOTIFY_SOCKET": path}):
+                sd_watchdog.sd_notify("WATCHDOG=1\n")
+            msg, anc, _flags, _addr = rx.recvmsg(64, socket.CMSG_SPACE(12))
+            self.assertEqual(msg, b"WATCHDOG=1\n")
+            creds = [data for level, kind, data in anc if level == socket.SOL_SOCKET and kind == socket.SCM_CREDENTIALS]
+            pid, _uid, _gid = struct.unpack("iII", creds[0][:12])
+            self.assertEqual(pid, os.getpid())
+        finally:
+            rx.close()
+            os.remove(path)
+            os.rmdir(d)
+
+    def test_only_the_daemon_process_sends(self):
+        # no subprocess entry point imports the notifier: every sender runs in the uvicorn main process
+        import pathlib
+        root = pathlib.Path(_ROOT)
+        senders = sorted(str(f.relative_to(root)) for f in root.glob("*.py")
+                         if "_sd_notify(" in f.read_text() or "sd_notify(" in f.read_text())
+        self.assertEqual(senders, ["main.py", "sd_watchdog.py"])
+
+
+class TestAtomicRewrites(unittest.TestCase):
+    """#345 r1 (5): a watchdog abort mid-rewrite leaves the old file whole, never a truncated one."""
+
+    def test_a_kill_between_write_and_rename_keeps_the_old_file(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "q.processing")
+        with open(path, "w") as f:
+            f.write("a\nb\nc\n")
+        with patch.object(main.os, "replace", side_effect=KeyboardInterrupt("abort")):
+            with self.assertRaises(KeyboardInterrupt):
+                main._atomic_write_lines(path, ["x"])
+        with open(path) as f:
+            self.assertEqual(f.read(), "a\nb\nc\n")   # reloads as it was
+        self.assertEqual(os.listdir(d), ["q.processing"])   # no stray temp file
+        main._atomic_write_lines(path, ["x", "y\n"])
+        with open(path) as f:
+            self.assertEqual(f.read(), "x\ny\n")
+        os.remove(path)
+        os.rmdir(d)
 
 
 if __name__ == "__main__":

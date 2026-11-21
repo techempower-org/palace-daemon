@@ -4,6 +4,10 @@ Documentation=https://github.com/techempower-org/palace-daemon
 After=network-online.target docker.service
 Wants=network-online.target
 Requires=docker.service
+# A daemon that fails to start (or is aborted by the watchdog) 5 times in 15 min stops restarting and shows
+# failed, instead of a restart storm (review #345 r1); RestartSec=10 spaces the tries.
+StartLimitIntervalSec=900
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -28,19 +32,23 @@ Environment=PALACE_DAEMON_STRICT=0
 Environment=PALACE_RERANK_MODEL=ms-marco-TinyBERT-L-2-v2
 EnvironmentFile=/home/jp/.config/palace-daemon/env
 Restart=always
-RestartSec=5
+RestartSec=10
 TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
 KillMode=mixed
 
-# Hang watchdog. sd_watchdog.watchdog_loop pings WATCHDOG=1 every
-# WatchdogSec/2 only after the palace collection probe answers on the fast
-# executor (the same path /health takes), so a daemon whose event loop or
-# fast pool is stuck stops pinging and systemd aborts it; Restart=always
-# brings it back. Type=simple ignores notifications unless NotifyAccess is
-# set, which is why the loop never armed before. 180 s against a measured
-# 3-8 s startup. 2026-11-19: the daemon hung for 7 h with this unset.
+# Hang watchdog. sd_watchdog.watchdog_loop sends WATCHDOG=1 every
+# min(60 s, WatchdogSec/3) only after this process served its own GET /health
+# over loopback (the listener, the event loop, the fast executor and the
+# handler: the request path that hung on 2026-11-19 for 7 h). No answer within
+# the timeout, no ping; after 180 s systemd aborts the daemon and Restart=
+# brings it back. A 503 (postgres down) still pings: a restart cannot fix the
+# database. During startup sd_watchdog.startup_keepalive feeds it for up to
+# 30 min, so a long cold start is not killed. What was missing before was
+# WatchdogSec itself: with it set, systemd defaults NotifyAccess to main; it is
+# written out here so the sender rule is explicit (tests assert the pings come
+# from the main process).
 NotifyAccess=main
 WatchdogSec=180
 

@@ -344,6 +344,8 @@ from rebuild_progress import (  # noqa: E402
 # via a lazy `import main`, so the patches/mutations stay visible.
 from sd_watchdog import (  # noqa: E402
     sd_notify as _sd_notify,
+    startup_keepalive as _startup_keepalive,
+    watchdog_tick as _watchdog_tick,
     watchdog_interval as _watchdog_interval,
     watchdog_loop as _watchdog_loop,
 )
@@ -1467,12 +1469,30 @@ def _defer_entries(entries: list, path: str) -> None:
         _log.warning("drain-mine: could not defer %d entr(ies) back to the queue", len(entries))
 
 
+def _atomic_write_lines(path: str, lines) -> None:
+    """Write ``lines`` to ``path`` all or nothing: a temp file in the same directory, fsync, then rename.
+
+    The watchdog (#345) can abort the daemon at any instruction; an in-place ``open(path, "w")`` killed
+    mid-write leaves a truncated file the next start reads as the whole truth. A rename is atomic on one
+    filesystem, so a kill leaves either the old file or the new one (and at most a stray ``.tmp``)."""
+    tmp = f"{path}.tmp-{os.getpid()}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            for ln in lines:
+                f.write(ln if ln.endswith("\n") else ln + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+        raise
+
+
 def _write_processing(proc_path: str, entries: list) -> None:
     """``.processing`` must describe exactly what the pass still owes (#244)."""
     try:
-        with open(proc_path, "w", encoding="utf-8") as f:
-            for ln, _entry in entries:
-                f.write(ln if ln.endswith("\n") else ln + "\n")
+        _atomic_write_lines(proc_path, [ln for ln, _entry in entries])
     except OSError:
         _log.warning("drain-mine: could not rewrite %s", proc_path)
 
@@ -1833,8 +1853,7 @@ async def _drain_pending_mines() -> int:
             )
         if failed_lines:
             qpath = proc_path + ".failed-" + datetime.now().strftime("%Y%m%d%H%M%S")
-            with open(qpath, "w", encoding="utf-8") as f:
-                f.writelines(failed_lines)
+            _atomic_write_lines(qpath, failed_lines)
             _log.warning("drain-mine: %d entries quarantined at %s", len(failed_lines), qpath)
         if requeue_lines:
             # Back onto the live queue (appends coexist with new /mine posts).
@@ -1921,8 +1940,7 @@ async def _drain_pending_writes() -> int:
                 failed_lines.append(line)
         if failed_lines:
             qpath = proc_path + ".failed-" + datetime.now().strftime("%Y%m%d%H%M%S")
-            with open(qpath, "w", encoding="utf-8") as f:
-                f.writelines(failed_lines)
+            _atomic_write_lines(qpath, failed_lines)
             _log.warning("drain: %d entries quarantined at %s", len(failed_lines), qpath)
         os.remove(proc_path)
     except Exception:
@@ -2319,6 +2337,9 @@ def _log_kg_writethrough_stages(env, logger) -> None:
 async def lifespan(app: FastAPI):
     import logging
     logger = logging.getLogger(__name__)
+    # Feed the watchdog through startup (Type=simple arms it at exec): a long cold start is not a hang (#345 r1).
+    _startup_feed = (asyncio.create_task(_startup_keepalive(_watchdog_interval()))
+                     if _watchdog_interval() > 0 else None)
 
     _record_restart()
     cl_state = _crash_loop_state()
@@ -2427,11 +2448,13 @@ async def lifespan(app: FastAPI):
     if _postgres_dsn():
         _STATUS_SNAPSHOT.warm()
 
+    if _startup_feed is not None:
+        _startup_feed.cancel()
     app.state.watchdog_task = None
     wdog_secs = _watchdog_interval()
     if wdog_secs > 0:
         app.state.watchdog_task = asyncio.create_task(_watchdog_loop(wdog_secs))
-        logger.info("Systemd watchdog active (interval=%ds, tick=%ds).", wdog_secs, max(10, wdog_secs // 2))
+        logger.info("Systemd watchdog active (interval=%ds, tick=%ds).", wdog_secs, _watchdog_tick(wdog_secs))
 
     # File-watcher service: mines configured directories on file change.
     # Configured via PALACE_WATCH_DIRS (comma-separated path[=wing]).

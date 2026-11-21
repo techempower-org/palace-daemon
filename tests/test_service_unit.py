@@ -2,8 +2,8 @@
 
 2026-11-19 the daemon hung for 7 h (every endpoint timing out, memory at its
 MemoryHigh) while systemd still called it active: sd_watchdog.watchdog_loop
-existed but the unit had no WatchdogSec, and Type=simple drops notifications
-unless NotifyAccess is set. These read palace-daemon.service as shipped.
+existed but the unit had no WatchdogSec, so systemd never armed a watchdog (with WatchdogSec set, an unset
+NotifyAccess defaults to main). These read palace-daemon.service as shipped.
 """
 import configparser
 import pathlib
@@ -49,8 +49,19 @@ class ServiceUnit(unittest.TestCase):
     def test_notifications_reach_systemd(self):
         svc = _service()
         if svc.get("Type", "simple") != "notify":
-            self.assertIn(svc.get("NotifyAccess", "none"), ("main", "all"),
-                          "Type=simple without NotifyAccess drops WATCHDOG=1, so the watchdog would kill a healthy daemon")
+            # explicit, not left to the WatchdogSec default: the sender must be the main process
+            # (tests/test_watchdog_rebuild.py TestNotifySender), and "none" would drop WATCHDOG=1
+            self.assertIn(svc.get("NotifyAccess", "main"), ("main", "all"))
+
+    def test_restarts_are_spaced_and_limited(self):
+        # review #345 r1: a daemon aborted again and again stops (failed) instead of a restart storm
+        cp = configparser.ConfigParser(strict=False, interpolation=None, delimiters=("=",))
+        cp.optionxform = str
+        cp.read_string(UNIT.read_text())
+        self.assertGreaterEqual(_seconds(_service().get("RestartSec", "0")), 5)
+        self.assertGreater(int(cp["Unit"].get("StartLimitBurst", "0")), 1)
+        self.assertGreaterEqual(_seconds(cp["Unit"].get("StartLimitIntervalSec", "0")),
+                                5 * _seconds(_service()["WatchdogSec"]))
 
     def test_restart_follows_a_watchdog_abort(self):
         self.assertIn(_service().get("Restart"), ("always", "on-failure", "on-watchdog", "on-abnormal"))

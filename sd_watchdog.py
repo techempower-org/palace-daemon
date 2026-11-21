@@ -64,17 +64,65 @@ def watchdog_interval() -> int:
         return 0
 
 
+def watchdog_tick(interval_secs: int) -> int:
+    """Seconds between keepalives: a third of WatchdogSec, at most 60 s (review #345 r1: half left no margin)."""
+    return max(10, min(60, interval_secs // 3))
+
+
+# A served /health answer, either way: 200, or 503 when the collection cannot open (postgres down). Both prove
+# the request path (accept, routing, the fast executor, the handler) is alive; a restart cannot fix the database,
+# and killing on 503 would turn a postgres outage into a restart loop that StartLimitBurst then ends with the
+# unit failed. A hung request path answers nothing, or not within the timeout.
+SERVED = (200, 503)
+
+
+async def self_health(port: int | None = None, timeout: float = 20.0) -> int | None:
+    """GET /health from this process over loopback; the HTTP status, or None when nothing came back in time.
+
+    The request goes through the same listener, event loop and handler as a client's, so a ping that depends on
+    it proves the path that hung on 2026-11-19, not just that a side thread is alive (review #345 r1)."""
+    port = port or int(os.environ.get("PALACE_PORT", "8085"))
+    writer = None
+    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), timeout)
+        writer.write(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        await asyncio.wait_for(writer.drain(), timeout)
+        status = await asyncio.wait_for(reader.readline(), timeout)
+        parts = status.split()
+        return int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else None
+    except (OSError, asyncio.TimeoutError, ValueError):
+        return None
+    finally:
+        if writer is not None:
+            writer.close()
+
+
+async def startup_keepalive(interval_secs: int, max_secs: int = 1800) -> None:
+    """Feed the watchdog while the lifespan startup runs (review #345 r1: Type=simple arms the watchdog at exec,
+    and a legitimately long start, such as a cold index load, must not be killed). Bounded: a startup that hangs
+    past ``max_secs`` stops being fed and the watchdog ends it. Cancelled by the lifespan once startup is done."""
+    import main
+    tick = watchdog_tick(interval_secs)
+    waited = 0
+    while waited < max_secs:
+        main._sd_notify("WATCHDOG=1\n")
+        try:
+            await asyncio.sleep(tick)
+        except asyncio.CancelledError:
+            return
+        waited += tick
+
+
 async def watchdog_loop(interval_secs: int) -> None:
-    """Ping systemd watchdog at half the watchdog interval, only when palace is healthy.
+    """Ping systemd's watchdog every ``watchdog_tick`` seconds, only after this process served its own /health.
 
     Honor CancelledError so the lifespan shutdown can stop us cleanly —
     otherwise uvicorn hangs on "Waiting for background tasks to complete"
     until systemd SIGKILLs at TimeoutStopSec.
     """
-    import main  # lazy — preserves patch.object(main, "_sd_notify") /
-    #              patch.object(main._mp, "_get_collection") and live mutation
+    import main  # lazy — preserves patch.object(main, "_sd_notify") and live mutation
     #              of main._repair_state in tests/test_watchdog_rebuild.py.
-    tick = max(10, interval_secs // 2)
+    tick = watchdog_tick(interval_secs)
     while True:
         try:
             await asyncio.sleep(tick)
@@ -92,14 +140,12 @@ async def watchdog_loop(interval_secs: int) -> None:
             main._sd_notify("WATCHDOG=1\n")
             continue
         try:
-            loop = asyncio.get_running_loop()
-            # #286: the FAST pool, never the default one. A default pool
-            # starved by MCP tool execution would stop WATCHDOG=1 and let
-            # systemd SIGABRT a daemon whose only problem is a slow query.
-            col = await loop.run_in_executor(main._FAST_EXECUTOR, main._mp._get_collection)
-            if col is not None:
+            # /health runs its probes on the FAST pool (#286), so a default pool starved by MCP tool execution does
+            # not stop WATCHDOG=1; a stuck loop, listener or fast pool does.
+            status = await self_health(timeout=max(5.0, tick / 3))
+            if status in SERVED:
                 main._sd_notify("WATCHDOG=1\n")
             else:
-                main._log.warning("Watchdog: palace collection unavailable — skipping WATCHDOG=1")
+                main._log.warning("Watchdog: /health did not answer (%s): skipping WATCHDOG=1", status)
         except Exception as e:
             main._log.warning("Watchdog check failed: %s", e)
