@@ -1348,13 +1348,19 @@ class PalaceBackup(unittest.TestCase):
         return [(f"mempalace-202611{10 + i:02d}.sql.gz", s, newest - 86400 * (n - 1 - i)) for i, s in enumerate(sizes)]
 
     def good(self, found):
+        """A completed run's fields (wrapped as last_completed by ``wrap``)."""
         name, size, mtime = found[-1]
-        return {"state": "done", "result": "ok", "dump": name, "size": size, "mtime": mtime,
+        return {"result": "ok", "dump": name, "size": size, "mtime": mtime,
                 "started": self.NOW - 2 * 86400, "at": self.NOW - 2 * 86400}
+
+    @staticmethod
+    def wrap(rec, running_since=None):
+        return None if rec is None else {"last_completed": rec, "running_since": running_since}
 
     def _assess(self, sizes, unit=None, integrity="good", current="same", newest_mtime=None, timer="active"):
         found = self._dumps(sizes, newest_mtime)
-        rec = self.good(found) if integrity == "good" else integrity
+        rec = self.wrap(self.good(found)) if integrity == "good" else integrity
+        rec = self.wrap(rec) if rec and "result" in rec else rec
         cur = (found[-1][1], found[-1][2]) if current == "same" else current
         return pbk.assess(found, self.NOW, unit or self.unit(), timer, rec, cur)
 
@@ -1440,21 +1446,53 @@ class PalaceBackup(unittest.TestCase):
     def test_an_older_dumps_integrity_is_named_as_not_the_newest(self):
         found = self._dumps([4e9] * 3)
         rec = dict(self.good(found), dump=found[-2][0], size=found[-2][1], mtime=found[-2][2])
-        state, fact = pbk.assess(found, self.NOW, self.unit(), "active", rec, (found[-2][1], found[-2][2]))
+        state, fact = pbk.assess(found, self.NOW, self.unit(), "active", self.wrap(rec), (found[-2][1], found[-2][2]))
         self.assertEqual(state, "ok", fact)
         self.assertIn("(not the newest)", fact)
 
     def test_a_killed_integrity_run_does_not_leave_an_old_ok_standing(self):
-        # review r1 (4): the run wrote "running" first; killed, that record stays and fails the line
-        rec = {"state": "running", "dump": "mempalace-20261112.sql.gz", "started": self.NOW - 3 * 3600}
+        # review r1 (4): the run marks running_since first; killed, that mark stays and fails the line
+        found = self._dumps([4e9] * 3)
+        rec = self.wrap(self.good(found), running_since=self.NOW - 3 * 3600)
         state, fact = self._assess([4e9] * 3, integrity=rec)
         self.assertEqual(state, "fail", fact)
         self.assertIn("never finished", fact)
-        rec["started"] = self.NOW - 600
-        self.assertIn("integrity running", self._assess([4e9] * 3, integrity=rec)[1])
+        rec["running_since"] = self.NOW - 600
+        state, fact = self._assess([4e9] * 3, integrity=rec)
+        self.assertEqual(state, "ok", fact)
+        self.assertIn("integrity re-run in progress since", fact)
+
+    def test_a_rerun_in_progress_never_hides_a_recorded_failure(self):
+        # review r3: a failed run, then a re-run starts: the daily line still fails on the last completed result
+        found = self._dumps([4e9] * 3)
+        failed = dict(self.good(found), result="fail", why="gzip exit 1")
+        state, fact = self._assess([4e9] * 3, integrity=self.wrap(failed, running_since=self.NOW - 300))
+        self.assertEqual(state, "fail", fact)
+        self.assertIn("the last integrity run failed", fact)
+        self.assertIn("re-run in progress", fact)
+
+    def test_starting_a_run_keeps_the_last_completed_result(self):
+        # review r3: integrity_run must not overwrite last_completed before its own run completes
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"PALACE_CHECKS_DIR": d}):
+            pbk.write_integrity({"last_completed": {"result": "fail", "dump": "mempalace-20261119.sql.gz"},
+                                 "running_since": None})
+            seen = []
+
+            def look(_path, opener=None):
+                seen.append(pbk.read_integrity())
+                return "ok", "whole stream, closing line last"
+            found = [("mempalace-20261120.sql.gz", 4e9, self.NOW - 3600)]
+            with mock.patch.object(pbk, "integrity_of", side_effect=look):
+                pbk.integrity_run(Path(d), found, {"ActiveState": "inactive"}, self.NOW)
+            self.assertEqual(seen[0]["last_completed"]["result"], "fail")     # during the run
+            self.assertEqual(seen[0]["running_since"], self.NOW)
+            after = pbk.read_integrity()
+            self.assertEqual(after["last_completed"]["result"], "ok")        # a completed run replaces it
+            self.assertIsNone(after["running_since"])
 
     def test_integrity_missing_old_or_failed(self):
         self.assertEqual(self._assess([4e9] * 3, integrity=None)[0], "warn")
+        self.assertEqual(self._assess([4e9] * 3, integrity={"running_since": self.NOW - 60})[0], "warn")
         found = self._dumps([4e9] * 3)
         old = dict(self.good(found), at=self.NOW - 10 * 86400)
         self.assertEqual(self._assess([4e9] * 3, integrity=old)[0], "warn")

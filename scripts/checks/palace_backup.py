@@ -11,8 +11,9 @@ no path or host is named in this repo):
   was written after it (a missed night fails even while yesterday's dump is still young);
 - the newest dump's age and size, and its size against the dump before it; how many are kept;
 - the dump unit's last result and exit status, and whether its timer is active;
-- the last ``--integrity`` record, bound to the dump it read (name, size, mtime): a dump changed since,
-  a run that never finished, or a failed run fails the line.
+- the last COMPLETED ``--integrity`` run, bound to the dump it read (name, size, mtime): a dump changed
+  since or a failed run fails the line; a re-run in progress only adds a note, and one that never
+  finishes fails it.
 
 Weekly, ``--integrity`` decompresses the newest dump end to end at idle I/O; gzip must exit 0 and the
 last non-empty line must be pg_dump's closing line. It defers (no record) while the dump unit runs or
@@ -100,28 +101,31 @@ def schedule(found, now: float, unit: dict, fails: list, warns: list, fact: list
 
 def integrity_facts(rec: dict | None, current: tuple[int, float] | None, newest: str | None, now: float,
                     fails: list, warns: list, fact: list) -> None:
-    """The last integrity record, judged against the dump it read as that dump is now."""
-    if not rec:
-        warns.append("no integrity run yet")
-        return
-    if rec.get("state") == "running":
-        started = float(rec.get("started", 0))
-        if (now - started) / 60 > INTEGRITY_RUN_MAX_MIN:
-            fails.append(f"the integrity run started {hhmm(started)} never finished")
+    """The last COMPLETED integrity run, judged against the dump it read as that dump is now; a run in progress
+    only adds a note (review r3: starting a re-run must never hide a recorded failure)."""
+    rec = rec or {}
+    done = rec.get("last_completed")
+    if not done:
+        warns.append("no integrity run completed yet")
+    else:
+        dump = str(done.get("dump", "?"))
+        days = (now - float(done.get("at", 0))) / 86400
+        which = "" if dump == newest else " (not the newest)"
+        fact.append(f"integrity {done.get('result', '?')} on "
+                    f"{DUMP.match(dump).group(1) if DUMP.match(dump) else '?'}{which} {days:.0f} d ago")
+        if done.get("result") != "ok":
+            fails.append("the last integrity run failed")
+        elif current is not None and (current[0] != done.get("size") or current[1] != done.get("mtime")):
+            fails.append("the dump changed since its integrity run")
+        elif days > INTEGRITY_MAX_DAYS:
+            warns.append(f"integrity older than {INTEGRITY_MAX_DAYS} d")
+    since = rec.get("running_since")
+    if since:
+        since = float(since)
+        if (now - since) / 60 > INTEGRITY_RUN_MAX_MIN:
+            fails.append(f"the integrity re-run started {hhmm(since)} never finished")
         else:
-            fact.append(f"integrity running since {hhmm(started)}")
-        return
-    dump = str(rec.get("dump", "?"))
-    days = (now - float(rec.get("at", 0))) / 86400
-    which = "" if dump == newest else " (not the newest)"
-    fact.append(f"integrity {rec.get('result', '?')} on {DUMP.match(dump).group(1) if DUMP.match(dump) else '?'}"
-                f"{which} {days:.0f} d ago")
-    if rec.get("result") != "ok":
-        fails.append("the last integrity run failed")
-    elif current is not None and (current[0] != rec.get("size") or current[1] != rec.get("mtime")):
-        fails.append("the dump changed since its integrity run")
-    elif days > INTEGRITY_MAX_DAYS:
-        warns.append(f"integrity older than {INTEGRITY_MAX_DAYS} d")
+            fact.append(f"integrity re-run in progress since {hhmm(since)}")
 
 
 def assess(found: list[tuple[str, int, float]], now: float, unit: dict, timer_active: str,
@@ -219,10 +223,13 @@ def integrity_run(directory: Path, found, unit: dict, now: float) -> str | None:
         return "integrity deferred: the dump unit is running"
     if (now - mtime) / 60 < SETTLE_MIN:
         return f"integrity deferred: the newest dump is under {SETTLE_MIN} min old"
-    write_integrity({"state": "running", "dump": name, "size": size, "mtime": mtime, "started": now})
+    rec = read_integrity() or {}
+    rec.update({"running_since": now, "running_dump": name})          # last_completed stays as it was
+    write_integrity(rec)
     result, why = integrity_of(directory / name)
-    write_integrity({"state": "done", "result": result, "why": why, "dump": name, "size": size, "mtime": mtime,
-                     "started": now, "at": dt.datetime.now().timestamp()})
+    write_integrity({"last_completed": {"result": result, "why": why, "dump": name, "size": size, "mtime": mtime,
+                                        "started": now, "at": dt.datetime.now().timestamp()},
+                     "running_since": None})
     return None
 
 
@@ -254,9 +261,10 @@ def body(do_integrity: bool) -> None:
                            timeout=30, check=False).stdout.strip()
     rec = read_integrity()
     current = None
-    if rec and rec.get("dump"):
+    done = (rec or {}).get("last_completed") or {}
+    if done.get("dump"):
         try:
-            st = (directory / str(rec["dump"])).stat()
+            st = (directory / str(done["dump"])).stat()
             current = (st.st_size, st.st_mtime)
         except OSError:
             current = None
