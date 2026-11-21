@@ -1,4 +1,4 @@
-"""The shipped systemd unit arms the hang watchdog and caps malloc arenas.
+"""The shipped systemd unit arms the hang watchdog.
 
 2026-11-19 the daemon hung for 7 h (every endpoint timing out, memory at its
 MemoryHigh) while systemd still called it active: sd_watchdog.watchdog_loop
@@ -25,16 +25,6 @@ def _seconds(value: str) -> int:
         if v.endswith(suffix):
             return int(v[: -len(suffix)]) * mult
     return int(v)
-
-
-def _environment(svc) -> dict:
-    # configparser keeps the last of repeated keys; read every Environment= line.
-    env = {}
-    for line in UNIT.read_text().splitlines():
-        if line.startswith("Environment="):
-            k, _, v = line[len("Environment="):].partition("=")
-            env[k] = v
-    return env
 
 
 class ServiceUnit(unittest.TestCase):
@@ -65,11 +55,6 @@ class ServiceUnit(unittest.TestCase):
 
     def test_restart_follows_a_watchdog_abort(self):
         self.assertIn(_service().get("Restart"), ("always", "on-failure", "on-watchdog", "on-abnormal"))
-
-    def test_malloc_arenas_are_capped(self):
-        env = _environment(_service())
-        self.assertIn("MALLOC_ARENA_MAX", env)
-        self.assertLessEqual(int(env["MALLOC_ARENA_MAX"]), 4)
 
 
 if __name__ == "__main__":

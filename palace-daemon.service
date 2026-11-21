@@ -52,12 +52,6 @@ KillMode=mixed
 NotifyAccess=main
 WatchdogSec=180
 
-# Cap glibc malloc arenas. With 24 cores glibc allows up to 192 per-thread
-# 64 MB arenas; 2026-11-20 the daemon held 4.8 GB of its 6.8 GB anonymous
-# memory (RSS + swap) in 131 such arenas 12 h after a restart at 381 MB,
-# which is how it reached its MemoryHigh and stalled the day before.
-Environment=MALLOC_ARENA_MAX=2
-
 # Lower oom_score so userland earlyoom (running on familiar at default
 # 10% mem / 10% swap thresholds) doesn't pick the daemon as its
 # SIGTERM victim during memory-heavy /graph or /backfill-age calls.
