@@ -1027,3 +1027,27 @@ class TestProbeWingDrainsFirst(unittest.TestCase):
         entries.append(("l6", {"payload": {"dir": "/s/p.jsonl", "wing": "palace_probe", "mode": "convos"}}))
         order = sorted(range(len(entries)), key=lambda i: (main._drain_entry_priority(entries[i][1]), i))
         self.assertEqual(order[0], 5)
+
+
+class TestQueueByPriority(unittest.TestCase):
+    """#344 r1: /mine/status counts entries per drain priority and the oldest wait per priority."""
+
+    def test_counts_and_oldest_per_priority(self):
+        import datetime as _dt
+        import tempfile
+        d = tempfile.mkdtemp()
+        live, proc = os.path.join(d, "q.jsonl"), os.path.join(d, "q.jsonl.processing")
+        old = (_dt.datetime.now() - _dt.timedelta(seconds=900)).isoformat()
+        new = (_dt.datetime.now() - _dt.timedelta(seconds=30)).isoformat()
+        with open(live, "w") as f:
+            f.write(json.dumps({"payload": {"dir": "/t/a.jsonl", "wing": "jp", "mode": "convos"}, "enqueued_at": old}) + "\n")
+            f.write(json.dumps({"payload": {"dir": "/s/p.jsonl", "wing": "palace_probe", "mode": "convos"},
+                                "enqueued_at": new}) + "\n")
+            f.write("not json\n")
+        with open(proc, "w") as f:
+            f.write(json.dumps({"payload": {"dir": "/t/b.jsonl", "wing": "jp", "mode": "convos"}, "enqueued_at": new}) + "\n")
+        counts, oldest = main._queue_by_priority((live, proc))
+        self.assertEqual(counts, {"2": 2, "1": 1})
+        self.assertGreaterEqual(oldest["2"], 899)
+        self.assertLess(oldest["1"], 120)
+

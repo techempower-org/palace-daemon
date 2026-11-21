@@ -1076,6 +1076,25 @@ class PalaceSecretsProbeWait(unittest.TestCase):
     def test_drawers_without_chunk_total(self):
         self.assertIn("1 drawer(s) without chunk_total", self._wait([("d1", "doc", "{}", None)])[1])
 
+    def test_all_filed_but_not_stable_names_the_unmet_condition(self):
+        # review #344 r1 (2): the deadline expired on stability, not on the count
+        rows = [("d1", "doc", "{}", 2), ("d2", "doc", "{}", 2)]
+        with mock.patch.object(psec, "_rows_for", return_value=rows), mock.patch.object(psec.time, "sleep"), \
+                mock.patch.object(psec.time, "time", side_effect=[0, 10**9, 10**9]):   # one read, then the deadline
+            state, why = psec.probe_wait(mock.MagicMock(), Path("/p/x.jsonl"), {}, None, deadline=1)
+        self.assertEqual(state, "not measured")
+        self.assertIn("2 of 2 filed, count not yet stable", why)
+
+    def test_an_ok_probe_names_its_lane_the_backlog_and_the_request_path_instrument(self):
+        # review #344 r1 (1)+(3): priority 1 hides the p2 backlog unless the line names it; the request path is
+        # the daemon watchdog's job, not this probe's
+        txt = psec.lane_text({"queued_by_priority": {"2": 14, "1": 0}, "oldest_waiting_s": {"2": 1800}})
+        self.assertEqual(txt, "probe lane p1 · queue depth 14 · oldest p2 item waiting 1800s · request path: daemon watchdog")
+        self.assertIn("no p2 item waiting", psec.lane_text({"queued_by_priority": {}, "oldest_waiting_s": {}}))
+        self.assertIn("queue unread", psec.lane_text(None))
+        out = psec.assess({}, 0, 0, 10, 0, 0, ("ok", txt), True)
+        self.assertIn("miner redaction: ok (probe lane p1 · queue depth 14", out)
+
     def test_no_drawer_text_in_the_reason(self):
         why = self._wait([("d1", "plainlettersecretvalue", "{}", 3)])[1]
         self.assertNotIn("plainlettersecretvalue", why)

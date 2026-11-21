@@ -215,9 +215,7 @@ def assess(
 ) -> str:
     """hits: {(wing, kind): n} over drawers; miner: (state, detail); redacted/failed count drawers and entities."""
     mstate, mdetail = miner
-    miner_txt = f"miner redaction: {mstate}" + (
-        f" ({mdetail})" if mstate != "ok" else ""
-    )
+    miner_txt = f"miner redaction: {mstate}" + (f" ({mdetail})" if mdetail else "")
     left_txt = f"; {leftovers} probe leftover(s)" if leftovers else ""
     if error:
         return line(
@@ -346,12 +344,29 @@ def probe_wait(conn, path: Path, fakes: dict, placeholder, deadline: float) -> t
 
 
 def wait_state(rows: list, total: int) -> str:
-    """What the wait saw at its deadline, in counts only: why a probe did not count as filed."""
+    """What the wait saw at its deadline, in counts only: the condition that was not met."""
     if not rows:
         return "not mined: 0 drawers"
     if not total:
         return f"{len(rows)} drawer(s) without chunk_total"
+    if len(rows) >= total:      # #344 r1: all filed, but the count was not seen twice the same (still changing)
+        return f"{len(rows)} of {total} filed, count not yet stable"
     return f"{len(rows)} of {total} chunk(s) filed"
+
+
+def lane_text(status: dict | None) -> str:
+    """The probe's lane and the backlog it skipped (#344 r1), from /mine/status; counts and seconds only.
+
+    The probe drains at priority 1, so its timing says nothing about priority-2 transcript work or about
+    the request path: the backlog is named here, and the request path is the daemon watchdog's (#345)."""
+    if not isinstance(status, dict):
+        return "probe lane p1 · queue unread · request path: daemon watchdog"
+    by = status.get("queued_by_priority") or {}
+    old = status.get("oldest_waiting_s") or {}
+    depth = sum(int(v) for v in by.values() if str(v).isdigit())
+    p2 = old.get("2")
+    p2_txt = f"oldest p2 item waiting {int(p2)}s" if p2 is not None else "no p2 item waiting"
+    return f"probe lane p1 · queue depth {depth} · {p2_txt} · request path: daemon watchdog"
 
 
 def probe_files_cleanup(pdir: Path) -> int:
@@ -601,6 +616,11 @@ def body() -> None:
         # Judge the probe BEFORE any redaction: redacting its raw drawers first
         # would repair the very control it measures.
         verdict = early or probe_wait(conn, path, fakes, placeholder, deadline)
+        if verdict[0] == "ok":
+            try:
+                verdict = ("ok", lane_text(_daemon("GET", "/mine/status", key, timeout=20)[1]))
+            except (OSError, ValueError):
+                verdict = ("ok", lane_text(None))
         ents, ent_hits, e_done, e_bad = entity_scan(
             conn, passes, placeholder, redact_on, bdir
         )

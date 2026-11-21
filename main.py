@@ -3336,6 +3336,7 @@ async def mine_status(x_api_key: str | None = Header(default=None)):
 
     live = _count(path)
     processing = _count(proc_path)
+    by_prio, oldest = await asyncio.to_thread(_queue_by_priority, (path, proc_path))
     active = getattr(app.state, "active_mines", None)
     task = _mine_drain_task
     return {
@@ -3358,7 +3359,40 @@ async def mine_status(x_api_key: str | None = Header(default=None)):
         "active_mine": dict(_ACTIVE_MINE_STATE) or None,
         "repair_in_progress": bool(_repair_state.get("in_progress")),
         "next": _peek(path) + _peek(proc_path),
+        # #344 r1: the probe drains at priority 1, so its timing no longer shows the transcript backlog;
+        # these do (entries per drain priority, and the oldest waiting entry's age per priority, seconds).
+        "queued_by_priority": by_prio,
+        "oldest_waiting_s": oldest,
     }
+
+
+def _queue_by_priority(paths) -> tuple[dict, dict]:
+    """({priority: entries}, {priority: oldest wait in s}) over the live queue and the in-processing file."""
+    counts: dict = {}
+    oldest: dict = {}
+    now = datetime.now()
+    for p in paths:
+        try:
+            with open(p, encoding="utf-8") as f:
+                for ln in f:
+                    if not ln.strip():
+                        continue
+                    try:
+                        entry = json.loads(ln)
+                    except ValueError:
+                        continue
+                    if not isinstance(entry, dict):
+                        continue
+                    prio = str(_drain_entry_priority(entry))
+                    counts[prio] = counts.get(prio, 0) + 1
+                    try:
+                        waited = (now - datetime.fromisoformat(str(entry.get("enqueued_at")))).total_seconds()
+                    except (TypeError, ValueError):
+                        continue
+                    oldest[prio] = max(oldest.get(prio, 0), int(waited))
+        except OSError:
+            continue
+    return counts, oldest
 
 
 @app.get("/status/fast")
