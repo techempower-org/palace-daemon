@@ -1091,9 +1091,29 @@ class PalaceSecretsProbeWait(unittest.TestCase):
         txt = psec.lane_text({"queued_by_priority": {"2": 14, "1": 0}, "oldest_waiting_s": {"2": 1800}})
         self.assertEqual(txt, "probe lane p1 · queue depth 14 · oldest p2 item waiting 1800s · request path: daemon watchdog")
         self.assertIn("no p2 item waiting", psec.lane_text({"queued_by_priority": {}, "oldest_waiting_s": {}}))
-        self.assertIn("queue unread", psec.lane_text(None))
+        self.assertIn("queue: unavailable (no queue fields)", psec.lane_text(None))
         out = psec.assess({}, 0, 0, 10, 0, 0, ("ok", txt), True)
         self.assertIn("miner redaction: ok (probe lane p1 · queue depth 14", out)
+
+    def test_an_unavailable_queue_snapshot_is_warn_never_depth_0(self):
+        # review #344 r2: a 503 (or timeout, or a body without the fields) must not read as an empty queue
+        import urllib.error
+        err = urllib.error.HTTPError("http://x/mine/status", 503, "unavailable", {}, None)
+        with mock.patch.object(psec, "_daemon", side_effect=err):
+            body, why = psec.queue_status("k")
+        self.assertIsNone(body)
+        self.assertEqual(why, "HTTP 503")
+        with mock.patch.object(psec, "_daemon", side_effect=TimeoutError()):
+            self.assertEqual(psec.queue_status("k")[1], "TimeoutError")
+        with mock.patch.object(psec, "_daemon", return_value=(200, {})):
+            self.assertEqual(psec.queue_status("k")[1], "no queue fields")
+        txt = psec.lane_text(None, "HTTP 503")
+        self.assertNotIn("depth 0", txt)
+        self.assertIn("queue: unavailable (HTTP 503)", txt)
+        out = psec.assess({}, 0, 0, 10, 0, 0, ("ok", txt), True)
+        self.assertTrue(out.startswith("CHECK palace-secrets warn"), out)
+        ok = psec.lane_text({"queued_by_priority": {"2": 0}, "oldest_waiting_s": {}})
+        self.assertTrue(psec.assess({}, 0, 0, 10, 0, 0, ("ok", ok), True).startswith("CHECK palace-secrets ok"))
 
     def test_no_drawer_text_in_the_reason(self):
         why = self._wait([("d1", "plainlettersecretvalue", "{}", 3)])[1]

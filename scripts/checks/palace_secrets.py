@@ -252,7 +252,7 @@ def assess(
         if not redact_on:
             nxt += "; palace lane: redact (PALACE_SECRETS_REDACT=1)"
         return line(NAME, "warn", fact, nxt)
-    if mstate != "ok" or leftovers:
+    if mstate != "ok" or leftovers or QUEUE_UNAVAILABLE in (mdetail or ""):
         return line(
             NAME, "warn", fact, "owner palace lane: the miner control did not run clean"
         )
@@ -260,6 +260,21 @@ def assess(
 
 
 # ---- the daemon and the probe ----
+
+
+def queue_status(key) -> tuple:
+    """(/mine/status body, None) on a 200 with the queue fields; (None, reason) otherwise (review #344 r2)."""
+    try:
+        code, body = _daemon("GET", "/mine/status", key, timeout=20)
+    except urllib.error.HTTPError as exc:
+        return None, f"HTTP {exc.code}"
+    except (OSError, ValueError) as exc:
+        return None, type(exc).__name__
+    if code != 200:
+        return None, f"HTTP {code}"
+    if not isinstance(body, dict) or not isinstance(body.get("queued_by_priority"), dict):
+        return None, "no queue fields"
+    return body, None
 
 
 def _daemon(method, path, key, body=None, timeout=60):
@@ -354,13 +369,17 @@ def wait_state(rows: list, total: int) -> str:
     return f"{len(rows)} of {total} chunk(s) filed"
 
 
-def lane_text(status: dict | None) -> str:
+QUEUE_UNAVAILABLE = "queue: unavailable"
+
+
+def lane_text(status: dict | None, why: str | None = None) -> str:
     """The probe's lane and the backlog it skipped (#344 r1), from /mine/status; counts and seconds only.
 
     The probe drains at priority 1, so its timing says nothing about priority-2 transcript work or about
     the request path: the backlog is named here, and the request path is the daemon watchdog's (#345)."""
-    if not isinstance(status, dict):
-        return "probe lane p1 · queue unread · request path: daemon watchdog"
+    if why or not isinstance(status, dict) or not isinstance(status.get("queued_by_priority"), dict):
+        # review #344 r2: an unavailable snapshot is never an empty queue
+        return f"probe lane p1 · {QUEUE_UNAVAILABLE} ({why or 'no queue fields'}) · request path: daemon watchdog"
     by = status.get("queued_by_priority") or {}
     old = status.get("oldest_waiting_s") or {}
     depth = sum(int(v) for v in by.values() if str(v).isdigit())
@@ -617,10 +636,7 @@ def body() -> None:
         # would repair the very control it measures.
         verdict = early or probe_wait(conn, path, fakes, placeholder, deadline)
         if verdict[0] == "ok":
-            try:
-                verdict = ("ok", lane_text(_daemon("GET", "/mine/status", key, timeout=20)[1]))
-            except (OSError, ValueError):
-                verdict = ("ok", lane_text(None))
+            verdict = ("ok", lane_text(*queue_status(key)))
         ents, ent_hits, e_done, e_bad = entity_scan(
             conn, passes, placeholder, redact_on, bdir
         )
