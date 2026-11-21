@@ -215,9 +215,7 @@ def assess(
 ) -> str:
     """hits: {(wing, kind): n} over drawers; miner: (state, detail); redacted/failed count drawers and entities."""
     mstate, mdetail = miner
-    miner_txt = f"miner redaction: {mstate}" + (
-        f" ({mdetail})" if mstate != "ok" else ""
-    )
+    miner_txt = f"miner redaction: {mstate}" + (f" ({mdetail})" if mdetail else "")
     left_txt = f"; {leftovers} probe leftover(s)" if leftovers else ""
     if error:
         return line(
@@ -254,7 +252,7 @@ def assess(
         if not redact_on:
             nxt += "; palace lane: redact (PALACE_SECRETS_REDACT=1)"
         return line(NAME, "warn", fact, nxt)
-    if mstate != "ok" or leftovers:
+    if mstate != "ok" or leftovers or QUEUE_UNAVAILABLE in (mdetail or ""):
         return line(
             NAME, "warn", fact, "owner palace lane: the miner control did not run clean"
         )
@@ -262,6 +260,22 @@ def assess(
 
 
 # ---- the daemon and the probe ----
+
+
+def queue_status(key) -> tuple:
+    """(/mine/status body, None) on a 200 with the queue fields; (None, reason) otherwise (review #344 r2)."""
+    try:
+        code, body = _daemon("GET", "/mine/status", key, timeout=20)
+    except urllib.error.HTTPError as exc:
+        return None, f"HTTP {exc.code}"
+    except (OSError, ValueError) as exc:
+        return None, type(exc).__name__
+    if code != 200:
+        return None, f"HTTP {code}"
+    gap = queue_gap(body)
+    if gap:
+        return None, gap
+    return body, None
 
 
 def _daemon(method, path, key, body=None, timeout=60):
@@ -330,6 +344,8 @@ def probe_wait(conn, path: Path, fakes: dict, placeholder, deadline: float) -> t
     """Wait until THIS run's probe has every chunk filed (count == chunk_total, stable across two reads), then
     judge it."""
     seen = None
+    rows: list = []
+    total = 0
     while time.time() < deadline:
         rows = _rows_for(conn, str(path))
         total = max((r[3] or 0 for r in rows), default=0)
@@ -340,7 +356,65 @@ def probe_wait(conn, path: Path, fakes: dict, placeholder, deadline: float) -> t
                 )
             seen = len(rows)
         time.sleep(10)
-    return "not measured", f"probe not filed within {PROBE_WAIT_S // 60} min"
+    return "not measured", f"probe not filed within {PROBE_WAIT_S // 60} min ({wait_state(rows, total)})"
+
+
+def wait_state(rows: list, total: int) -> str:
+    """What the wait saw at its deadline, in counts only: the condition that was not met."""
+    if not rows:
+        return "not mined: 0 drawers"
+    if not total:
+        return f"{len(rows)} drawer(s) without chunk_total"
+    if len(rows) >= total:      # #344 r1: all filed, but the count was not seen twice the same (still changing)
+        return f"{len(rows)} of {total} filed, count not yet stable"
+    return f"{len(rows)} of {total} chunk(s) filed"
+
+
+QUEUE_UNAVAILABLE = "queue: unavailable"
+
+
+def _count(v) -> bool:
+    return not isinstance(v, bool) and isinstance(v, (int, float)) and v >= 0
+
+
+def queue_complete(status) -> bool:
+    """Both /mine/status queue fields present, each a mapping of priority to a non-negative number (#344 r3);
+    an oldest wait for every priority that has entries, and ``queue_read_errors`` a count (#344 r4)."""
+    if not isinstance(status, dict):
+        return False
+    for field in ("queued_by_priority", "oldest_waiting_s"):
+        value = status.get(field)
+        if not isinstance(value, dict) or not all(_count(v) for v in value.values()):
+            return False
+    if any(n > 0 and p not in status["oldest_waiting_s"] for p, n in status["queued_by_priority"].items()):
+        return False
+    return _count(status.get("queue_read_errors"))
+
+
+def queue_gap(status) -> str | None:
+    """Why this /mine/status snapshot cannot be read as the queue, or None when it can."""
+    if not queue_complete(status):
+        return "incomplete status"
+    if status["queue_read_errors"] > 0:
+        return f"{int(status['queue_read_errors'])} read errors"
+    return None
+
+
+def lane_text(status: dict | None, why: str | None = None) -> str:
+    """The probe's lane and the backlog it skipped (#344 r1), from /mine/status; counts and seconds only.
+
+    The probe drains at priority 1, so its timing says nothing about priority-2 transcript work or about
+    the request path: the backlog is named here, and the request path is the daemon watchdog's (#345)."""
+    why = why or queue_gap(status)
+    if why:
+        # review #344 r2/r3/r4: an unavailable, incomplete or partly read snapshot is never an empty queue
+        return f"probe lane p1 · {QUEUE_UNAVAILABLE} ({why}) · request path: daemon watchdog"
+    by = status.get("queued_by_priority") or {}
+    old = status.get("oldest_waiting_s") or {}
+    depth = int(sum(by.values()))
+    p2 = old.get("2")
+    p2_txt = f"oldest p2 item waiting {int(p2)}s" if p2 is not None else "no p2 item waiting"
+    return f"probe lane p1 · queue depth {depth} · {p2_txt} · request path: daemon watchdog"
 
 
 def probe_files_cleanup(pdir: Path) -> int:
@@ -590,6 +664,8 @@ def body() -> None:
         # Judge the probe BEFORE any redaction: redacting its raw drawers first
         # would repair the very control it measures.
         verdict = early or probe_wait(conn, path, fakes, placeholder, deadline)
+        if verdict[0] == "ok":
+            verdict = ("ok", lane_text(*queue_status(key)))
         ents, ent_hits, e_done, e_bad = entity_scan(
             conn, passes, placeholder, redact_on, bdir
         )

@@ -935,6 +935,10 @@ def _drain_batch_size() -> int:
 # transcript is also "a single file" — the distinction that matters is what
 # the mine costs, and that tracks the mode.
 _DRAIN_SMALL_MODES = frozenset({"projects"})
+# Wings whose mines are small whatever their mode: CHECK palace-secrets' miner control files a two-line
+# transcript into palace_probe and waits for it. Queued behind whole-transcript re-mines it was not filed
+# within its 20 min on 2026-11-18/19, so the check reported "not measured" instead of a result.
+_DRAIN_SMALL_WINGS = frozenset({"palace_probe"})
 
 # A low-priority entry deferred this many passes outranks everything.
 #
@@ -950,6 +954,8 @@ def _drain_entry_priority(entry: dict) -> int:
     if int(entry.get("drain_deferrals", 0) or 0) >= _DRAIN_PRIORITY_ESCAPE_DEFERRALS:
         return 0
     payload = entry.get("payload") or {}
+    if payload.get("wing") in _DRAIN_SMALL_WINGS:
+        return 1
     return 1 if payload.get("mode", "convos") in _DRAIN_SMALL_MODES else 2
 
 
@@ -3353,6 +3359,7 @@ async def mine_status(x_api_key: str | None = Header(default=None)):
 
     live = _count(path)
     processing = _count(proc_path)
+    by_prio, oldest, read_errors = await asyncio.to_thread(_queue_by_priority, (path, proc_path))
     active = getattr(app.state, "active_mines", None)
     task = _mine_drain_task
     return {
@@ -3375,7 +3382,47 @@ async def mine_status(x_api_key: str | None = Header(default=None)):
         "active_mine": dict(_ACTIVE_MINE_STATE) or None,
         "repair_in_progress": bool(_repair_state.get("in_progress")),
         "next": _peek(path) + _peek(proc_path),
+        # #344 r1: the probe drains at priority 1, so its timing no longer shows the transcript backlog;
+        # these do (entries per drain priority, and the oldest waiting entry's age per priority, seconds).
+        "queued_by_priority": by_prio,
+        "oldest_waiting_s": oldest,
+        # #344 r4: queue files that exist but could not be read; > 0 means the two maps above are partial.
+        "queue_read_errors": read_errors,
     }
+
+
+def _queue_by_priority(paths) -> tuple[dict, dict, int]:
+    """({priority: entries}, {priority: oldest wait in s}, read errors) over the live queue and the
+    in-processing file. An absent file is an empty queue; any other OSError is a read error (#344 r4),
+    so an unreadable queue is never reported as an empty one."""
+    counts: dict = {}
+    oldest: dict = {}
+    errors = 0
+    now = datetime.now()
+    for p in paths:
+        try:
+            with open(p, encoding="utf-8") as f:
+                for ln in f:
+                    if not ln.strip():
+                        continue
+                    try:
+                        entry = json.loads(ln)
+                    except ValueError:
+                        continue
+                    if not isinstance(entry, dict):
+                        continue
+                    prio = str(_drain_entry_priority(entry))
+                    counts[prio] = counts.get(prio, 0) + 1
+                    try:
+                        waited = (now - datetime.fromisoformat(str(entry.get("enqueued_at")))).total_seconds()
+                    except (TypeError, ValueError):
+                        continue
+                    oldest[prio] = max(oldest.get(prio, 0), int(waited))
+        except FileNotFoundError:
+            continue
+        except OSError:
+            errors += 1
+    return counts, oldest, errors
 
 
 @app.get("/status/fast")

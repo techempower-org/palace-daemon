@@ -1010,3 +1010,57 @@ class TestSkipUnchangedTranscriptRemines(unittest.IsolatedAsyncioTestCase):
             {"dir": "/definitely/not/here.jsonl", "wing": "w", "mode": "convos"}
         )
         self.assertEqual(await self._drain(), 1)
+
+
+
+class TestProbeWingDrainsFirst(unittest.TestCase):
+    """CHECK palace-secrets' miner control (wing palace_probe) is small: it must not wait behind transcripts."""
+
+    def test_probe_wing_is_small_class_whatever_its_mode(self):
+        probe = {"payload": {"dir": "/s/p.jsonl", "wing": "palace_probe", "mode": "convos"}}
+        transcript = {"payload": {"dir": "/t/a.jsonl", "wing": "jp", "mode": "convos"}}
+        self.assertEqual(main._drain_entry_priority(probe), 1)
+        self.assertEqual(main._drain_entry_priority(transcript), 2)
+
+    def test_the_probe_sorts_ahead_of_earlier_transcripts(self):
+        entries = [("l1", {"payload": {"dir": f"/t/{i}.jsonl", "wing": "jp", "mode": "convos"}}) for i in range(5)]
+        entries.append(("l6", {"payload": {"dir": "/s/p.jsonl", "wing": "palace_probe", "mode": "convos"}}))
+        order = sorted(range(len(entries)), key=lambda i: (main._drain_entry_priority(entries[i][1]), i))
+        self.assertEqual(order[0], 5)
+
+
+class TestQueueByPriority(unittest.TestCase):
+    """#344 r1: /mine/status counts entries per drain priority and the oldest wait per priority."""
+
+    def test_counts_and_oldest_per_priority(self):
+        import datetime as _dt
+        import tempfile
+        d = tempfile.mkdtemp()
+        live, proc = os.path.join(d, "q.jsonl"), os.path.join(d, "q.jsonl.processing")
+        old = (_dt.datetime.now() - _dt.timedelta(seconds=900)).isoformat()
+        new = (_dt.datetime.now() - _dt.timedelta(seconds=30)).isoformat()
+        with open(live, "w") as f:
+            f.write(json.dumps({"payload": {"dir": "/t/a.jsonl", "wing": "jp", "mode": "convos"}, "enqueued_at": old}) + "\n")
+            f.write(json.dumps({"payload": {"dir": "/s/p.jsonl", "wing": "palace_probe", "mode": "convos"},
+                                "enqueued_at": new}) + "\n")
+            f.write("not json\n")
+        with open(proc, "w") as f:
+            f.write(json.dumps({"payload": {"dir": "/t/b.jsonl", "wing": "jp", "mode": "convos"}, "enqueued_at": new}) + "\n")
+        counts, oldest, errors = main._queue_by_priority((live, proc))
+        self.assertEqual(errors, 0)
+        self.assertEqual(counts, {"2": 2, "1": 1})
+        self.assertGreaterEqual(oldest["2"], 899)
+        self.assertLess(oldest["1"], 120)
+
+    def test_an_unreadable_queue_file_is_a_read_error_not_an_empty_queue(self):
+        # review #344 r4: `except OSError: continue` reported an unreadable queue as ({}, {})
+        import tempfile
+        d = tempfile.mkdtemp()
+        absent = os.path.join(d, "absent.jsonl")
+        unreadable = os.path.join(d, "dir-not-file.jsonl")
+        os.mkdir(unreadable)  # open() raises IsADirectoryError, an OSError that is not FileNotFoundError
+        counts, oldest, errors = main._queue_by_priority((absent, unreadable))
+        self.assertEqual((counts, oldest), ({}, {}))
+        self.assertEqual(errors, 1)
+        self.assertEqual(main._queue_by_priority((absent,))[2], 0)
+

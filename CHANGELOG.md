@@ -25,6 +25,14 @@
   - Its throughput spread within a setting (0.6–0.7/s) was wider than the gap between settings, so the benchmark could not rule out a hot-path cost.
   - The memory growth is its own row, with `MALLOC_ARENA_MAX=8`, a `malloc_trim(0)` after each index build, and jemalloc as candidates.
 
+### Added: *CHECK palace-backup*
+
+- `scripts/checks/palace_backup.py`, with units `palace-check-palace-backup.{service,timer}` (daily 03:10) and `palace-check-palace-backup-integrity.{service,timer}` (Sunday 03:40).
+  - Daily it reads the newest nightly database dump: its age, its size, the change from the dump before, how many are kept, and the dump unit's last result and timer.
+  - Weekly it decompresses the newest dump end to end and requires pg_dump's closing line.
+- The dump had no CHECK line before (Flow f1f8d214).
+- `PALACE_BACKUP_DIR` goes in `~/.config/palace-checks/env`.
+
 ### Changed — *mempalace_drawers gets a (wing, room, id) index: the 45 s room page now takes 0.15 s*
 
 The wing/room page query (`WHERE wing = $1 AND room = $2 ORDER BY id LIMIT n`) walked the primary key and
