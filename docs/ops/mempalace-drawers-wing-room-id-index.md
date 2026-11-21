@@ -22,7 +22,8 @@ row. For a large (wing, room) whose rows are spread through the id order, that t
 - `maintenance_work_mem = 256MB`, because the container is capped at 6 GB and `shared_buffers` is 3 GB.
 - `max_parallel_maintenance_workers = 0`, so one backend did the reading.
 - That backend was moved to the idle I/O class at nice 15 through its host pid. The palace host's standing rule is
-  that every heavy read runs under `ionice -c3 nice -n 15`.
+  that every heavy read runs under `ionice -c3 nice -n 15`. (Found 2026-11-21: that disk's I/O scheduler was `none`,
+  which ignores the class, so only nice 15 applied. See [manual-vacuum.md](manual-vacuum.md).)
 
 **Start guard:** the build started only if the 1-min load was ≤ 8 and the IO PSI "full" avg60 was ≤ 30 %. Otherwise
 it retried every 10 min, giving up at 01:55, before the 02:15 nightly dump. It started on the first check (load 1.4,
@@ -63,4 +64,5 @@ Build: 1 min, 141 MB, valid and ready on the first try.
 
 Paging by wing alone (`WHERE "wing" = $1 AND id > $2 ORDER BY id`) cannot use a (wing, room, id) index. That shape
 had 70 timeouts in 60 h, plus 11 for wing-only, and still had 3 in the 12 h after this build. It needs a (wing, id)
-index, which could replace `mempalace_drawers_wing_idx`; that is proposed separately.
+index, which could replace `mempalace_drawers_wing_idx`. It was built on 2026-11-21: see
+[mempalace-drawers-wing-id-index.md](mempalace-drawers-wing-id-index.md).

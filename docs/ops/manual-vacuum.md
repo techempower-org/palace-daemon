@@ -31,7 +31,15 @@ keep their case: `mempalace_kg.MENTIONS`.
 **Run it at idle I/O.** The palace host's standing rule is that every heavy read runs at idle I/O class and nice 15.
 For a database backend, `ionice` on the client does nothing; the reading is done by the postgres backend inside the
 container. Find the backend's host pid (its process title is `postgres: <role> <db> [local] VACUUM`), then
-`ionice -c3 -p <pid>` and `renice -n 15 -p <pid>`. Check it with `ionice -p <pid>`, which should print `idle`.
+`ionice -c3 -p <pid>` and `renice -n 15 -p <pid>`.
+
+**`ionice -p` printing `idle` does not prove the class works.** The class is only enforced when the disk's I/O
+scheduler honours priority classes (`mq-deadline` or `bfq`). With `none`, it is accepted, read back as `idle`, and
+ignored. Check the scheduler of the disk holding the database's data directory first:
+`cat /sys/block/<disk>/queue/scheduler` (the name in brackets is the one in use). On 2026-11-21 the palace database's disk
+used `none`: the VACUUMs below and the 11-18 index build got only the CPU half (`nice`), and wing-page timeouts
+peaked in the VACUUM's hour (15, the most of any hour in 48 h). Until the scheduler honours classes, the real
+protection is a load guard at start (see the index run-books) and staying out of busy hours.
 
 **Not between 01:00 and 03:00:** the nightly dump runs at 02:15.
 
@@ -54,6 +62,7 @@ Root disk was at 93 %, and the question was whether the database was bloated.
   was near the 30 % that would justify `VACUUM FULL`. Most of the drawers table is TOAST (4.4 GB) and indexes (6.4 GB),
   not dead rows.
 - **The first run used the role's own session:** 5 of 7 VACUUMs were cancelled at 30 s. The rerun with
-  `SET statement_timeout = 0` took 63 min on the drawers table and 72 s on MENTIONS, at idle I/O.
+  `SET statement_timeout = 0` took 63 min on the drawers table and 72 s on MENTIONS, at nice 15 (the idle I/O class was set but not enforced, as
+  above).
 - **Result:** the database grew 8 MB; no disk came back, as expected of a plain VACUUM. The drawers table had 0 dead
   rows left, and the graph tables had planner statistics again for the first time since the stats reset.
