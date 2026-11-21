@@ -59,20 +59,34 @@ class ServiceUnit(unittest.TestCase):
         self.assertGreaterEqual(_seconds(cp["Unit"].get("StartLimitIntervalSec", "0")),
                                 5 * _seconds(_service()["WatchdogSec"]))
 
-    def test_the_start_limit_window_holds_a_watchdog_storm(self):
-        # review #345 r3: Burst of each abort cycle must fit inside the window, or the counter never reaches
-        # the burst and the storm never ends: a hang after startup (WatchdogSec + RestartSec) and a hang during
-        # startup (the startup feed's bound + WatchdogSec + RestartSec).
+    def test_the_start_limit_window_holds_every_watchdog_storm(self):
+        # review #345 r3/r4: each abort cycle is a feed bound + WatchdogSec + RestartSec (running 190 s,
+        # startup 790 s, rebuild 1990 s); Burst of the longest must fit inside the window, or the counter never
+        # reaches the burst and that storm never ends.
         cp = configparser.ConfigParser(strict=False, interpolation=None, delimiters=("=",))
         cp.optionxform = str
         cp.read_string(UNIT.read_text())
         svc = _service()
         burst = int(cp["Unit"]["StartLimitBurst"])
         window = _seconds(cp["Unit"]["StartLimitIntervalSec"])
-        after_start = _seconds(svc["WatchdogSec"]) + _seconds(svc["RestartSec"])
-        during_start = sd_watchdog.STARTUP_FEED_MAX_S + after_start
-        self.assertLess(burst * after_start, window)
-        self.assertLess(burst * during_start, window)
+        base = _seconds(svc["WatchdogSec"]) + _seconds(svc["RestartSec"])
+        cycles = {name: bound + base for name, bound in sd_watchdog.FEED_BOUNDS_S.items()}
+        self.assertEqual(set(cycles), {"running", "startup", "rebuild"})
+        self.assertLess(burst * max(cycles.values()), window, cycles)
+
+    def test_every_feed_bound_in_the_module_is_counted(self):
+        # a *_MAX_S bound added to sd_watchdog without an entry in FEED_BOUNDS_S would escape the window test
+        bounds = {v for k, v in vars(sd_watchdog).items() if k.endswith("_MAX_S") and isinstance(v, int)}
+        self.assertTrue(bounds)
+        self.assertLessEqual(bounds, set(sd_watchdog.FEED_BOUNDS_S.values()))
+
+    def test_the_rebuild_stall_budget_can_only_tighten(self):
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"PALACE_REBUILD_STALL_S": "99999"}):
+            self.assertEqual(sd_watchdog.rebuild_stall_s(), sd_watchdog.REBUILD_STALL_MAX_S)
+        with mock.patch.dict(os.environ, {"PALACE_REBUILD_STALL_S": "600"}):
+            self.assertEqual(sd_watchdog.rebuild_stall_s(), 600)
 
     def test_the_startup_feed_defaults_to_its_bound(self):
         import inspect

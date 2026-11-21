@@ -4,12 +4,13 @@ Documentation=https://github.com/techempower-org/palace-daemon
 After=network-online.target docker.service
 Wants=network-online.target
 Requires=docker.service
-# A daemon that fails to start (or is aborted by the watchdog) 5 times in 70 min stops restarting and shows
-# failed, instead of a restart storm (review #345 r1); RestartSec=10 spaces the tries. Review r3: the window
-# must hold Burst of the longest abort cycle, or the counter never reaches the burst and the storm never ends:
-#   hang after startup:  WatchdogSec 180 + RestartSec 10                        = 190 s, x5 =  950 s (~16 min)
-#   hang during startup: startup feed 600 (sd_watchdog.STARTUP_FEED_MAX_S) + 190 = 790 s, x5 = 3950 s (~66 min)
-StartLimitIntervalSec=4200
+# A daemon that fails to start (or is aborted by the watchdog) 5 times in 200 min stops restarting and shows
+# failed, instead of a restart storm (review #345 r1); RestartSec=10 spaces the tries. Review r3/r4: the window
+# must hold Burst of the longest abort cycle (sd_watchdog.FEED_BOUNDS_S + 190), or the storm never ends:
+#   hang while running:  WatchdogSec 180 + RestartSec 10                          =  190 s, x5 =  950 s (~16 min)
+#   hang during startup: startup feed 600 (sd_watchdog.STARTUP_FEED_MAX_S) + 190   =  790 s, x5 = 3950 s (~66 min)
+#   hang mid-rebuild:    stall budget 1800 (sd_watchdog.REBUILD_STALL_MAX_S) + 190 = 1990 s, x5 = 9950 s (~166 min)
+StartLimitIntervalSec=12000
 StartLimitBurst=5
 
 [Service]

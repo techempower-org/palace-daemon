@@ -8,12 +8,14 @@
   - `sd_watchdog.watchdog_loop` has pinged `WATCHDOG=1` (after the collection probe on the fast executor) since #101.
   - The unit never set `WatchdogSec`, though, and `Type=simple` drops notifications without `NotifyAccess`, so a hung daemon stayed "active".
   - On 2026-11-19 it stayed hung for 7 h.
-- **Restart storms end:** `StartLimitBurst=5` in `StartLimitIntervalSec=4200`; either kind of storm ends with the unit failed.
-  - A hang after startup: each cycle is 190 s (`WatchdogSec` 180 + `RestartSec=10`), so it stops after about 16 min.
+- **Restart storms end:** `StartLimitBurst=5` in `StartLimitIntervalSec=12000`; every kind of storm ends with the unit failed.
+  - A hang while running: each cycle is 190 s (`WatchdogSec` 180 + `RestartSec=10`), so it stops after about 16 min.
   - A hang during startup: each cycle is 790 s (the 600 s startup feed + 190 s), so it stops after about 66 min.
+  - A hang mid-rebuild: each cycle is 1990 s (the 1800 s rebuild stall budget + 190 s), so it stops after about 166 min.
+  - A unit test asserts five of the longest cycle (from `sd_watchdog.FEED_BOUNDS_S`) fit in the window.
 - **What feeds it:**
   - Normally, the daemon's own loopback `GET /health` answering (200, or 503 while Postgres is down).
-  - During a `mode=rebuild` repair, a line printed by the rebuild within `PALACE_REBUILD_STALL_S` (default 1800 s) and a loopback `GET /repair/status` answering. A rebuild that goes silent is ended, where before it pinged forever.
+  - During a `mode=rebuild` repair, a line printed by the rebuild within `PALACE_REBUILD_STALL_S` (default and maximum 1800 s) and a loopback `GET /repair/status` answering. A rebuild that goes silent is ended, where before it pinged forever.
   - During startup, a plain thread that a blocking lifespan step cannot starve. It feeds for at most 600 s; a cold start measures 3–8 s.
 - `tests/test_service_unit.py` reads the shipped unit: the watchdog is armed, notifications reach systemd, and restart follows an abort.
 - **Not in this change: a malloc arena cap.**

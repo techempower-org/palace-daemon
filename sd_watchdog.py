@@ -127,15 +127,27 @@ def startup_keepalive(interval_secs: int, max_secs: int = STARTUP_FEED_MAX_S,
     return stop
 
 
+# How long a rebuild may print nothing and still be fed. palace-daemon.service's start-limit window is sized
+# against it (review #345 r4); PALACE_REBUILD_STALL_S can only tighten it.
+REBUILD_STALL_MAX_S = 1800
+
+# Every bound for which this module feeds the watchdog without the request path's /health: an abort cycle is
+# the bound + WatchdogSec + RestartSec, and the unit's start-limit window must hold StartLimitBurst of the
+# longest. tests/test_service_unit.py takes the max over this dict and fails on a *_MAX_S constant missing
+# from it, so a new feed bound cannot land without its window.
+FEED_BOUNDS_S = {"running": 0, "startup": STARTUP_FEED_MAX_S, "rebuild": REBUILD_STALL_MAX_S}
+
+
 def rebuild_stall_s() -> int:
     """How long a rebuild may print nothing before the watchdog stops feeding it (review #345 r2).
 
     Not two ticks: rebuild_index prints one line per 5000-drawer batch (minutes apart at its measured
-    ~11 drawers/s) and nothing at all while it extracts, so a short window would kill a healthy rebuild."""
+    ~11 drawers/s) and nothing at all while it extracts, so a short window would kill a healthy rebuild.
+    ``PALACE_REBUILD_STALL_S`` may lower it, never raise it past ``REBUILD_STALL_MAX_S`` (review #345 r4)."""
     try:
-        return int(os.environ.get("PALACE_REBUILD_STALL_S", "1800"))
+        return max(60, min(REBUILD_STALL_MAX_S, int(os.environ.get("PALACE_REBUILD_STALL_S", REBUILD_STALL_MAX_S))))
     except ValueError:
-        return 1800
+        return REBUILD_STALL_MAX_S
 
 
 def rebuild_quiet_s(progress, now: float | None = None) -> float:
