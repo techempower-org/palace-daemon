@@ -100,7 +100,13 @@ async def self_health(port: int | None = None, timeout: float = 20.0, path: str 
             writer.close()
 
 
-def startup_keepalive(interval_secs: int, max_secs: int = 1800, tick: float | None = None) -> threading.Event:
+# How long the startup thread feeds the watchdog. A cold start measures 3-8 s; a start past 600 s is itself a
+# defect worth a failed unit. palace-daemon.service's start-limit window is sized against it (review #345 r3).
+STARTUP_FEED_MAX_S = 600
+
+
+def startup_keepalive(interval_secs: int, max_secs: int = STARTUP_FEED_MAX_S,
+                      tick: float | None = None) -> threading.Event:
     """Feed the watchdog from a plain thread while the lifespan startup runs; set the returned event to stop.
 
     Review #345 r1: Type=simple arms the watchdog at exec, and a long cold start is not a hang. Review r2: an

@@ -7,9 +7,15 @@ NotifyAccess defaults to main). These read palace-daemon.service as shipped.
 """
 import configparser
 import pathlib
+import sys
 import unittest
 
-UNIT = pathlib.Path(__file__).resolve().parent.parent / "palace-daemon.service"
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+UNIT = ROOT / "palace-daemon.service"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import sd_watchdog  # noqa: E402  (stdlib-only: the startup feed's bound)
 
 
 def _service():
@@ -54,15 +60,25 @@ class ServiceUnit(unittest.TestCase):
                                 5 * _seconds(_service()["WatchdogSec"]))
 
     def test_the_start_limit_window_holds_a_watchdog_storm(self):
-        # review #345 r3: each abort cycle is WatchdogSec + RestartSec; Burst of them must fit inside the
-        # window, or the counter never reaches the burst and a daemon that hangs at once restarts forever.
+        # review #345 r3: Burst of each abort cycle must fit inside the window, or the counter never reaches
+        # the burst and the storm never ends: a hang after startup (WatchdogSec + RestartSec) and a hang during
+        # startup (the startup feed's bound + WatchdogSec + RestartSec).
         cp = configparser.ConfigParser(strict=False, interpolation=None, delimiters=("=",))
         cp.optionxform = str
         cp.read_string(UNIT.read_text())
         svc = _service()
         burst = int(cp["Unit"]["StartLimitBurst"])
-        cycle = _seconds(svc["WatchdogSec"]) + _seconds(svc["RestartSec"])
-        self.assertLess(burst * cycle, _seconds(cp["Unit"]["StartLimitIntervalSec"]))
+        window = _seconds(cp["Unit"]["StartLimitIntervalSec"])
+        after_start = _seconds(svc["WatchdogSec"]) + _seconds(svc["RestartSec"])
+        during_start = sd_watchdog.STARTUP_FEED_MAX_S + after_start
+        self.assertLess(burst * after_start, window)
+        self.assertLess(burst * during_start, window)
+
+    def test_the_startup_feed_defaults_to_its_bound(self):
+        import inspect
+        default = inspect.signature(sd_watchdog.startup_keepalive).parameters["max_secs"].default
+        self.assertEqual(default, sd_watchdog.STARTUP_FEED_MAX_S)
+        self.assertLessEqual(sd_watchdog.STARTUP_FEED_MAX_S, 600)
 
     def test_restart_follows_a_watchdog_abort(self):
         self.assertIn(_service().get("Restart"), ("always", "on-failure", "on-watchdog", "on-abnormal"))
