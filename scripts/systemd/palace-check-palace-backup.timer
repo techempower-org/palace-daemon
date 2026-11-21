@@ -1,0 +1,10 @@
+[Unit]
+Description=palace lane check: palace database dump (daily, after the 02:15 dump)
+
+[Timer]
+OnCalendar=*-*-* 03:10
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -38,6 +38,7 @@ needles = _load("redact_needles")
 psec = _load("palace_secrets")
 pclass = _load("palace_secrets_classify")
 pgt = _load("pg_timeouts")
+pbk = _load("palace_backup")
 
 NOW = dt.datetime(2026, 11, 15, 9, 0, tzinfo=dt.timezone(dt.timedelta(hours=-8)))
 SHAPE = r"^CHECK [a-z-]+ (ok|warn|fail) · .+ · .+$"
@@ -1327,3 +1328,238 @@ class PgTimeouts(unittest.TestCase):
     def test_reads_the_container_log_for_the_window(self):
         self.assertEqual(pgt.LOG_CMD[:2], ["docker", "logs"])
         self.assertIn(f"{pgt.WINDOW_MIN}m", pgt.LOG_CMD)
+
+
+class PalaceBackup(unittest.TestCase):
+    """palace-backup: the schedule, the newest dump, its change, the unit's result, integrity bound to its dump."""
+
+    NOW = 1_800_000_000.0
+    TRIG = NOW - 8 * 3600                       # last night's trigger, 8 h ago
+
+    def unit(self, **kw):
+        u = {"Result": "success", "ExecMainStatus": "0", "ActiveState": "inactive",
+             "LastTriggerUSec": f"@{int(self.TRIG)}", "ExecMainExitTimestamp": f"@{int(self.TRIG + 600)}",
+             "TimerNext": f"@{int(self.TRIG + 86400)}", "TimerActive": "active", "TimerEnabled": "enabled"}
+        u.update(kw)
+        return u
+
+    def _dumps(self, sizes, newest_mtime=None):
+        newest = self.TRIG + 600 if newest_mtime is None else newest_mtime
+        n = len(sizes)
+        return [(f"mempalace-202611{10 + i:02d}.sql.gz", s, newest - 86400 * (n - 1 - i)) for i, s in enumerate(sizes)]
+
+    def good(self, found):
+        """A completed run's fields (wrapped as last_completed by ``wrap``)."""
+        name, size, mtime = found[-1]
+        return {"result": "ok", "dump": name, "size": size, "mtime": mtime,
+                "started": self.NOW - 2 * 86400, "at": self.NOW - 2 * 86400}
+
+    @staticmethod
+    def wrap(rec, running_since=None):
+        return None if rec is None else {"last_completed": rec, "running_since": running_since}
+
+    def _assess(self, sizes, unit=None, integrity="good", current="same", newest_mtime=None, timer="active"):
+        found = self._dumps(sizes, newest_mtime)
+        rec = self.wrap(self.good(found)) if integrity == "good" else integrity
+        rec = self.wrap(rec) if rec and "result" in rec else rec
+        cur = (found[-1][1], found[-1][2]) if current == "same" else current
+        return pbk.assess(found, self.NOW, unit or self.unit(), timer, rec, cur)
+
+    def test_a_fresh_growing_dump_set_is_ok(self):
+        state, fact = self._assess([4_000_000_000, 4_100_000_000, 4_200_000_000])
+        self.assertEqual(state, "ok", fact)
+        self.assertIn("4.20 GB", fact)
+        self.assertIn("3 kept", fact)
+
+    def test_no_dump_fails(self):
+        self.assertEqual(pbk.assess([], self.NOW, self.unit(), "active", None)[0], "fail")
+
+    def test_a_missed_night_fails_although_yesterdays_dump_is_young(self):
+        # review r1 (1): the timer fired 8 h ago, nothing ran; yesterday's dump is 20 h old (< 26 h)
+        unit = self.unit(ExecMainExitTimestamp=f"@{int(self.TRIG - 86400 + 600)}")
+        state, fact = self._assess([4e9, 4e9, 4e9], unit=unit, newest_mtime=self.TRIG - 12 * 3600)
+        self.assertEqual(state, "fail", fact)
+        self.assertIn("no dump run finished after the scheduled", fact)
+        self.assertIn("wrote no dump", fact)
+
+    def test_a_dump_still_running_soon_after_its_trigger_warns_never_ok(self):
+        # review r2 (1): a hung backup inside the grace window must not read ok on yesterday's dump
+        trig = self.NOW - 1800
+        unit = self.unit(ActiveState="active", LastTriggerUSec=f"@{int(trig)}", TimerNext=f"@{int(trig + 86400)}",
+                         ExecMainExitTimestamp=f"@{int(trig - 86400 + 600)}")
+        state, fact = self._assess([4e9, 4e9, 4e9], unit=unit, newest_mtime=trig - 86400 + 600)
+        self.assertEqual(state, "warn", fact)
+        self.assertIn("backup still running since", fact)
+
+    def test_a_timer_that_never_fired_last_night_fails(self):
+        # review r4: last trigger two days old, last night's scheduled time passed with no run: never ok
+        two_days = self.TRIG - 2 * 86400
+        unit = self.unit(LastTriggerUSec=f"@{int(two_days)}", ExecMainExitTimestamp=f"@{int(two_days + 600)}")
+        state, fact = self._assess([4e9, 4e9, 4e9], unit=unit, newest_mtime=two_days + 600)
+        self.assertEqual(state, "fail", fact)
+        self.assertIn("no dump run finished after the scheduled", fact)
+        self.assertIn("wrote no dump", fact)
+
+    def test_the_scheduled_run_not_yet_finished_inside_its_grace_warns(self):
+        sched = self.NOW - 1800
+        unit = self.unit(LastTriggerUSec=f"@{int(sched - 86400)}", TimerNext=f"@{int(sched + 86400)}",
+                         ExecMainExitTimestamp=f"@{int(sched - 86400 + 600)}")
+        state, fact = self._assess([4e9] * 3, unit=unit, newest_mtime=sched - 86400 + 600)
+        self.assertEqual(state, "warn", fact)
+        self.assertIn("has not finished yet", fact)
+
+    def test_an_inactive_or_disabled_timer_fails_on_its_own(self):
+        self.assertEqual(self._assess([4e9] * 3, unit=self.unit(TimerActive="inactive"))[0], "fail")
+        self.assertEqual(self._assess([4e9] * 3, unit=self.unit(TimerEnabled="disabled"))[0], "fail")
+        self.assertEqual(self._assess([4e9] * 3, unit=self.unit(TimerNext=""))[0], "fail")
+
+    def test_the_integrity_mode_judges_the_state_after_its_run(self):
+        # review r2 (2): the run takes up to an hour; the line must use a fresh inventory and unit state
+        before = [("mempalace-20261119.sql.gz", 4e9, self.NOW - 30 * 3600)]
+        after = before + [("mempalace-20261120.sql.gz", 4.1e9, self.NOW - 60)]
+        unit_before = {"Result": "success", "ExecMainStatus": "0", "ActiveState": "inactive",
+                       "LastTriggerUSec": f"@{int(self.NOW - 54 * 3600)}",
+                       "ExecMainExitTimestamp": f"@{int(self.NOW - 54 * 3600 + 600)}"}
+        unit_after = {"Result": "exit-code", "ExecMainStatus": "1", "ActiveState": "inactive",
+                      "LastTriggerUSec": f"@{int(self.NOW - 3600)}",
+                      "ExecMainExitTimestamp": f"@{int(self.NOW - 60)}"}
+        shows = iter([unit_before, {}, unit_after, {}])
+        lines = []
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.dict(os.environ, {"PALACE_CHECKS_DIR": d, "PALACE_BACKUP_DIR": d}), \
+                mock.patch.object(pbk, "dumps", side_effect=[before, after]), \
+                mock.patch.object(pbk, "show", side_effect=lambda *a: dict(next(shows))), \
+                mock.patch.object(pbk, "integrity_run", return_value=None), \
+                mock.patch.object(pbk.subprocess, "run", return_value=mock.Mock(stdout="active\n")), \
+                mock.patch.object(pbk.dt, "datetime", wraps=dt.datetime) as fake_dt, \
+                mock.patch.object(pbk, "emit", side_effect=lambda _n, text: lines.append(text)):
+            fake_dt.now.return_value = dt.datetime.fromtimestamp(self.NOW)
+            pbk.body(True)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("newest 20261120", lines[0])
+        self.assertIn("last run failed", lines[0])
+
+    def test_a_timer_that_stopped_triggering(self):
+        old = self.NOW - 60 * 3600
+        unit = self.unit(LastTriggerUSec=f"@{int(old)}", ExecMainExitTimestamp=f"@{int(old + 600)}")
+        self.assertEqual(self._assess([4e9] * 3, unit=unit, newest_mtime=old + 600)[0], "fail")
+
+    def test_shrinking_warns_then_fails(self):
+        self.assertEqual(self._assess([4e9, 4e9, 3.7e9])[0], "warn")
+        self.assertEqual(self._assess([4e9, 4e9, 3.0e9])[0], "fail")
+
+    def test_a_tiny_dump_fails(self):
+        self.assertEqual(self._assess([5e6, 5e6, 5e6])[0], "fail")
+
+    def test_a_failed_unit_run_fails(self):
+        state, fact = self._assess([4e9] * 3, unit=self.unit(Result="exit-code", ExecMainStatus="1"))
+        self.assertEqual(state, "fail")
+        self.assertIn("last run failed", fact)
+
+    def test_few_dumps_warn(self):
+        self.assertEqual(self._assess([4e9, 4e9])[0], "warn")
+
+    def test_integrity_is_bound_to_the_dump_it_read(self):
+        # review r1 (2): the recorded dump was truncated or rewritten since its ok
+        state, fact = self._assess([4e9] * 3, current=(1_000_000, self.TRIG))
+        self.assertEqual(state, "fail", fact)
+        self.assertIn("changed since its integrity run", fact)
+
+    def test_an_older_dumps_integrity_is_named_as_not_the_newest(self):
+        found = self._dumps([4e9] * 3)
+        rec = dict(self.good(found), dump=found[-2][0], size=found[-2][1], mtime=found[-2][2])
+        state, fact = pbk.assess(found, self.NOW, self.unit(), "active", self.wrap(rec), (found[-2][1], found[-2][2]))
+        self.assertEqual(state, "ok", fact)
+        self.assertIn("(not the newest)", fact)
+
+    def test_a_killed_integrity_run_does_not_leave_an_old_ok_standing(self):
+        # review r1 (4): the run marks running_since first; killed, that mark stays and fails the line
+        found = self._dumps([4e9] * 3)
+        rec = self.wrap(self.good(found), running_since=self.NOW - 3 * 3600)
+        state, fact = self._assess([4e9] * 3, integrity=rec)
+        self.assertEqual(state, "fail", fact)
+        self.assertIn("never finished", fact)
+        rec["running_since"] = self.NOW - 600
+        state, fact = self._assess([4e9] * 3, integrity=rec)
+        self.assertEqual(state, "ok", fact)
+        self.assertIn("integrity re-run in progress since", fact)
+
+    def test_a_rerun_in_progress_never_hides_a_recorded_failure(self):
+        # review r3: a failed run, then a re-run starts: the daily line still fails on the last completed result
+        found = self._dumps([4e9] * 3)
+        failed = dict(self.good(found), result="fail", why="gzip exit 1")
+        state, fact = self._assess([4e9] * 3, integrity=self.wrap(failed, running_since=self.NOW - 300))
+        self.assertEqual(state, "fail", fact)
+        self.assertIn("the last integrity run failed", fact)
+        self.assertIn("re-run in progress", fact)
+
+    def test_starting_a_run_keeps_the_last_completed_result(self):
+        # review r3: integrity_run must not overwrite last_completed before its own run completes
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"PALACE_CHECKS_DIR": d}):
+            pbk.write_integrity({"last_completed": {"result": "fail", "dump": "mempalace-20261119.sql.gz"},
+                                 "running_since": None})
+            seen = []
+
+            def look(_path, opener=None):
+                seen.append(pbk.read_integrity())
+                return "ok", "whole stream, closing line last"
+            found = [("mempalace-20261120.sql.gz", 4e9, self.NOW - 3600)]
+            with mock.patch.object(pbk, "integrity_of", side_effect=look):
+                pbk.integrity_run(Path(d), found, {"ActiveState": "inactive"}, self.NOW)
+            self.assertEqual(seen[0]["last_completed"]["result"], "fail")     # during the run
+            self.assertEqual(seen[0]["running_since"], self.NOW)
+            after = pbk.read_integrity()
+            self.assertEqual(after["last_completed"]["result"], "ok")        # a completed run replaces it
+            self.assertIsNone(after["running_since"])
+
+    def test_integrity_missing_old_or_failed(self):
+        self.assertEqual(self._assess([4e9] * 3, integrity=None)[0], "warn")
+        self.assertEqual(self._assess([4e9] * 3, integrity={"running_since": self.NOW - 60})[0], "warn")
+        found = self._dumps([4e9] * 3)
+        old = dict(self.good(found), at=self.NOW - 10 * 86400)
+        self.assertEqual(self._assess([4e9] * 3, integrity=old)[0], "warn")
+        bad = dict(self.good(found), result="fail")
+        self.assertEqual(self._assess([4e9] * 3, integrity=bad)[0], "fail")
+
+    def test_the_integrity_run_defers_while_the_dump_runs_or_settles(self):
+        # review r1 (3): no lock across the system dump unit, so the reader refuses a running or fresh dump
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"PALACE_CHECKS_DIR": d}):
+            found = [("mempalace-20261120.sql.gz", 4e9, self.NOW - 3600)]
+            why = pbk.integrity_run(Path(d), found, {"ActiveState": "active"}, self.NOW)
+            self.assertIn("dump unit is running", why)
+            found = [("mempalace-20261120.sql.gz", 4e9, self.NOW - 120)]
+            self.assertIn("under 10 min old", pbk.integrity_run(Path(d), found, {"ActiveState": "inactive"}, self.NOW))
+            self.assertIsNone(pbk.read_integrity())
+
+    def _opener(self, data, rc=0):
+        class Proc:
+            def __init__(self):
+                self.stdout = io.BytesIO(data)
+
+            def wait(self):
+                return rc
+        return lambda _p: Proc()
+
+    def test_integrity_needs_the_whole_stream_and_the_closing_line_last(self):
+        whole = b"x" * (3 << 20) + b"\n--\n-- PostgreSQL database dump complete\n--\n\n"
+        self.assertEqual(pbk.integrity_of(Path("d"), self._opener(whole))[0], "ok")
+        self.assertEqual(pbk.integrity_of(Path("d"), self._opener(b"x" * (3 << 20)))[0], "fail")
+        self.assertEqual(pbk.integrity_of(Path("d"), self._opener(whole, rc=1)), ("fail", "gzip exit 1"))
+        # review r1 (5): the phrase inside the last 4 KB but not as the last line is not a finished dump
+        inside = b"x" * (3 << 20) + b"\n-- PostgreSQL database dump complete\nINSERT INTO t VALUES (1);\n"
+        self.assertEqual(pbk.integrity_of(Path("d"), self._opener(inside))[0], "fail")
+        quoted = b"x" * (3 << 20) + b"\nCOPY x FROM stdin;\nnote: PostgreSQL database dump complete\n"
+        self.assertEqual(pbk.integrity_of(Path("d"), self._opener(quoted))[0], "fail")
+        # pg_dump >= 17.6 (the real dumps, 11-20): one \unrestrict line follows the closing comment
+        restricted = whole + b"\\unrestrict Zx9kQ2\n\n"
+        self.assertEqual(pbk.integrity_of(Path("d"), self._opener(restricted))[0], "ok")
+        twice = whole + b"\\unrestrict a\n\\unrestrict b\n"
+        self.assertEqual(pbk.integrity_of(Path("d"), self._opener(twice))[0], "fail")
+
+    def test_only_dump_names_count_and_oldest_first(self):
+        with tempfile.TemporaryDirectory() as d:
+            for n in ("mempalace-20261120.sql.gz", "mempalace-20261118.sql.gz", ".mempalace-20261121.sql.gz.tmp",
+                      "other.sql.gz"):
+                Path(d, n).write_bytes(b"x")
+            self.assertEqual([x[0] for x in pbk.dumps(Path(d))],
+                             ["mempalace-20261118.sql.gz", "mempalace-20261120.sql.gz"])
