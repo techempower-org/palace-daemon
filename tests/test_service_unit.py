@@ -53,6 +53,17 @@ class ServiceUnit(unittest.TestCase):
         self.assertGreaterEqual(_seconds(cp["Unit"].get("StartLimitIntervalSec", "0")),
                                 5 * _seconds(_service()["WatchdogSec"]))
 
+    def test_the_start_limit_window_holds_a_watchdog_storm(self):
+        # review #345 r3: each abort cycle is WatchdogSec + RestartSec; Burst of them must fit inside the
+        # window, or the counter never reaches the burst and a daemon that hangs at once restarts forever.
+        cp = configparser.ConfigParser(strict=False, interpolation=None, delimiters=("=",))
+        cp.optionxform = str
+        cp.read_string(UNIT.read_text())
+        svc = _service()
+        burst = int(cp["Unit"]["StartLimitBurst"])
+        cycle = _seconds(svc["WatchdogSec"]) + _seconds(svc["RestartSec"])
+        self.assertLess(burst * cycle, _seconds(cp["Unit"]["StartLimitIntervalSec"]))
+
     def test_restart_follows_a_watchdog_abort(self):
         self.assertIn(_service().get("Restart"), ("always", "on-failure", "on-watchdog", "on-abnormal"))
 

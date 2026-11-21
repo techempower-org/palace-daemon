@@ -8,6 +8,7 @@
   - `sd_watchdog.watchdog_loop` has pinged `WATCHDOG=1` (after the collection probe on the fast executor) since #101.
   - The unit never set `WatchdogSec`, though, and `Type=simple` drops notifications without `NotifyAccess`, so a hung daemon stayed "active".
   - On 2026-11-19 it stayed hung for 7 h.
+- **Restart storms end:** `StartLimitBurst=5` in `StartLimitIntervalSec=1800`. Five watchdog cycles (180 s + `RestartSec=10`) take about 950 s, so a daemon that hangs at once stops after about 16 min and shows failed.
 - **What feeds it:**
   - Normally, the daemon's own loopback `GET /health` answering (200, or 503 while Postgres is down).
   - During a `mode=rebuild` repair, a line printed by the rebuild within `PALACE_REBUILD_STALL_S` (default 1800 s) and a loopback `GET /repair/status` answering. A rebuild that goes silent is ended, where before it pinged forever.
