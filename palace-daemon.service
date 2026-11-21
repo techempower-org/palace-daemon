@@ -4,6 +4,15 @@ Documentation=https://github.com/techempower-org/palace-daemon
 After=network-online.target docker.service
 Wants=network-online.target
 Requires=docker.service
+# A daemon that fails to start (or is aborted by the watchdog) 5 times in 4 h stops restarting and shows
+# failed, instead of a restart storm (review #345 r1); RestartSec=10 spaces the tries. Review r3-r5: the window
+# must hold Burst of the longest abort cycle, or the storm never ends. One activation can spend every feed
+# bound in sequence, so the longest cycle is their sum (sd_watchdog.FEED_BOUNDS_S) + one 60 s tick of
+# detection lag + WatchdogSec 180 + RestartSec 10:
+#   startup 600 + rebuild 1800 + 60 + 180 + 10 = 2650 s, x5 = 13250 s (~3.7 h)
+# Shorter storms stop sooner: a hang while running (190 s cycles) after ~16 min.
+StartLimitIntervalSec=14400
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -28,11 +37,25 @@ Environment=PALACE_DAEMON_STRICT=0
 Environment=PALACE_RERANK_MODEL=ms-marco-TinyBERT-L-2-v2
 EnvironmentFile=/home/jp/.config/palace-daemon/env
 Restart=always
-RestartSec=5
+RestartSec=10
 TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
 KillMode=mixed
+
+# Hang watchdog. sd_watchdog.watchdog_loop sends WATCHDOG=1 every
+# min(60 s, WatchdogSec/3) only after this process served its own GET /health
+# over loopback (the listener, the event loop, the fast executor and the
+# handler: the request path that hung on 2026-11-19 for 7 h). No answer within
+# the timeout, no ping; after 180 s systemd aborts the daemon and Restart=
+# brings it back. A 503 (postgres down) still pings: a restart cannot fix the
+# database. During startup sd_watchdog.startup_keepalive feeds it for up to
+# 600 s, so a long cold start is not killed. What was missing before was
+# WatchdogSec itself: with it set, systemd defaults NotifyAccess to main; it is
+# written out here so the sender rule is explicit (tests assert the pings come
+# from the main process).
+NotifyAccess=main
+WatchdogSec=180
 
 # Lower oom_score so userland earlyoom (running on familiar at default
 # 10% mem / 10% swap thresholds) doesn't pick the daemon as its

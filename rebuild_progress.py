@@ -29,6 +29,7 @@ REBUILD_RE_FOUND = re.compile(r"Drawers found:\s+(\d+)")
 
 def make_rebuild_progress_state() -> dict[str, Any]:
     """Initial progress dict, exposed via /repair/status during a rebuild."""
+    now = time.monotonic()
     return {
         "phase": "starting",
         "completed": 0,
@@ -37,7 +38,10 @@ def make_rebuild_progress_state() -> dict[str, Any]:
         "eta_seconds": None,
         "elapsed_seconds": 0.0,
         "last_message": "",
-        "started_at_monotonic": time.monotonic(),
+        "started_at_monotonic": now,
+        # #345 r2: every output line the rebuild prints; the watchdog stops feeding when these stop.
+        "beat": 0,
+        "beat_at": now,
     }
 
 
@@ -76,6 +80,8 @@ class RebuildProgressBuffer(io.TextIOBase):
         if not line:
             return
         self._state["last_message"] = line
+        self._state["beat"] = self._state.get("beat", 0) + 1
+        self._state["beat_at"] = time.monotonic()
         m = REBUILD_RE_STAGED.search(line)
         if m:
             self._update_phase("stage", int(m.group(1)), int(m.group(2)))

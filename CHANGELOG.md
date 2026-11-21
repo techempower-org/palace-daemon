@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Fixed — *the unit arms the hang watchdog*
+
+- **Watchdog:** `palace-daemon.service` sets `WatchdogSec=180` and `NotifyAccess=main`.
+  - `sd_watchdog.watchdog_loop` has pinged `WATCHDOG=1` (after the collection probe on the fast executor) since #101.
+  - The unit never set `WatchdogSec`, though, and `Type=simple` drops notifications without `NotifyAccess`, so a hung daemon stayed "active".
+  - On 2026-11-19 it stayed hung for 7 h.
+- **Restart storms end:** `StartLimitBurst=5` in `StartLimitIntervalSec=14400` (4 h); every kind of storm ends with the unit failed.
+  - A hang while running: each cycle is 190 s (`WatchdogSec` 180 + `RestartSec=10`), so it stops after about 16 min.
+  - A hang during startup: each cycle is 790 s (the 600 s startup feed + 190 s), so it stops after about 66 min.
+  - A hang mid-rebuild: each cycle is 1990 s (the 1800 s rebuild stall budget + 190 s), so it stops after about 166 min.
+  - The longest possible cycle spends both feeds in one activation: 600 + 1800 + a 60 s tick + 190 = 2650 s. Five of them are about 3.7 h, inside the window.
+  - A unit test asserts five of that sum (from `sd_watchdog.FEED_BOUNDS_S`) fit in the window.
+- **What feeds it:**
+  - Normally, the daemon's own loopback `GET /health` answering (200, or 503 while Postgres is down).
+  - During a `mode=rebuild` repair, a line printed by the rebuild within `PALACE_REBUILD_STALL_S` (default and maximum 1800 s) and a loopback `GET /repair/status` answering. A rebuild that goes silent is ended, where before it pinged forever. Missing or malformed progress counts as silent since the rebuild began.
+  - During startup, a plain thread that a blocking lifespan step cannot starve. It feeds for at most 600 s; a cold start measures 3–8 s.
+- `tests/test_service_unit.py` reads the shipped unit: the watchdog is armed, notifications reach systemd, and restart follows an abort.
+- **Not in this change: a malloc arena cap.**
+  - 12 h after a restart at 381 MB, the daemon held 6.8 GB of anonymous memory (RSS + swap), 4.8 GB of it in 131 glibc per-thread 64 MB arenas.
+  - `MALLOC_ARENA_MAX=2` was measured on 8 threads × 15 searches, four arms per setting. It lowered RSS by about 9%.
+  - Its throughput spread within a setting (0.6–0.7/s) was wider than the gap between settings, so the benchmark could not rule out a hot-path cost.
+  - The memory growth is its own row, with `MALLOC_ARENA_MAX=8`, a `malloc_trim(0)` after each index build, and jemalloc as candidates.
+
 ### Added: *CHECK palace-backup*
 
 - `scripts/checks/palace_backup.py`, with units `palace-check-palace-backup.{service,timer}` (daily 03:10) and `palace-check-palace-backup-integrity.{service,timer}` (Sunday 03:40).
