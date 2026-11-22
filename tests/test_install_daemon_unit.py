@@ -12,6 +12,7 @@ import io
 import os
 import shutil
 import stat
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,20 +21,24 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "systemd" / "install_daemon_unit.py"
 spec = importlib.util.spec_from_file_location("install_daemon_unit", SCRIPT)
 idu = importlib.util.module_from_spec(spec)
+_dwb, sys.dont_write_bytecode = sys.dont_write_bytecode, True  # no __pycache__ under scripts/systemd
 spec.loader.exec_module(idu)
+sys.dont_write_bytecode = _dwb
 
 FAKE = """#!/bin/sh
 echo "$@" >> "$FAKE_DIR/calls"
 case "$1" in
   show) if [ -e "$FAKE_DIR/reloaded" ]; then cat "$FAKE_DIR/after"; else cat "$FAKE_DIR/before"; fi ;;
-  daemon-reload) touch "$FAKE_DIR/reloaded" ;;
+  daemon-reload) [ -e "$FAKE_DIR/reload-fails" ] && exit 1; touch "$FAKE_DIR/reloaded" ;;
   *) exit 9 ;;
 esac
 """
 BEFORE = ("MemoryMax=6442450944\nOOMPolicy=continue\nFragmentPath=/etc/systemd/system/palace-daemon.service\n"
-          "DropInPaths=/a/memory.conf\nMemoryCurrent=100\nWatchdogTimestamp=Sat 13:00\nEnvironment=A=1\n")
+          "DropInPaths=/a/memory.conf\nMemoryCurrent=100\nWatchdogTimestamp=Sat 13:00\nEnvironment=A=1\n"
+          "NeedDaemonReload=no\n")
 AFTER_SAME = ("MemoryMax=6442450944\nOOMPolicy=continue\nFragmentPath=/etc/systemd/system/palace-daemon.service\n"
-              "DropInPaths=\nMemoryCurrent=200\nWatchdogTimestamp=Sat 13:01\nEnvironment=A=1 B=2\n")
+              "DropInPaths=\nMemoryCurrent=200\nWatchdogTimestamp=Sat 13:01\nEnvironment=A=1\nNeedDaemonReload=no\n")
+NOW = dt.datetime(2026, 11, 21, 14, 0)
 
 
 class InstallDaemonUnit(unittest.TestCase):
@@ -61,21 +66,34 @@ class InstallDaemonUnit(unittest.TestCase):
             self.files[p] = p.read_bytes()
         self.old_unit = self.unit.read_bytes()
 
-    def _install(self, minute=0):
-        with contextlib.redirect_stdout(io.StringIO()) as out:
-            rc = idu.install(self.root, self.backups, str(self.fake / "systemctl"), now=dt.datetime(2026, 11, 21, 14, minute))
+    def _install(self, expect=frozenset()):
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+            rc = idu.install(self.root, self.backups, str(self.fake / "systemctl"), now=NOW, expect=expect)
         return rc, out.getvalue()
 
     def _restore(self, bdir):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             return idu.restore(self.root, bdir, str(self.fake / "systemctl"))
 
+    def _bdirs(self):
+        return sorted(self.backups.iterdir()) if self.backups.exists() else []
+
+    def _calls(self):
+        p = self.fake / "calls"
+        return p.read_text().splitlines() if p.exists() else []
+
+    def _assert_all_back(self):
+        self.assertEqual(self.unit.read_bytes(), self.old_unit)
+        for p, data in self.files.items():
+            self.assertEqual(p.read_bytes(), data)
+
     def test_install_moves_every_drop_in_from_both_dirs_into_a_dated_listed_backup(self):
         rc, out = self._install()
         self.assertEqual(rc, 0, out)
         self.assertEqual(self.unit.read_bytes(), idu.REPO_UNIT.read_bytes())
         self.assertEqual(idu.dropins(self.root), [])
-        bdir = self.backups / "palace-daemon-unit-20261121-140000"
+        [bdir] = self._bdirs()
+        self.assertTrue(bdir.name.startswith("palace-daemon-unit-20261121-140000-"), bdir.name)
         for p, data in self.files.items():
             self.assertEqual((bdir / "files" / p.relative_to(self.root)).read_bytes(), data)
         manifest = (bdir / "MANIFEST.tsv").read_text().splitlines()
@@ -84,45 +102,111 @@ class InstallDaemonUnit(unittest.TestCase):
         self.assertTrue((bdir / "show-before.txt").is_file() and (bdir / "show-after.txt").is_file())
 
     def test_a_rerun_does_nothing_and_makes_no_backup(self):
-        self._install(0)
-        rc, out = self._install(1)
+        self._install()
+        rc, out = self._install()
         self.assertEqual(rc, 0)
         self.assertIn("nothing to do", out)
-        self.assertEqual([p.name for p in self.backups.iterdir()], ["palace-daemon-unit-20261121-140000"])
+        self.assertEqual(len(self._bdirs()), 1)
 
     def test_restore_puts_every_byte_back_and_a_rerun_is_safe(self):
         self._install()
-        bdir = self.backups / "palace-daemon-unit-20261121-140000"
+        [bdir] = self._bdirs()
         self.assertEqual(self._restore(bdir), 0)
-        self.assertEqual(self.unit.read_bytes(), self.old_unit)
-        for p, data in self.files.items():
-            self.assertEqual(p.read_bytes(), data)
+        self._assert_all_back()
         self.assertEqual(self._restore(bdir), 0)
-
-    def test_restore_will_not_overwrite_a_drop_in_with_other_bytes(self):
-        self._install()
-        p = next(iter(self.files))
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(b"[Service]\n# someone else's\n")
-        self.assertEqual(self._restore(self.backups / "palace-daemon-unit-20261121-140000"), 4)
-        self.assertEqual(p.read_bytes(), b"[Service]\n# someone else's\n")
-
-    def test_an_effective_change_after_the_reload_exits_3(self):
-        (self.fake / "after").write_text(AFTER_SAME.replace("MemoryMax=6442450944", "MemoryMax=8589934592"))
-        rc, out = self._install()
-        self.assertEqual(rc, 3)
-        self.assertIn("EFFECTIVE CHANGE in MemoryMax", out)
-
-    def test_only_source_documentation_environment_and_live_counters_may_change(self):
-        self.assertEqual(idu.effective_changes(
-            dict(ln.split("=", 1) for ln in BEFORE.splitlines()),
-            dict(ln.split("=", 1) for ln in AFTER_SAME.splitlines())), [])
 
     def test_it_never_starts_stops_or_restarts_anything(self):
         self._install()
-        self._restore(self.backups / "palace-daemon-unit-20261121-140000")
-        verbs = {ln.split()[0] for ln in (self.fake / "calls").read_text().splitlines()}
-        self.assertEqual(verbs, {"show", "daemon-reload"})
+        self._restore(self._bdirs()[0])
+        self.assertEqual({c.split()[0] for c in self._calls()}, {"show", "daemon-reload"})
+
+    # review #349 r2 (1): Environment is compared; an intended change is named with --expect
+    def test_an_environment_change_is_effective_unless_expected(self):
+        (self.fake / "after").write_text(AFTER_SAME.replace("Environment=A=1", "Environment=A=1 B=2"))
+        rc, out = self._install()
+        self.assertEqual(rc, 3)
+        self.assertIn("EFFECTIVE CHANGE in Environment", out)
+        self._restore(self._bdirs()[0])
+        (self.fake / "reloaded").unlink()
+        rc, out = self._install(expect=frozenset({"Environment"}))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("expected change in Environment", out)
+
+    def test_a_memory_change_is_effective_even_with_environment_expected(self):
+        (self.fake / "after").write_text(AFTER_SAME.replace("MemoryMax=6442450944", "MemoryMax=8589934592"))
+        rc, out = self._install(expect=frozenset({"Environment"}))
+        self.assertEqual(rc, 3)
+        self.assertIn("EFFECTIVE CHANGE in MemoryMax", out)
+
+    # (2): a failed reload restores everything and fails; a rerun runs a pending reload
+    def test_a_failed_reload_restores_and_exits_nonzero(self):
+        (self.fake / "reload-fails").touch()
+        rc, _ = self._install()
+        self.assertEqual(rc, 5)
+        self._assert_all_back()
+
+    def test_a_rerun_with_a_pending_reload_runs_it(self):
+        self.unit.write_bytes(idu.REPO_UNIT.read_bytes())
+        for p in self.files:
+            p.unlink()
+        (self.fake / "before").write_text(BEFORE.replace("NeedDaemonReload=no", "NeedDaemonReload=yes"))
+        rc, out = self._install()
+        self.assertEqual(rc, 0)
+        self.assertIn("pending daemon-reload is done now", out)
+        self.assertIn("daemon-reload", self._calls())
+
+    # (3): the temp file is private and unpredictable; a planted file at the old fixed name is not followed
+    def test_the_unit_is_written_through_an_unpredictable_temp_file_with_mode_0644(self):
+        victim = self.tmp / "victim"
+        victim.write_bytes(b"untouched")
+        (self.unit.parent / f".{self.unit.name}.install-tmp").symlink_to(victim)
+        old = os.umask(0o077)
+        try:
+            idu.write_atomic(self.unit, b"new\n")
+        finally:
+            os.umask(old)
+        self.assertEqual(victim.read_bytes(), b"untouched")
+        self.assertEqual(self.unit.read_bytes(), b"new\n")
+        self.assertEqual(stat.S_IMODE(self.unit.stat().st_mode), 0o644)
+        self.assertEqual(sorted(p.name for p in self.unit.parent.iterdir() if p.name.startswith(".")),
+                         [f".{self.unit.name}.install-tmp"])
+
+    # (4): restore checks every conflict first and changes nothing on one
+    def test_a_conflict_stops_restore_before_any_file_changes(self):
+        self._install()
+        [bdir] = self._bdirs()
+        p = sorted(self.files)[-1]
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"[Service]\n# someone else's\n")
+        reloads = self._calls().count("daemon-reload")
+        self.assertEqual(self._restore(bdir), 4)
+        self.assertEqual(self.unit.read_bytes(), idu.REPO_UNIT.read_bytes())
+        self.assertEqual(p.read_bytes(), b"[Service]\n# someone else's\n")
+        self.assertEqual(self._calls().count("daemon-reload"), reloads)
+
+    # (5): two installs in the same second get two backups
+    def test_backups_made_in_the_same_second_do_not_collide(self):
+        self._install()
+        self._restore(self._bdirs()[0])
+        (self.fake / "reloaded").unlink()
+        rc, _ = self._install()
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self._bdirs()), 2)
+
+    # (6): no unit before means restore removes the one the install wrote
+    def test_restore_removes_a_unit_that_was_absent_before(self):
+        self.unit.unlink()
+        self._install()
+        [bdir] = self._bdirs()
+        self.assertIn("absent\t/etc/systemd/system/palace-daemon.service", (bdir / "MANIFEST.tsv").read_text())
+        self.assertTrue(self.unit.is_file())
+        self.assertEqual(self._restore(bdir), 0)
+        self.assertFalse(self.unit.exists())
+
+    def test_only_source_documentation_and_live_counters_may_change(self):
+        self.assertEqual(idu.effective_changes(
+            dict(ln.split("=", 1) for ln in BEFORE.splitlines()),
+            dict(ln.split("=", 1) for ln in AFTER_SAME.splitlines())), [])
 
 
 if __name__ == "__main__":

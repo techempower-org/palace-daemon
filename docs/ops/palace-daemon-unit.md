@@ -20,19 +20,24 @@ Edit `palace-daemon.service` here, by PR, then install it (below). Do not add a 
 
 On the palace host, from the synced tree after it is aligned to `main`:
 
-    sudo python3 scripts/systemd/install_daemon_unit.py
+    sudo python3 scripts/systemd/install_daemon_unit.py [--expect Environment]
 
-1. If the installed unit already matches and no drop-in exists, it does nothing.
-2. Otherwise it makes `/var/backups/palace-daemon-unit/palace-daemon-unit-<date>-<time>/`, containing:
+1. If the installed unit already matches and no drop-in exists, it does nothing, except that it runs a pending
+   daemon-reload.
+2. Otherwise it makes `/var/backups/palace-daemon-unit/palace-daemon-unit-<date>-<time>-<random>/`, containing:
    - the whole `systemctl show` output from before;
    - the old unit (copied);
    - every drop-in, moved, under its original path. That covers both
      `/etc/systemd/system/palace-daemon.service.d/` and `/etc/systemd/system.control/palace-daemon.service.d/`;
-   - `MANIFEST.tsv`, the listing.
-3. It writes the repo unit and runs `systemctl daemon-reload`. **It never restarts the daemon.**
-4. It diffs `systemctl show` before and after. Only the unit's source, `Documentation`, `Environment` (which takes
-   effect at the next start) and the live counters may change. Any other key is an effective change: the script
-   prints it and exits 3 with the restore command.
+   - `MANIFEST.tsv`, the listing. It says `absent` when there was no unit before.
+3. It writes the repo unit and runs `systemctl daemon-reload`. **It never restarts the daemon.** If the reload fails,
+   it restores everything from the backup it just made and exits 5.
+4. It diffs `systemctl show` before and after. Only the unit's source, `Documentation` and the live counters may
+   change unannounced. Any other key is an effective change, `Environment` included (it takes effect at the next
+   start). A key named with `--expect` is printed as expected; any other key makes it print the restore command and
+   exit 3.
+   - On 2026-11-21 the install was expected to change `Environment` and nothing else. The repo pins
+     `PALACE_RERANK_MODEL`; the old unit didn't, and the pinned value is the code's default.
 
 Then:
 
@@ -40,6 +45,10 @@ Then:
   03:00, the nightly dump.
 - Run `systemctl --user start palace-check-unit-drift.service`. The line should read `ok`.
 
-**Rollback:** `sudo python3 scripts/systemd/install_daemon_unit.py --restore <backup dir>`. It puts every file back
-where it was and reloads. It is safe to rerun, and it refuses to overwrite a drop-in that has since changed
-(exit 4).
+**Rollback:** `sudo python3 scripts/systemd/install_daemon_unit.py --restore <backup dir>`.
+
+- It checks every conflict first: a drop-in that is back with different bytes, or one missing from the backup.
+  If it finds one, it changes nothing and exits 4.
+- Otherwise it puts every file back (it removes the unit if it was `absent`) and reloads once. If that reload
+  fails, it exits 6 with the files already back.
+- It is safe to rerun.
