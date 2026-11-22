@@ -23,7 +23,8 @@ row. For a large (wing, room) whose rows are spread through the id order, that t
 - `max_parallel_maintenance_workers = 0`, so one backend did the reading.
 - That backend was moved to the idle I/O class at nice 15 through its host pid. The palace host's standing rule is
   that every heavy read runs under `ionice -c3 nice -n 15`. (Found 2026-11-21: that disk's I/O scheduler was `none`,
-  which ignores the class, so only nice 15 applied. See [manual-vacuum.md](manual-vacuum.md).)
+  which ignores the class, so only nice 15 applied. It runs `mq-deadline` since 13:29:54 that day, and the class
+  holds. See [manual-vacuum.md](manual-vacuum.md).)
 
 **Start guard:** the build started only if the 1-min load was ≤ 8 and the IO PSI "full" avg60 was ≤ 30 %. Otherwise
 it retried every 10 min, giving up at 01:55, before the 02:15 nightly dump. It started on the first check (load 1.4,

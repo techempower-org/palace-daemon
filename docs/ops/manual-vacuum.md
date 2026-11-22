@@ -38,8 +38,10 @@ scheduler honours priority classes (`mq-deadline` or `bfq`). With `none`, it is 
 ignored. Check the scheduler of the disk holding the database's data directory first:
 `cat /sys/block/<disk>/queue/scheduler` (the name in brackets is the one in use). On 2026-11-21 the palace database's disk
 used `none`: the VACUUMs below and the 11-18 index build got only the CPU half (`nice`), and wing-page timeouts
-peaked in the VACUUM's hour (15, the most of any hour in 48 h). Until the scheduler honours classes, the real
-protection is a load guard at start (see the index run-books) and staying out of busy hours.
+peaked in the VACUUM's hour (15, the most of any hour in 48 h). Since 2026-11-21 13:29:54 that disk runs
+`mq-deadline`, so the idle class now holds. It doesn't stop one heavy reader from saturating the
+disk, though, so a load guard at start (see the index run-books) and staying out of busy hours remain the real
+protection.
 
 **Not between 01:00 and 03:00:** the nightly dump runs at 02:15.
 
