@@ -243,9 +243,46 @@ class InstallDaemonUnit(unittest.TestCase):
             idu.main(["--expect", "MemoryMax", "--root", str(self.root), "--systemctl", str(self.fake / "systemctl")])
 
     def test_only_source_documentation_and_live_counters_may_change(self):
-        self.assertEqual(idu.effective_changes(
-            dict(ln.split("=", 1) for ln in BEFORE.splitlines()),
-            dict(ln.split("=", 1) for ln in AFTER_SAME.splitlines())), [])
+        self.assertEqual(idu.effective_changes(idu.parse_show(BEFORE), idu.parse_show(AFTER_SAME)), [])
+
+
+# The 2026-11-21 17:18 deploy: these were the only differences, and none was a change (row 34831d29).
+PRE = "ExecStartPre={ path=/bin/bash ; argv[]=/bin/bash -c until pg_isready; do sleep 2; done ; ignore_errors=no ; "
+RAN = ("start_time=[Sat 2026-11-21 00:07:40 PST] ; stop_time=[Sat 2026-11-21 00:07:40 PST] ; "
+       "pid=3218544 ; code=exited ; status=0 }")
+RELOADED = "start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }"
+SHOW_BEFORE = ("After=docker.service home-jp-Projects.mount\nBefore=shutdown.target multi-user.target\n"
+               "Requires=docker.service sysinit.target\n"
+               "ExecStartPre={ path=/usr/bin/fuser ; argv[]=/usr/bin/fuser -k 8085/tcp ; ignore_errors=yes ; " + RAN + "\n"
+               + PRE + RAN + "\n")
+SHOW_AFTER = ("After=home-jp-Projects.mount docker.service\nBefore=multi-user.target shutdown.target\n"
+              "Requires=sysinit.target docker.service\n"
+              "ExecStartPre={ path=/usr/bin/fuser ; argv[]=/usr/bin/fuser -k 8085/tcp ; ignore_errors=yes ; " + RELOADED
+              + "\n" + PRE + RELOADED + "\n")
+
+
+class ShowDiffNoise(unittest.TestCase):
+    """A reload reorders dependency lists and resets each command's last run; neither is an effective change."""
+
+    def test_a_reordered_dependency_list_is_the_same_list(self):
+        self.assertEqual(idu.effective_changes(idu.parse_show(SHOW_BEFORE), idu.parse_show(SHOW_AFTER)), [])
+
+    def test_a_dependency_list_that_gains_a_member_is_a_change(self):
+        after = SHOW_AFTER.replace("Requires=sysinit.target docker.service", "Requires=sysinit.target")
+        self.assertEqual(idu.effective_changes(idu.parse_show(SHOW_BEFORE), idu.parse_show(after)), ["Requires"])
+
+    def test_a_reset_last_run_is_not_a_change_but_a_new_argv_is(self):
+        after = SHOW_AFTER.replace("-k 8085/tcp", "-k 8086/tcp")
+        self.assertEqual(idu.effective_changes(idu.parse_show(SHOW_BEFORE), idu.parse_show(after)), ["ExecStartPre"])
+        after = SHOW_AFTER.replace("ignore_errors=yes", "ignore_errors=no")
+        self.assertEqual(idu.effective_changes(idu.parse_show(SHOW_BEFORE), idu.parse_show(after)), ["ExecStartPre"])
+
+    def test_every_repeated_key_is_kept_not_only_the_last(self):
+        props = idu.parse_show(SHOW_BEFORE)
+        self.assertEqual(props["ExecStartPre"].count("path="), 2)
+        # a change to the FIRST of two ExecStartPre commands is still seen
+        after = SHOW_AFTER.replace("/usr/bin/fuser -k", "/usr/bin/fuser -9 -k")
+        self.assertEqual(idu.effective_changes(props, idu.parse_show(after)), ["ExecStartPre"])
 
 
 if __name__ == "__main__":

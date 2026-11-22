@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Changed — *judged-parent indexes; the install script's show diff stops reporting noise*
+
+- **Indexes:** `mempalace_drawers` gets `((metadata->>'parent_drawer_id'))` and `((metadata->>'parent_entry_id'))` (2026-11-21, 10 MB each).
+  - The search path's judged-parent lookup walked the primary key over all 1.5 M rows for missing ids, until the 30 s timeout cancelled it: 104 cancellations in 24 h.
+  - A search that hit both keys waited 64.7 s. Afterwards: 2.3 s.
+  - Run-book: `docs/ops/mempalace-drawers-parent-id-indexes.md`.
+  - New rule there: **every expression index is followed by ANALYZE on its table, then the plan check.** Without statistics, the planner kept the primary-key walk.
+- **`install_daemon_unit.py` show diff:** the 11-21 deploy exited 3 on differences that weren't changes. The diff now:
+  - compares dependency lists (After, Requires, …) as sets, since a reload reorders them;
+  - compares Exec* commands by path, argv and flags, without the last run's pid, times and status, which a reload resets;
+  - keeps every value of a key that `systemctl show` repeats (one ExecStartPre line per command). Before, only the last one was compared.
+  - On the real 11-21 files it now reports `Environment` alone.
+
 ### Fixed — *the shipped unit is the installed unit: drop-ins folded in, and a CHECK for drift*
 
 - **`palace-daemon.service` now carries the settings that lived only in the palace host's drop-ins,** with the values that were in force:

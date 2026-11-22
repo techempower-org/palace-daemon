@@ -68,19 +68,53 @@ def sha(p: Path) -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
+def parse_show(text: str) -> dict[str, str]:
+    """`systemctl show` output as key → value. A key printed more than once (one ExecStartPre line per command)
+    keeps every value, joined by newlines in order, so no command drops out of the comparison."""
+    props: dict[str, str] = {}
+    for ln in text.splitlines():
+        if "=" in ln:
+            k, v = ln.split("=", 1)
+            props[k] = f"{props[k]}\n{v}" if k in props else v
+    return props
+
+
 def show(systemctl: str) -> dict[str, str]:
     out = subprocess.run([systemctl, "show", UNIT], capture_output=True, text=True, check=True, timeout=60).stdout
-    return dict(ln.split("=", 1) for ln in out.splitlines() if "=" in ln)
+    return parse_show(out)
 
 
 def reload(systemctl: str) -> None:
     subprocess.run([systemctl, "daemon-reload"], check=True, timeout=120)
 
 
+# Dependency lists: systemd prints the same members in a different order after a reload (2026-11-21 deploy).
+DEPENDENCY_KEYS = frozenset({
+    "After", "Before", "Requires", "Wants", "BindsTo", "PartOf", "Conflicts", "Requisite", "Upholds",
+    "RequiredBy", "WantedBy", "RequisiteOf", "BoundBy", "ConsistsOf", "UpheldBy", "ConflictedBy", "Triggers",
+    "TriggeredBy", "OnFailure", "OnSuccess", "PropagatesReloadTo", "ReloadPropagatedFrom", "JoinsNamespaceOf",
+    "RequiresMountsFor", "WantsMountsFor",
+})
+# An Exec* entry carries the last run's state, which a reload resets ("pid=0 ; code=(null)"); the command is
+# path + argv[] + ignore_errors/flags, and only that is compared.
+_EXEC_RUN_FIELDS = re.compile(r" ; (?:start_time|stop_time)=\[[^\]]*\]| ; (?:pid|code|status)=[^ ;}]*")
+
+
+def comparable(key: str, value: str | None) -> object:
+    if value is None:
+        return None
+    if key in DEPENDENCY_KEYS:
+        return frozenset(value.split())
+    if key.startswith("Exec"):
+        return _EXEC_RUN_FIELDS.sub("", value)
+    return value
+
+
 def effective_changes(before: dict[str, str], after: dict[str, str]) -> list[str]:
     keys = sorted(set(before) | set(after))
     return [k for k in keys
-            if before.get(k) != after.get(k) and k not in MAY_CHANGE and not MOVES_ON_ITS_OWN.match(k)]
+            if comparable(k, before.get(k)) != comparable(k, after.get(k))
+            and k not in MAY_CHANGE and not MOVES_ON_ITS_OWN.match(k)]
 
 
 def dropins(root: Path) -> list[Path]:
