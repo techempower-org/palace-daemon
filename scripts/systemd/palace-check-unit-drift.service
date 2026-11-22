@@ -1,0 +1,20 @@
+[Unit]
+Description=palace lane check: installed palace-daemon.service against the repo's, and drop-ins on top
+Documentation=file://%h/Projects/palace-daemon/docs/CHECKS.md
+
+[Service]
+Type=oneshot
+# A user unit started at boot sees a bare PATH: name the dirs (systemctl).
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Paths and hosts only. Never a secrets file: systemd logs a line it cannot parse in full.
+EnvironmentFile=%h/.config/palace-checks/env
+ExecStart=%h/.local/share/palace-daemon/venv/bin/python %h/Projects/palace-daemon/scripts/checks/unit_drift.py
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=2min
+NoNewPrivileges=yes
+UMask=0077
+LimitCORE=0
+ProtectSystem=strict
+ReadWritePaths=%h/.local/state/checks
+PrivateTmp=yes

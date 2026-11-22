@@ -4,6 +4,9 @@ Documentation=https://github.com/techempower-org/palace-daemon
 After=network-online.target docker.service
 Wants=network-online.target
 Requires=docker.service
+# The daemon runs from (and mines into) the synced Projects tree, a separate mount on the palace host: never
+# start before it is there (was the host drop-in projects-mount.conf).
+RequiresMountsFor=/home/jp/Projects
 # A daemon that fails to start (or is aborted by the watchdog) 5 times in 4 h stops restarting and shows
 # failed, instead of a restart storm (review #345 r1); RestartSec=10 spaces the tries. Review r3-r5: the window
 # must hold Burst of the longest abort cycle, or the storm never ends. One activation can spend every feed
@@ -43,6 +46,20 @@ StandardOutput=journal
 StandardError=journal
 KillMode=mixed
 
+# Memory (2026-11-21: folded in from the host's drop-ins, which had drifted from this file; the values are
+# the ones that were in force). The palace host has 32 GB.
+# - MemoryHigh=5G / MemoryMax=6G: 2 G then 4 G caps were hit by real work (2026-09-10 #256: pinned at
+#   2 GB with millions of reclaim stalls; 2026-10-24: a memcg OOM at 4 G while five lanes' saves mined at once).
+#   Above MemoryHigh the kernel reclaims and swaps; MemoryMax is the OOM line.
+# - MemorySwapMax=3G bounds how much of that goes to swap.
+# - OOMPolicy=continue (2026-10-15, mempalace #548): a memcg OOM kills the biggest process, usually a drain
+#   `mempalace mine` child; with the default OOMPolicy=stop that took the whole unit down. continue lets the
+#   kernel kill the mine while the daemon keeps serving.
+MemoryHigh=5G
+MemoryMax=6G
+MemorySwapMax=3G
+OOMPolicy=continue
+
 # Hang watchdog. sd_watchdog.watchdog_loop sends WATCHDOG=1 every
 # min(60 s, WatchdogSec/3) only after this process served its own GET /health
 # over loopback (the listener, the event loop, the fast executor and the
@@ -60,7 +77,7 @@ WatchdogSec=180
 # Lower oom_score so userland earlyoom (running on familiar at default
 # 10% mem / 10% swap thresholds) doesn't pick the daemon as its
 # SIGTERM victim during memory-heavy /graph or /backfill-age calls.
-# The daemon's MemoryMax=2G drop-in caps its cgroup; this just keeps
+# MemoryMax above caps its cgroup; this just keeps
 # system-wide pressure from preempting it. -500 displaces the daemon
 # below routine python processes without making it completely
 # invulnerable. See palace-daemon#154.

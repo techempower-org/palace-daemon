@@ -1,0 +1,10 @@
+[Unit]
+Description=palace lane check: palace-daemon unit drift (daily)
+
+[Timer]
+OnCalendar=*-*-* 07:05
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
