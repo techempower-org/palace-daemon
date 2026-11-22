@@ -22,6 +22,9 @@ On the palace host, from the synced tree after it is aligned to `main`:
 
     sudo python3 scripts/systemd/install_daemon_unit.py [--expect Environment]
 
+0. It refuses to start, changing nothing, in two cases:
+   - `--expect` names any key but `Environment` (exit 2);
+   - the unit or a drop-in is a symlink (exit 3, named), because a backup would restore it as a plain file.
 1. If the installed unit already matches and no drop-in exists, it does nothing, except that it runs a pending
    daemon-reload.
 2. Otherwise it makes `/var/backups/palace-daemon-unit/palace-daemon-unit-<date>-<time>-<random>/`, containing:
@@ -47,8 +50,8 @@ Then:
 
 **Rollback:** `sudo python3 scripts/systemd/install_daemon_unit.py --restore <backup dir>`.
 
-- It checks every conflict first: a drop-in that is back with different bytes, or one missing from the backup.
-  If it finds one, it changes nothing and exits 4.
+- It checks every manifest row first. Each backup copy must exist and match its recorded sha256, and a drop-in
+  already back must have the same bytes. If any row fails, it changes nothing and exits 4.
 - Otherwise it puts every file back (it removes the unit if it was `absent`) and reloads once. If that reload
   fails, it exits 6 with the files already back.
 - It is safe to rerun.

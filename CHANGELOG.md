@@ -14,7 +14,8 @@
   - It diffs `systemctl show` before and after and exits 3 on any effective change. `Environment` counts as one unless named with `--expect`.
   - If the reload fails, it restores from the backup and exits 5. A rerun runs a pending reload.
   - It writes through a private temp file. Each backup directory gets a unique name, and a missing unit is recorded as `absent`.
-  - `--restore <dir>` checks every conflict before changing anything, then puts everything back, removes an `absent` unit, and reloads once. It is safe to rerun.
+  - It refuses a symlinked unit or drop-in, and an `--expect` key other than `Environment`.
+  - `--restore <dir>` checks every backup copy against its manifest sha256, and every conflict, before changing anything, then puts everything back, removes an `absent` unit, and reloads once. It is safe to rerun.
 - **Install run-book:** `docs/ops/palace-daemon-unit.md` covers the backup, the `systemctl show` diff, no drop-ins, and no `set-property`.
   - `set-property` writes under `/etc/systemd/system.control/`, and the check names those overrides separately.
 - Tests: `FoldedDropIns` in `tests/test_service_unit.py` and `UnitDrift` in `tests/test_palace_checks.py`.

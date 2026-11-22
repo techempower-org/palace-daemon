@@ -203,6 +203,45 @@ class InstallDaemonUnit(unittest.TestCase):
         self.assertEqual(self._restore(bdir), 0)
         self.assertFalse(self.unit.exists())
 
+    # Sen's #349 ruling (a): every backup copy is checked against its manifest sha256 before any write
+    def test_a_tampered_backup_copy_stops_restore_before_any_write(self):
+        for which in ("copied", "moved"):
+            with self.subTest(which):
+                self.setUp()
+                self._install()
+                [bdir] = self._bdirs()
+                row = next(r.split("\t") for r in (bdir / "MANIFEST.tsv").read_text().splitlines()
+                           if r.startswith(which))
+                (bdir / "files" / row[1].lstrip("/")).write_bytes(b"[Service]\n# tampered\n")
+                reloads = self._calls().count("daemon-reload")
+                self.assertEqual(self._restore(bdir), 4)
+                self.assertEqual(self.unit.read_bytes(), idu.REPO_UNIT.read_bytes())  # nothing written
+                self.assertEqual(idu.dropins(self.root), [])
+                self.assertEqual(self._calls().count("daemon-reload"), reloads)
+
+    # (b): a symlinked drop-in (or unit) is refused before anything changes
+    def test_a_symlinked_drop_in_is_refused_untouched(self):
+        target = self.tmp / "elsewhere.conf"
+        target.write_bytes(b"[Service]\n# linked\n")
+        link = self.root / idu.DROPIN_RELS[0] / "linked.conf"
+        link.symlink_to(target)
+        rc, _ = self._install()
+        self.assertEqual(rc, 3)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(self.unit.read_bytes(), self.old_unit)
+        self.assertEqual(self._bdirs(), [])
+        self.assertNotIn("daemon-reload", self._calls())
+
+    # (c): --expect takes only Environment, so a cap change can never be waved through
+    def test_expect_refuses_any_key_but_environment(self):
+        (self.fake / "after").write_text(AFTER_SAME.replace("MemoryMax=6442450944", "MemoryMax=8589934592"))
+        rc, _ = self._install(expect=frozenset({"MemoryMax"}))
+        self.assertEqual(rc, 2)
+        self.assertEqual(self.unit.read_bytes(), self.old_unit)
+        self.assertEqual(self._bdirs(), [])
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            idu.main(["--expect", "MemoryMax", "--root", str(self.root), "--systemctl", str(self.fake / "systemctl")])
+
     def test_only_source_documentation_and_live_counters_may_change(self):
         self.assertEqual(idu.effective_changes(
             dict(ln.split("=", 1) for ln in BEFORE.splitlines()),

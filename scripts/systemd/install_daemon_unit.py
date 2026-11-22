@@ -8,6 +8,8 @@ Run-book: docs/ops/palace-daemon-unit.md. Stdlib only. **It never restarts the d
 `systemctl daemon-reload` and nothing else, so a change that needs a restart waits for one you choose.
 
 Install:
+0. Refused before anything changes: an ``--expect`` key outside the allowlist (only ``Environment``; exit 2),
+   and a unit or drop-in that is a symlink (a byte backup would restore it as a file; exit 3, naming it).
 1. If the installed unit already equals the repo's byte for byte and no drop-in file exists in either drop-in
    directory, there is nothing to do: exit 0, no backup. If systemd still reports NeedDaemonReload, the reload is
    run then.
@@ -23,12 +25,13 @@ Install:
    ``daemon-reload``. If the reload fails, everything is restored from that backup and the exit code is 5.
 4. ``show-after.txt``, diffed against before. Only the unit's own source (FragmentPath, DropInPaths,
    NeedDaemonReload), Documentation and the counters that move on their own (CPU, memory, watchdog timestamps)
-   may differ. Any other key, Environment included, is an effective change. A key named with ``--expect`` is
-   printed as expected; any other is printed with the restore command, and the exit code is 3. The install itself
-   stays in place.
+   may differ. Any other key, Environment included, is an effective change. ``--expect Environment`` (the only key
+   it accepts) prints that change as expected; any other change is printed with the restore command, and the exit
+   code is 3. The install itself stays in place.
 
-Restore checks every conflict first and changes nothing if one is found (exit 4): a drop-in that is back with
-different bytes, or one missing from the backup. Then it puts every file back (the unit from its copy, or removed
+Restore checks every manifest row first and changes nothing if one fails (exit 4): every ``copied`` and ``moved``
+row's backup copy must exist as a file and match its recorded sha256, and a drop-in already back must have the
+same bytes. Then it puts every file back (the unit from its copy, or removed
 if it was ``absent``; drop-ins moved back) and runs one ``daemon-reload``. A drop-in already back with the same
 bytes is skipped, so a rerun is safe.
 """
@@ -54,6 +57,8 @@ DROPIN_RELS = (Path("etc/systemd/system") / f"{UNIT}.d", Path("etc/systemd/syste
 # The unit's own source and its docs link. Everything else, Environment included (it changes the next start), is
 # compared; a change the operator intends is named with --expect KEY and still printed.
 MAY_CHANGE = {"FragmentPath", "DropInPaths", "NeedDaemonReload", "Documentation"}
+# The only keys --expect may name (Sen's #349 ruling): a cap or policy change must never be waved through.
+EXPECTABLE = frozenset({"Environment"})
 MOVES_ON_ITS_OWN = re.compile(r"^(CPUUsageNSec|Memory(Available|Current|SwapCurrent|ZSwapCurrent|Peak|SwapPeak)|"
                               r"Tasks(Current)?|IO\w+Bytes|IO\w+Operations|IP\w+(Bytes|Packets)|Watchdog\w*Timestamp\w*|"
                               r"StatusText|StatusErrno)$")
@@ -79,7 +84,13 @@ def effective_changes(before: dict[str, str], after: dict[str, str]) -> list[str
 
 
 def dropins(root: Path) -> list[Path]:
-    return sorted(p for rel in DROPIN_RELS for p in (root / rel).glob("*.conf") if p.is_file())
+    """Every drop-in entry, symlinks included (is_file() would follow one and hide that it is a link)."""
+    return sorted(p for rel in DROPIN_RELS for p in (root / rel).glob("*.conf") if p.is_symlink() or p.is_file())
+
+
+def symlinks(root: Path, found: list[Path]) -> list[Path]:
+    """The unit or drop-ins that are symlinks: a byte copy would restore them as files, so they are refused."""
+    return [p for p in [root / UNIT_REL, *found] if p.is_symlink()]
 
 
 def write_atomic(dest: Path, data: bytes) -> None:
@@ -103,6 +114,16 @@ def install(root: Path, backup_root: Path, systemctl: str, now: dt.datetime | No
     unit = root / UNIT_REL
     repo = REPO_UNIT.read_bytes()
     found = dropins(root)
+    unknown = sorted(set(expect) - EXPECTABLE)
+    if unknown:
+        print(f"install: --expect may only name {', '.join(sorted(EXPECTABLE))}, not {', '.join(unknown)}; "
+              f"nothing changed", file=sys.stderr)
+        return 2
+    links = symlinks(root, found)
+    if links:
+        print(f"install: symlink(s), refused (a backup would restore them as files): "
+              f"{', '.join('/' + str(p.relative_to(root)) for p in links)}; nothing changed", file=sys.stderr)
+        return 3
     if unit.is_file() and unit.read_bytes() == repo and not found:
         if show(systemctl).get("NeedDaemonReload") == "yes":  # a reload that never happened (or failed) last time
             reload(systemctl)
@@ -168,14 +189,22 @@ def restore(root: Path, bdir: Path, systemctl: str) -> int:
     for action, path, digest in rows:
         rel = Path(path.lstrip("/"))
         src, dest = bdir / "files" / rel, root / rel
-        if action == "moved":
-            if dest.exists():
-                if sha(dest) == digest:
-                    continue  # already back
-                print(f"restore: {path} exists with different bytes; nothing restored", file=sys.stderr)
-                return 4
-            if not src.is_file():
+        if action not in ("copied", "moved", "absent"):
+            print(f"restore: unknown manifest action {action!r} for {path}; nothing restored", file=sys.stderr)
+            return 4
+        if action == "moved" and (dest.exists() or dest.is_symlink()):
+            if not dest.is_symlink() and sha(dest) == digest:
+                continue  # already back
+            print(f"restore: {path} exists with different bytes; nothing restored", file=sys.stderr)
+            return 4
+        if action in ("copied", "moved"):
+            # every backup copy must be there and be the bytes the manifest recorded, before anything is written
+            if src.is_symlink() or not src.is_file():
                 print(f"restore: {path} is missing from the backup; nothing restored", file=sys.stderr)
+                return 4
+            if sha(src) != digest:
+                print(f"restore: the backup copy of {path} does not match its manifest sha256; nothing restored",
+                      file=sys.stderr)
                 return 4
         plan.append((action, src, dest))
     for action, src, dest in plan:
@@ -202,8 +231,8 @@ def main(argv=None) -> int:
     ap.add_argument("--restore", type=Path, help="a backup directory made by an install")
     ap.add_argument("--backup-root", type=Path, default=Path(os.environ.get(
         "PALACE_UNIT_BACKUP_ROOT", "/var/backups/palace-daemon-unit")))
-    ap.add_argument("--expect", action="append", default=[], metavar="KEY",
-                    help="a systemctl show key this install is meant to change (e.g. Environment); still printed")
+    ap.add_argument("--expect", action="append", default=[], choices=sorted(EXPECTABLE),
+                    help="a systemctl show key this install is meant to change; still printed")
     ap.add_argument("--root", type=Path, default=Path("/"), help=argparse.SUPPRESS)  # tests
     ap.add_argument("--systemctl", default="systemctl", help=argparse.SUPPRESS)  # tests
     a = ap.parse_args(argv)
