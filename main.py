@@ -20,6 +20,7 @@ import hmac
 import json
 import logging
 import os
+import subprocess
 import tempfile
 import sqlite3
 import sys
@@ -2832,6 +2833,38 @@ async def mcp_proxy(request: Request, x_api_key: str | None = Header(default=Non
 
 
 # ── REST convenience endpoints ────────────────────────────────────────────────
+
+def _git_facts() -> dict:
+    """The running tree's commit, read once at import (realm-sigil contract; status.realm.watch sigil-coverage)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+
+    def git(*args: str) -> str:
+        try:
+            return subprocess.run(["git", "-C", here, *args], capture_output=True, text=True, timeout=5,
+                                  check=True).stdout.strip()
+        except Exception:
+            return ""
+    status = git("status", "--porcelain", "--untracked-files=no")
+    return {"hash": git("rev-parse", "--short", "HEAD") or "dev",
+            "branch": git("rev-parse", "--abbrev-ref", "HEAD") or "unknown",
+            "dirty": bool(status) or not git("rev-parse", "HEAD")}
+
+
+_GIT = _git_facts()
+_STARTED = datetime.now(timezone.utc)
+
+
+@app.get("/api/version")
+async def api_version():
+    """realm-sigil version contract; unauthenticated like /health (names a commit, nothing about the palace)."""
+    from realm_sigil import version_dict
+    now = datetime.now(timezone.utc)
+    return JSONResponse(content=version_dict(
+        "palace-daemon", "MemPalace HTTP daemon", "fantasy", "https://github.com/techempower-org/palace-daemon",
+        hash=_GIT["hash"], branch=_GIT["branch"], dirty=_GIT["dirty"],
+        started=_STARTED.strftime("%Y-%m-%dT%H:%M:%SZ"), uptime=int((now - _STARTED).total_seconds())),
+        headers={"Cache-Control": "no-store"})
+
 
 @app.get("/health")
 async def health():
