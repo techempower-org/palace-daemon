@@ -15,6 +15,7 @@ import os
 import sys
 import threading
 import time
+import types
 import unittest
 from unittest.mock import patch
 
@@ -146,28 +147,50 @@ class TestDebouncedMineHandler(unittest.TestCase):
             _watcher._DEBOUNCE_SECONDS = original
 
     def test_burst_collapses_to_one_fire(self):
-        """A storm of events on the same target produces exactly one mine."""
+        """A storm of events on the same target produces exactly one mine.
+
+        Driven by a fake Timer rather than the wall clock (#297): with a
+        real 50 ms debounce and 5 ms sleeps between events, any gap the
+        scheduler stretches past 50 ms under full-suite load fires a mine
+        mid-burst and the count reads 2. The fake keeps every armed timer,
+        so the test checks the cancel-and-rearm logic, not the machine.
+        """
         target = _watcher.WatchTarget(path=_watcher.Path("/x"), wing="w")
         fired: list[tuple[str, str]] = []
-        cv = threading.Condition()
+        timers: list = []
 
-        def mine_fn(p, w):
-            with cv:
-                fired.append((p, w))
-                cv.notify_all()
+        class _FakeTimer:
+            def __init__(self, interval, fn):
+                self.interval = interval
+                self.fn = fn
+                self.daemon = False
+                self.started = False
+                self.cancelled = False
+                timers.append(self)
 
-        original = _watcher._DEBOUNCE_SECONDS
-        _watcher._DEBOUNCE_SECONDS = 0.05
-        try:
-            handler = _watcher._DebouncedMineHandler(target, mine_fn)
+            def start(self):
+                self.started = True
+
+            def cancel(self):
+                self.cancelled = True
+
+        # Scoped to the watcher module: the process-wide threading.Timer
+        # stays real for every other thread.
+        fake_threading = types.SimpleNamespace(Timer=_FakeTimer, Lock=threading.Lock)
+        with patch.object(_watcher, "threading", fake_threading):
+            handler = _watcher._DebouncedMineHandler(target, lambda p, w: fired.append((p, w)))
             for i in range(20):
                 handler.on_modified(self._make_event(f"/x/file{i}.py"))
-                time.sleep(0.005)
-            with cv:
-                cv.wait(timeout=1.0)
-            self.assertEqual(len(fired), 1)
-        finally:
-            _watcher._DEBOUNCE_SECONDS = original
+
+        self.assertEqual(len(timers), 20)
+        self.assertTrue(all(t.started for t in timers))
+        self.assertEqual([t.cancelled for t in timers], [True] * 19 + [False])
+        self.assertEqual(timers[-1].interval, _watcher._DEBOUNCE_SECONDS)
+        # The debounce window elapses: only the live timer fires.
+        for t in timers:
+            if not t.cancelled:
+                t.fn()
+        self.assertEqual(fired, [("/x", "w")])
 
     def test_skips_directory_events(self):
         target = _watcher.WatchTarget(path=_watcher.Path("/x"), wing="w")
