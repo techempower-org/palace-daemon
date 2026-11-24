@@ -2352,9 +2352,25 @@ def _start_needle_refresher(logger) -> bool:
     if start is None:
         logger.warning("redact needle refresher not started: mempalace has no start_vault_refresher")
         return False
-    started = start()
+    try:
+        started = start()
+    except Exception as exc:  # noqa: BLE001 -- same policy as a missing API: writes still fail closed
+        logger.warning("redact needle refresher not started: %s", type(exc).__name__)
+        return False
     logger.info("redact needle refresher %s", "started" if started else "already running")
     return True
+
+
+def _stop_needle_refresher(logger) -> None:
+    """Lifespan exit: stop the refresher thread, best effort (a daemon thread would not hold the process)."""
+    try:
+        from mempalace import redact
+
+        stop = getattr(redact, "stop_vault_refresher", None)
+        if stop is not None:
+            stop(timeout=2.0)
+    except Exception as exc:  # noqa: BLE001 -- shutdown goes on
+        logger.warning("redact needle refresher stop: %s", type(exc).__name__)
 
 
 @asynccontextmanager
@@ -2608,6 +2624,10 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(wdog_task, timeout=3.0)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
+    try:  # off the loop: the stop joins a thread that may be inside a vault fetch
+        await asyncio.wait_for(asyncio.to_thread(_stop_needle_refresher, logger), timeout=3.0)
+    except asyncio.TimeoutError:
+        pass
     # Terminate any active auto-mine subprocesses before stopping the watcher
     # (#136 problem B). Without this, systemd has to SIGKILL the cgroup at
     # TimeoutStopSec, leaving the child process to be reaped at the cgroup

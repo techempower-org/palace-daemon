@@ -54,11 +54,33 @@ class NeedleRefresherStart(unittest.TestCase):
             self.assertFalse(main._start_needle_refresher(LOG))
         self.assertIn("no start_vault_refresher", cm.output[0])
 
+    def test_a_starter_that_raises_does_not_stop_startup(self):
+        def boom():
+            raise RuntimeError("no thread for you")
+
+        a, b = self._with_redact(types.SimpleNamespace(start_vault_refresher=boom))
+        with a, b, self.assertLogs(LOG, level="WARNING") as cm:
+            self.assertFalse(main._start_needle_refresher(LOG))
+        self.assertIn("RuntimeError", cm.output[0])
+
+    def test_lifespan_exit_stops_the_refresher(self):
+        import inspect
+
+        calls = []
+        fake = types.SimpleNamespace(stop_vault_refresher=lambda timeout: calls.append(timeout))
+        a, b = self._with_redact(fake)
+        with a, b:
+            main._stop_needle_refresher(LOG)
+        self.assertEqual(calls, [2.0])
+        src = inspect.getsource(main.lifespan)
+        self.assertIn("_stop_needle_refresher, logger", src.split("    yield", 1)[1])  # after the yield
+
     def test_the_real_mempalace_has_it(self):
         from mempalace import redact
 
         if not hasattr(redact, "start_vault_refresher"):
             self.skipTest("installed mempalace predates the needle refresher")
+        self.assertTrue(callable(redact.start_vault_refresher))
         self.assertTrue(callable(redact.stop_vault_refresher))
 
 
