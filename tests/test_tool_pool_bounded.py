@@ -24,6 +24,7 @@ Run with::
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import os
 import sys
@@ -44,6 +45,38 @@ def _req(tool="mempalace_search", args=None):
         "jsonrpc": "2.0", "id": 3, "method": "tools/call",
         "params": {"name": tool, "arguments": args or {"query": "x"}},
     }
+
+
+class _LateDeliveryFuture(concurrent.futures.Future):
+    """A worker that finishes between _call's two add_done_callback calls (#296).
+
+    The worker thread sets FINISHED, then the GIL switches before it delivers
+    its callbacks. The loop thread's next add_done_callback (wrap_future's)
+    sees FINISHED and runs at once, so the awaiting task can resume before the
+    worker's slot-release callback is even scheduled. Idle, the window is
+    tiny; under a full-suite run it was about 1 run in 6.
+    """
+
+    def __init__(self, value, delay=0.2):
+        super().__init__()
+        self._value, self._delay, self._delayed = value, delay, False
+
+    def add_done_callback(self, fn):
+        if not self._delayed:
+            self._delayed = True
+            # The worker thread's own delivery of this callback, preempted.
+            threading.Timer(self._delay, fn, args=(self,)).start()
+            self.set_result(self._value)
+            return
+        super().add_done_callback(fn)
+
+
+class _LateDeliveryExecutor:
+    def __init__(self, value):
+        self._value = value
+
+    def submit(self, *_a, **_k):
+        return _LateDeliveryFuture(self._value)
 
 
 class BoundedToolPoolTests(unittest.IsolatedAsyncioTestCase):
@@ -150,6 +183,23 @@ class BoundedToolPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(a, c)
         self.assertEqual(main._args_hash({"a": 1, "b": 2}), main._args_hash({"b": 2, "a": 1}))
 
+    async def test_the_slot_is_free_on_return_even_if_the_worker_callback_lags(self):
+        """#296: a completed call must not still hold its slot when _call returns.
+
+        The release used to arrive only through the worker thread's
+        done-callback, which can be scheduled AFTER the awaiting task resumes.
+        Pinned with a future that reproduces that interleaving every time.
+        """
+        main._tool_inflight = 1  # another call in flight: a double release would show
+        ok = {"jsonrpc": "2.0", "id": 3, "result": {}}
+        with patch.object(main, "_TOOL_EXECUTOR", _LateDeliveryExecutor(ok)):
+            r = await asyncio.wait_for(main._call(_req()), timeout=5)
+        self.assertNotIn("error", r)
+        self.assertEqual(main._tool_inflight, 1, "the finished call's slot must be free on return")
+
+        # The lagging callback still arrives; it must not release a second slot.
+        await asyncio.sleep(0.4)
+        self.assertEqual(main._tool_inflight, 1, "a late callback must not double-release")
 
     async def test_a_timed_out_call_keeps_its_slot_until_the_thread_finishes(self):
         """The mechanism of the outage, pinned.
