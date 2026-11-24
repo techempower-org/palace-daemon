@@ -119,6 +119,11 @@ class SearchHybridBody(BaseModel):
     # judged classes (docs/designs/judged-drawer-classes.md in mempalace): drawers flagged
     # judged_class chatter/stale are left out unless this is true.
     all_classes: bool = Field(False)
+    # budget_ms (#284): a caller with a latency budget (the pre-mutation hook)
+    # names it here. When the hybrid leg has not answered within it, or the
+    # daemon refuses it as busy, the route answers from BM25 /search/fast
+    # instead, marked ``degraded``. None (default) waits as before.
+    budget_ms: "int | None" = Field(None, ge=50, le=600_000)
 
     @field_validator("query")
     @classmethod

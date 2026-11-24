@@ -166,6 +166,7 @@ def _release_tool_slot() -> None:
 def _run_tracked(fn, request_dict, box: dict):
     """Run ``fn`` in a worker, recording which thread runs it (see _log_overdue_stack)."""
     box["ident"] = threading.get_ident()
+    box["started"] = _time.monotonic()  # #284: when the worker began, for queue/compute
     try:
         return fn(request_dict)
     finally:
@@ -2148,7 +2149,15 @@ def _fast_result_envelope(request_id, payload: dict) -> dict:
     }
 
 
-async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
+async def _call(request_dict: dict, retry_on_hnsw: bool = True, box: dict | None = None) -> dict:
+    """Run one JSON-RPC request through the fast intercept or the bounded slow path.
+
+    ``box`` (#284): a caller that wants the daemon-side timing split passes a
+    dict. The slow path stamps ``entered`` (before the read semaphore),
+    ``submitted`` (after it, when the worker is queued), both
+    ``time.monotonic()``; the worker thread stamps ``started`` (monotonic) and
+    ``done`` (True). A fast-intercept answer stamps nothing.
+    """
     # #299: intercept BEFORE the semaphore, the in-flight ceiling and the
     # tool executor — none of which the fast SQL payloads need, and all of
     # which are what a parked `tool_kg_stats` exhausts. Every internal caller
@@ -2163,6 +2172,9 @@ async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
             if isinstance(_payload, BaseException):
                 return _fast_failure_envelope(request_dict.get("id"), _tool, _payload)
             return _fast_result_envelope(request_dict.get("id"), _payload)
+    if box is None:
+        box = {}
+    box["entered"] = _time.monotonic()
     async with _sem_for(request_dict):
         loop = asyncio.get_running_loop()
         # JSON-RPC params can be a dict, an array, or null; only the dict
@@ -2238,7 +2250,7 @@ async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
         else:
             _tool_inflight += 1
             executor, release = _TOOL_EXECUTOR, _release_tool_slot
-        box: dict = {}
+        box["submitted"] = _time.monotonic()
         try:
             cfut = executor.submit(_run_tracked, _mp.handle_request, request_dict, box)
         except BaseException:

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 _log = logging.getLogger("palace-daemon.search_routes")  # #292: never the root logger
 import os
@@ -291,9 +292,21 @@ async def search_hybrid(
           "wing":          "memorypalace",      // optional, exact-match filter
           "room":          "problems",          // optional, canonical only
           "limit":         10,
-          "include_trace": false                // optional, attaches per-source
-                                                // counts + latencies if true
+          "include_trace": false,               // optional, attaches per-source
+                                                // counts if true (no latencies)
+          "budget_ms":     2000                 // optional (#284): past it, or when
+                                                // the daemon is busy, answer from
+                                                // BM25 /search/fast, marked
+                                                // "degraded": "bm25-fast"
         }
+
+    Every response carries ``timings_ms``: ``hybrid`` (the whole tool call),
+    split into ``queue`` (waiting for a read slot and a tool thread) and
+    ``compute`` (mempalace's embed, vector, BM25, graph and fusion, as one
+    figure), then ``rerank`` and ``total``; ``fast`` replaces ``rerank`` when
+    degraded. The same numbers go to the log, so a slow search under load says
+    whether it waited or computed. The per-stage split inside mempalace is
+    still open on #284 (``include_trace`` carries counts, not latencies).
 
     Returns the same hit shape as /search; each hit has a `matched_via`
     field naming the source (vector, bm25_postgres, graph_seeded,
@@ -326,12 +339,153 @@ async def search_hybrid(
     if body.all_classes:
         args["all_classes"] = True
 
-    result = await main._call({
+    # #284: time the daemon-side stages. _call stamps ``box`` (``entered``
+    # before the read semaphore, ``submitted`` after it, ``started`` from the
+    # worker thread when mempalace begins), so the log line splits ``queue``
+    # (semaphore + executor wait) from ``compute`` (mempalace's embed, vector,
+    # BM25, graph and fusion as one figure; the per-stage split inside
+    # mempalace is still open on #284, and include_trace carries per-source
+    # counts, not latencies). ``rerank`` is the cross-encoder.
+    t0 = time.monotonic()
+    box: dict = {}
+    call = main._call({
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
         "params": {"name": "mempalace_search", "arguments": args},
-    })
-    return main._rerank.rerank_response(body.query, main._unwrap(result), enabled=body.rerank)
+    }, box=box)
+    degraded_reason = None
+    if body.budget_ms is None:
+        result = await call
+    else:
+        # Shielded: past the budget only THIS route stops waiting. A _call
+        # task whose worker is submitted runs on, holding the read semaphore and its in-flight
+        # slot until the worker thread finishes, so callers without a budget
+        # keep queueing behind it exactly as before. Cancelling _call instead
+        # would free the semaphore while the thread ran on, and a wave of
+        # budgeted hook calls could then run PALACE_MCP_TOOL_MAX_INFLIGHT
+        # hybrid threads at once instead of PALACE_MAX_READ_CONCURRENCY,
+        # adding CPU contention in exactly the mine drain this is for.
+        task = asyncio.ensure_future(call)
+        task.add_done_callback(_retrieve_abandoned)
+        try:
+            result = await asyncio.wait_for(asyncio.shield(task), body.budget_ms / 1000)
+        except asyncio.TimeoutError:
+            result = None
+            degraded_reason = f"hybrid exceeded budget_ms={body.budget_ms}"
+            if "submitted" not in box:
+                # Still queued for a read slot: it holds nothing and no thread
+                # runs, so cancelling only spares the daemon a full hybrid
+                # search nobody will read. _call stamps ``submitted`` with no
+                # await between the semaphore and the executor, so a task
+                # without it cannot be holding a slot.
+                task.cancel()
+        else:
+            err = result.get("error") if isinstance(result, dict) else None
+            if isinstance(err, dict) and err.get("code") in _HYBRID_DEGRADE_CODES:
+                degraded_reason = f"hybrid refused ({err.get('code')}): {err.get('message')}"
+    t_hybrid = time.monotonic()
+    hybrid_ms = _ms(t_hybrid - t0)
+    split = _stage_split(box, t_hybrid)
+
+    if degraded_reason is not None:
+        return await _hybrid_degraded_to_fast(body, degraded_reason, hybrid_ms, split, t0, x_api_key)
+
+    t1 = time.monotonic()
+    response = main._rerank.rerank_response(body.query, main._unwrap(result), enabled=body.rerank)
+    rerank_ms = _ms(time.monotonic() - t1)
+    total_ms = _ms(time.monotonic() - t0)
+    _log.info(
+        "/search/hybrid timings: hybrid=%.0fms (queue=%s compute=%s) rerank=%.0fms total=%.0fms",
+        hybrid_ms, split.get("queue", "?"), split.get("compute", "?"), rerank_ms, total_ms,
+    )
+    if isinstance(response, dict):
+        response["timings_ms"] = {"hybrid": hybrid_ms, **split, "rerank": rerank_ms, "total": total_ms}
+    return response
+
+
+def _ms(seconds: float) -> float:
+    return round(seconds * 1000, 1)
+
+
+def _stage_split(box: dict, t_end: float) -> dict:
+    """``{"queue": ms, "compute": ms}`` from _call's stamps (#284).
+
+    Empty when the call never reached the slow path (a fast intercept, or a
+    test fake). A worker that has not started by ``t_end`` has queued the
+    whole time and computed nothing; one still running has computed so far.
+    """
+    entered = box.get("entered")
+    if entered is None:
+        return {}
+    started = box.get("started")
+    if started is None:
+        return {"queue": _ms(t_end - entered), "compute": 0.0}
+    return {"queue": _ms(started - entered), "compute": _ms(t_end - started)}
+
+
+def _retrieve_abandoned(task: asyncio.Future) -> None:
+    """Consume the outcome of a _call task its route stopped waiting for, so
+    asyncio never logs "exception was never retrieved" for it."""
+    if not task.cancelled():
+        task.exception()
+
+
+# JSON-RPC codes from main._call that mean "the hybrid leg did not run to an
+# answer" rather than "the query is bad": -32003 busy (in-flight ceiling),
+# -32001 PALACE_MCP_TOOL_TIMEOUT_SECONDS exceeded.
+_HYBRID_DEGRADE_CODES = (-32003, -32001)
+
+
+async def _hybrid_degraded_to_fast(body, reason: str, hybrid_ms: float, split: dict, t0: float, x_api_key):
+    """Answer a budgeted /search/hybrid from BM25 /search/fast (#284).
+
+    The fallback has no vector leg, no graph leg and no rerank; /search/fast
+    has no room filter, so a room-scoped request over-fetches and filters
+    here. The response says all of that: ``degraded`` names the route that
+    answered and ``warnings`` carries the reason, so a caller never mistakes
+    a keyword answer for a hybrid one.
+    """
+    import main
+    fetch = min(100, body.limit * 3) if body.room else body.limit
+    t1 = time.monotonic()
+    try:
+        hits = await main.search_fast(
+            q=body.query, limit=fetch, wing=body.wing,
+            all_classes=body.all_classes, x_api_key=x_api_key,
+        )
+    except HTTPException as e:
+        _log.warning("/search/hybrid degraded (%s) and the BM25 fallback failed: %s", reason, e.detail)
+        raise HTTPException(
+            status_code=504,
+            detail=f"{reason}; BM25 /search/fast fallback failed too: {e.detail}",
+        )
+    fast_ms = round((time.monotonic() - t1) * 1000, 1)
+    results = []
+    for hit in hits or []:
+        if body.room and hit.get("room") != body.room:
+            continue
+        hit = dict(hit)
+        hit.setdefault("text", hit.get("snippet") or "")
+        hit["matched_via"] = "bm25_postgres"
+        results.append(hit)
+        if len(results) >= body.limit:
+            break
+    total_ms = round((time.monotonic() - t0) * 1000, 1)
+    _log.warning(
+        "/search/hybrid degraded to bm25-fast: %s (hybrid=%.0fms queue=%s compute=%s fast=%.0fms total=%.0fms)",
+        reason, hybrid_ms, split.get("queue", "?"), split.get("compute", "?"), fast_ms, total_ms,
+    )
+    return {
+        "results": results,
+        "query": body.query,
+        "degraded": "bm25-fast",
+        "warnings": [
+            f"{reason}; answered from BM25 /search/fast "
+            "(no vector or graph leg, no rerank)"
+        ],
+        "errors": [],
+        "timings_ms": {"hybrid": hybrid_ms, **split, "fast": fast_ms, "total": total_ms},
+    }
 
 
 @router.post("/search/keyword")

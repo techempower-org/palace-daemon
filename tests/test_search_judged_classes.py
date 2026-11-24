@@ -261,7 +261,7 @@ class AgeFusedGraphOnlyHits(unittest.IsolatedAsyncioTestCase):
 
         from search_models import SearchAgeFusedBody
 
-        async def fake_call(req):
+        async def fake_call(req, **_kw):
             return _envelope(vec_payload or {"results": []})
 
         row = ("graph-1", "body", "wing_alpha", "planning", "topic-x", "/src/f.md",
