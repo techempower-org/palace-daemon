@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 _log = logging.getLogger("palace-daemon.search_routes")  # #292: never the root logger
 import os
@@ -291,9 +292,17 @@ async def search_hybrid(
           "wing":          "memorypalace",      // optional, exact-match filter
           "room":          "problems",          // optional, canonical only
           "limit":         10,
-          "include_trace": false                // optional, attaches per-source
+          "include_trace": false,               // optional, attaches per-source
                                                 // counts + latencies if true
+          "budget_ms":     2000                 // optional (#284): past it, or when
+                                                // the daemon is busy, answer from
+                                                // BM25 /search/fast, marked
+                                                // "degraded": "bm25-fast"
         }
+
+    Every response carries ``timings_ms`` (``hybrid`` / ``rerank`` / ``total``,
+    or ``hybrid`` / ``fast`` / ``total`` when degraded), and the same numbers
+    go to the log, so a slow search under load says which stage paid.
 
     Returns the same hit shape as /search; each hit has a `matched_via`
     field naming the source (vector, bm25_postgres, graph_seeded,
@@ -326,12 +335,108 @@ async def search_hybrid(
     if body.all_classes:
         args["all_classes"] = True
 
-    result = await main._call({
+    # #284: time the daemon-side stages. ``hybrid`` is the whole tool call —
+    # queueing for a read slot and a tool thread, then mempalace's embed,
+    # vector, BM25, graph and fusion (include_trace breaks that last part
+    # down) — and ``rerank`` is the cross-encoder. Under a mine drain this
+    # line is what tells "waited" from "computed" from "reranked".
+    t0 = time.monotonic()
+    call = main._call({
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
         "params": {"name": "mempalace_search", "arguments": args},
     })
-    return main._rerank.rerank_response(body.query, main._unwrap(result), enabled=body.rerank)
+    degraded_reason = None
+    if body.budget_ms is None:
+        result = await call
+    else:
+        # A cancelled call keeps its tool slot until its thread finishes
+        # (_call's own contract), so an abandoned hybrid cannot pile up
+        # threads past PALACE_MCP_TOOL_MAX_INFLIGHT; once that bound is hit
+        # the refusal below degrades too.
+        try:
+            result = await asyncio.wait_for(call, body.budget_ms / 1000)
+        except asyncio.TimeoutError:
+            result = None
+            degraded_reason = f"hybrid exceeded budget_ms={body.budget_ms}"
+        else:
+            err = result.get("error") if isinstance(result, dict) else None
+            if isinstance(err, dict) and err.get("code") in _HYBRID_DEGRADE_CODES:
+                degraded_reason = f"hybrid refused ({err.get('code')}): {err.get('message')}"
+    hybrid_ms = round((time.monotonic() - t0) * 1000, 1)
+
+    if degraded_reason is not None:
+        return await _hybrid_degraded_to_fast(body, degraded_reason, hybrid_ms, t0, x_api_key)
+
+    t1 = time.monotonic()
+    response = main._rerank.rerank_response(body.query, main._unwrap(result), enabled=body.rerank)
+    rerank_ms = round((time.monotonic() - t1) * 1000, 1)
+    total_ms = round((time.monotonic() - t0) * 1000, 1)
+    _log.info(
+        "/search/hybrid timings: hybrid=%.0fms rerank=%.0fms total=%.0fms",
+        hybrid_ms, rerank_ms, total_ms,
+    )
+    if isinstance(response, dict):
+        response["timings_ms"] = {"hybrid": hybrid_ms, "rerank": rerank_ms, "total": total_ms}
+    return response
+
+
+# JSON-RPC codes from main._call that mean "the hybrid leg did not run to an
+# answer" rather than "the query is bad": -32003 busy (in-flight ceiling),
+# -32001 PALACE_MCP_TOOL_TIMEOUT_SECONDS exceeded.
+_HYBRID_DEGRADE_CODES = (-32003, -32001)
+
+
+async def _hybrid_degraded_to_fast(body, reason: str, hybrid_ms: float, t0: float, x_api_key):
+    """Answer a budgeted /search/hybrid from BM25 /search/fast (#284).
+
+    The fallback has no vector leg, no graph leg and no rerank; /search/fast
+    has no room filter, so a room-scoped request over-fetches and filters
+    here. The response says all of that: ``degraded`` names the route that
+    answered and ``warnings`` carries the reason, so a caller never mistakes
+    a keyword answer for a hybrid one.
+    """
+    import main
+    fetch = min(100, body.limit * 3) if body.room else body.limit
+    t1 = time.monotonic()
+    try:
+        hits = await main.search_fast(
+            q=body.query, limit=fetch, wing=body.wing,
+            all_classes=body.all_classes, x_api_key=x_api_key,
+        )
+    except HTTPException as e:
+        _log.warning("/search/hybrid degraded (%s) and the BM25 fallback failed: %s", reason, e.detail)
+        raise HTTPException(
+            status_code=504,
+            detail=f"{reason}; BM25 /search/fast fallback failed too: {e.detail}",
+        )
+    fast_ms = round((time.monotonic() - t1) * 1000, 1)
+    results = []
+    for hit in hits or []:
+        if body.room and hit.get("room") != body.room:
+            continue
+        hit = dict(hit)
+        hit.setdefault("text", hit.get("snippet") or "")
+        hit["matched_via"] = "bm25_postgres"
+        results.append(hit)
+        if len(results) >= body.limit:
+            break
+    total_ms = round((time.monotonic() - t0) * 1000, 1)
+    _log.warning(
+        "/search/hybrid degraded to bm25-fast: %s (hybrid=%.0fms fast=%.0fms total=%.0fms)",
+        reason, hybrid_ms, fast_ms, total_ms,
+    )
+    return {
+        "results": results,
+        "query": body.query,
+        "degraded": "bm25-fast",
+        "warnings": [
+            f"{reason}; answered from BM25 /search/fast "
+            "(no vector or graph leg, no rerank)"
+        ],
+        "errors": [],
+        "timings_ms": {"hybrid": hybrid_ms, "fast": fast_ms, "total": total_ms},
+    }
 
 
 @router.post("/search/keyword")
