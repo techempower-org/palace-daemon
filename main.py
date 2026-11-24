@@ -2234,10 +2234,27 @@ async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
         # cancellation), and it hops back to the loop thread to mutate.
         if save_lane:
             _save_inflight += 1
-            executor, release = _SAVE_EXECUTOR, _release_save_slot
+            executor, release_slot = _SAVE_EXECUTOR, _release_save_slot
         else:
             _tool_inflight += 1
-            executor, release = _TOOL_EXECUTOR, _release_tool_slot
+            executor, release_slot = _TOOL_EXECUTOR, _release_tool_slot
+        # Exactly one release per slot, from whichever path gets there first:
+        # the worker's done-callback, or this coroutine once the await returns
+        # a result or the call's own exception (the thread has finished then).
+        # The callback alone was not enough (#296): the worker can mark its
+        # future FINISHED and be preempted before delivering callbacks, while
+        # wrap_future's callback, registered on the loop thread just after,
+        # runs at once and resumes this task first. The caller then saw its
+        # own finished call still holding a slot. Both paths run on the loop
+        # thread, so the flag needs no lock.
+        released = False
+
+        def release(_release_slot=release_slot):
+            nonlocal released
+            if not released:
+                released = True
+                _release_slot()
+
         box: dict = {}
         try:
             cfut = executor.submit(_run_tracked, _mp.handle_request, request_dict, box)
@@ -2259,6 +2276,7 @@ async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
         try:
             fut = asyncio.wrap_future(cfut)
             result = await (asyncio.wait_for(fut, timeout) if timeout else fut)
+            release()  # the worker has returned; its slot is free now
         except asyncio.TimeoutError:
             try:
                 _log_overdue_stack(tool_name, params, box)
@@ -2276,6 +2294,8 @@ async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
                 },
             }
         except Exception as e:
+            if cfut.done():  # the tool raised: its thread is finished too
+                release()
             return {"jsonrpc": "2.0", "id": request_dict.get("id"), "error": {"code": -32000, "message": str(e)}}
 
         try:

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Fixed — *a finished MCP tool call no longer holds its slot after `_call` returns (#296)*
+
+- **`_call` now frees a finished call's in-flight slot itself, before it returns.** Before, only the worker thread's done-callback freed it.
+  - The worker can mark its future finished and be preempted before running its callbacks. `wrap_future`'s callback, registered on the loop thread just after, then runs at once and resumes the caller first, while the slot still reads as taken.
+  - This made `BoundedToolPoolTests` fail about 1 full-suite run in 6, and never when run alone.
+  - The release is once-only, so the late callback is a no-op. A timed-out call still holds its slot until its thread ends (#286).
+- **Regression test:** `test_the_slot_is_free_on_return_even_if_the_worker_callback_lags` replays that interleaving every time with a future whose first callback arrives 0.2 s late. It failed on the old code (`2 != 1`).
+
 ### Changed — *judged-parent indexes; the install script's show diff stops reporting noise*
 
 - **Indexes:** `mempalace_drawers` gets `((metadata->>'parent_drawer_id'))` and `((metadata->>'parent_entry_id'))` (2026-11-21, 10 MB each).
