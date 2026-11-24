@@ -41,6 +41,7 @@ pgt = _load("pg_timeouts")
 pbk = _load("palace_backup")
 pvac = _load("palace_vacuum")
 udrift = _load("unit_drift")
+rss = _load("rss_step")
 
 NOW = dt.datetime(2026, 11, 15, 9, 0, tzinfo=dt.timezone(dt.timedelta(hours=-8)))
 SHAPE = r"^CHECK [a-z-]+ (ok|warn|fail) · .+ · .+$"
@@ -1872,3 +1873,113 @@ class UnitDrift(unittest.TestCase):
     def test_the_check_compares_against_the_unit_in_its_own_tree(self):
         self.assertEqual(udrift.REPO_UNIT, CHECKS.parent.parent / "palace-daemon.service")
         self.assertTrue(udrift.REPO_UNIT.is_file())
+
+
+class RssStep(unittest.TestCase):
+    """palace-rss-step: a step in the daemon's RSS + swap between two 5-minute samples (#323)."""
+
+    GB = rss.GIB
+    WATCH_LINE = re.compile(r"CHECK (\S+) (ok|warn|fail) · (.*?) · (.*)", re.S)
+
+    def cur(self, rss_gb, swap_gb=0.0, pid=100):
+        return {"pid": pid, "rss_kb": int(rss_gb * self.GB), "swap_kb": int(swap_gb * self.GB)}
+
+    def prev(self, rss_gb, at, swap_gb=0.0, pid=100, **extra):
+        return {**self.cur(rss_gb, swap_gb, pid), "at": at, **extra}
+
+    def judge(self, prev, cur, now=10_000.0):
+        return rss.judge(prev, cur, now, 2.0, 4.0)
+
+    def test_the_11_04_step_fails(self):
+        # 12:13 1.19 GB -> 12:18 5.38 GB, same pid
+        state, fact, nxt, keep = self.judge(self.prev(1.19, 10_000.0 - 300), self.cur(5.38))
+        self.assertEqual(state, "fail", fact)
+        self.assertIn("+4.19 GiB in 5 min", fact)
+        self.assertIn("#323", nxt)
+        self.assertIn("step", keep)
+
+    def test_a_small_rise_is_ok(self):
+        state, fact, _, keep = self.judge(self.prev(1.0, 10_000.0 - 300), self.cur(1.3))
+        self.assertEqual(state, "ok", fact)
+        self.assertNotIn("step", keep)
+
+    def test_swap_counts_so_reclaim_does_not_hide_growth(self):
+        # RSS fell (pushed to swap under MemoryHigh) but the process grew by 2.5 GiB
+        state, fact, _, _ = self.judge(self.prev(3.0, 10_000.0 - 300), self.cur(2.5, swap_gb=3.0))
+        self.assertEqual(state, "fail", fact)
+
+    def test_a_restart_is_not_a_step(self):
+        state, fact, _, _ = self.judge(self.prev(0.1, 10_000.0 - 300, pid=1), self.cur(3.0, pid=2))
+        self.assertEqual(state, "ok", fact)
+        self.assertIn("restarted since the last sample", fact)
+
+    def test_an_old_sample_is_not_a_baseline(self):
+        state, fact, _, _ = self.judge(self.prev(0.1, 10_000.0 - 3600), self.cur(3.0))
+        self.assertEqual(state, "ok", fact)
+        self.assertIn("no sample in the last 15 min", fact)
+
+    def test_a_seen_step_holds_the_line_at_warn_then_expires(self):
+        held = {"kb": int(4.2 * self.GB), "at": 10_000.0 - 600}
+        state, fact, _, keep = self.judge(self.prev(3.0, 10_000.0 - 300, step=held), self.cur(3.1))
+        self.assertEqual(state, "warn", fact)
+        self.assertIn("stepped +4.20 GiB", fact)
+        self.assertEqual(keep["step"], held)
+        old = {"kb": held["kb"], "at": 10_000.0 - rss.HOLD_S - 1}
+        state, _, _, keep = self.judge(self.prev(3.0, 10_000.0 - 300, step=old), self.cur(3.1))
+        self.assertEqual(state, "ok")
+        self.assertNotIn("step", keep)
+
+    def test_a_restart_drops_a_held_step(self):
+        held = {"kb": int(4.2 * self.GB), "at": 10_000.0 - 600}
+        state, _, _, keep = self.judge(self.prev(5.0, 10_000.0 - 300, pid=1, step=held), self.cur(0.2, pid=2))
+        self.assertEqual(state, "ok")
+        self.assertNotIn("step", keep)
+
+    def test_high_memory_without_a_step_warns(self):
+        state, fact, _, _ = self.judge(self.prev(5.0, 10_000.0 - 300, swap_gb=3.0), self.cur(5.1, swap_gb=3.0))
+        self.assertEqual(state, "warn", fact)
+        self.assertIn("at or above 4 GiB", fact)
+
+    def test_no_process_fails_and_keeps_no_sample(self):
+        state, _, _, keep = self.judge(self.prev(1.0, 9_700.0), None)
+        self.assertEqual(state, "fail")
+        self.assertIsNone(keep)
+
+    def test_read_status_parses_proc_and_refuses_a_zombie(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        (tmp / "7").mkdir()
+        (tmp / "7" / "status").write_text("Name:\tpython\nVmRSS:\t  1234 kB\nVmSwap:\t  56 kB\n")
+        self.assertEqual(rss.read_status(7, tmp), {"rss_kb": 1234, "swap_kb": 56})
+        (tmp / "8").mkdir()
+        (tmp / "8" / "status").write_text("Name:\tpython\nState:\tZ (zombie)\n")
+        self.assertIsNone(rss.read_status(8, tmp))
+        self.assertIsNone(rss.read_status(9, tmp))
+        self.assertIsNone(rss.read_status(0, tmp))
+
+    def test_body_keeps_the_sample_and_the_second_run_sees_the_step(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        readings = iter([{"rss_kb": int(1.2 * self.GB), "swap_kb": 0},
+                         {"rss_kb": int(5.4 * self.GB), "swap_kb": 0}])
+        clock = iter([1_000.0, 1_300.0])
+        with mock.patch.object(rss, "main_pid", return_value=42), \
+             mock.patch.object(rss, "read_status", side_effect=lambda pid: next(readings)), \
+             mock.patch.object(rss.time, "time", side_effect=lambda: next(clock)), \
+             mock.patch.dict(os.environ, {"PALACE_CHECKS_DIR": str(tmp)}):
+            lines = []
+            for _ in range(2):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rss.body()
+                lines.append((tmp / "palace-rss-step.line").read_text().strip())
+        self.assertIn(" ok · ", lines[0])
+        m = self.WATCH_LINE.fullmatch(lines[1])
+        self.assertIsNotNone(m, lines[1])
+        self.assertEqual(lines[1].count(" · "), 2, lines[1])
+        self.assertEqual(m.group(1, 2), ("palace-rss-step", "fail"))
+        self.assertTrue((tmp / ".palace-rss-step.sample").is_file())
+
+    def test_bad_thresholds_fall_back_to_the_defaults(self):
+        for bad in ("x", "0", "-3"):
+            with mock.patch.dict(os.environ, {"PALACE_RSS_STEP_GIB": bad}):
+                self.assertEqual(rss.gib_env("PALACE_RSS_STEP_GIB", 2.0), 2.0)
