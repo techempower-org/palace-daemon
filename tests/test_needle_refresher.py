@@ -63,25 +63,47 @@ class NeedleRefresherStart(unittest.TestCase):
             self.assertFalse(main._start_needle_refresher(LOG))
         self.assertIn("RuntimeError", cm.output[0])
 
-    def test_lifespan_exit_stops_the_refresher(self):
-        import inspect
+    def test_the_real_refresher_starts_and_fetches_off_the_caller(self):
+        """xreview r1/r2 #5/#3: run the installed mempalace's own start(), not a stand-in: with one configured
+        item and a fake vault, the refresher thread fetches it and keeps the value."""
+        import json
+        import tempfile
+        import threading
+        import time
 
-        calls = []
-        fake = types.SimpleNamespace(stop_vault_refresher=lambda timeout: calls.append(timeout))
-        a, b = self._with_redact(fake)
-        with a, b:
-            main._stop_needle_refresher(LOG)
-        self.assertEqual(calls, [2.0])
-        src = inspect.getsource(main.lifespan)
-        self.assertIn("_stop_needle_refresher, logger", src.split("    yield", 1)[1])  # after the yield
-
-    def test_the_real_mempalace_has_it(self):
         from mempalace import redact
 
         if not hasattr(redact, "start_vault_refresher"):
             self.skipTest("installed mempalace predates the needle refresher")
-        self.assertTrue(callable(redact.start_vault_refresher))
-        self.assertTrue(callable(redact.stop_vault_refresher))
+        threads = []
+
+        def fake_fetch(_item_id):
+            threads.append(threading.current_thread().name)
+            return "hunter" + "pass42"
+
+        with tempfile.TemporaryDirectory() as cfg:
+            with open(os.path.join(cfg, "config.json"), "w") as f:
+                json.dump({"secret_vault_items": [{"id": "item-1", "label": "probe"}]}, f)
+            with patch.dict(os.environ, {"MEMPALACE_CONFIG_DIR": cfg}), \
+                 patch.object(redact, "_vault_fetch", fake_fetch):
+                redact.stop_vault_refresher()
+                redact._vault_values.clear()
+                try:
+                    self.assertTrue(main._start_needle_refresher(LOG))
+                    deadline = time.monotonic() + 5
+                    while "item-1" not in redact._vault_values and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertIn("item-1", redact._vault_values)
+                    self.assertEqual(threads[0], "mempalace-vault-refresh")
+                finally:
+                    redact.stop_vault_refresher()
+                    redact._vault_values.clear()
+                    redact._cache["key"] = None
+
+    def test_lifespan_exit_does_not_wait_on_the_refresher(self):
+        import inspect
+
+        self.assertNotIn("vault_refresher", inspect.getsource(main.lifespan).split("    yield", 1)[1])
 
 
 if __name__ == "__main__":
