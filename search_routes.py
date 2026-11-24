@@ -372,6 +372,13 @@ async def search_hybrid(
         except asyncio.TimeoutError:
             result = None
             degraded_reason = f"hybrid exceeded budget_ms={body.budget_ms}"
+            if "submitted" not in box:
+                # Still queued for a read slot: it holds nothing and no thread
+                # runs, so cancelling only spares the daemon a full hybrid
+                # search nobody will read. _call stamps ``submitted`` with no
+                # await between the semaphore and the executor, so a task
+                # without it cannot be holding a slot.
+                task.cancel()
         else:
             err = result.get("error") if isinstance(result, dict) else None
             if isinstance(err, dict) and err.get("code") in _HYBRID_DEGRADE_CODES:

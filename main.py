@@ -2154,9 +2154,9 @@ async def _call(request_dict: dict, retry_on_hnsw: bool = True, box: dict | None
 
     ``box`` (#284): a caller that wants the daemon-side timing split passes a
     dict. The slow path stamps ``entered`` (before the read semaphore),
-    ``submitted`` (after it, when the worker is queued) and the worker thread
-    stamps ``started`` and ``done``, all ``time.monotonic()``. A fast-intercept
-    answer stamps nothing.
+    ``submitted`` (after it, when the worker is queued), both
+    ``time.monotonic()``; the worker thread stamps ``started`` (monotonic) and
+    ``done`` (True). A fast-intercept answer stamps nothing.
     """
     # #299: intercept BEFORE the semaphore, the in-flight ceiling and the
     # tool executor — none of which the fast SQL payloads need, and all of

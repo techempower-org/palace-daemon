@@ -167,11 +167,13 @@ class TestSearchHybridBudget(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(out["timings_ms"]["queue"], 45)
 
     async def test_budget_expiry_abandons_the_call_without_cancelling_it(self):
-        # The abandoned _call keeps running to its own end (and so keeps its
-        # read-semaphore slot) rather than being cancelled by the budget.
+        # A _call whose worker is already submitted keeps running to its own
+        # end (and so keeps its read-semaphore slot) rather than being
+        # cancelled by the budget.
         seen = {}
 
-        async def call(_env, **_kw):
+        async def call(_env, box=None, **_kw):
+            box["entered"] = box["submitted"] = time.monotonic()
             try:
                 await asyncio.sleep(0.2)
             except asyncio.CancelledError:
@@ -189,7 +191,9 @@ class TestBudgetedCallsRespectReadConcurrency(unittest.IsolatedAsyncioTestCase):
     """Through the real main._call: budgeted callers that give up must not
     free the read semaphore while their worker thread runs on. N budgeted
     calls never run more than PALACE_MAX_READ_CONCURRENCY handlers at once,
-    and a following call with no budget queues instead of getting -32003."""
+    and a following call with no budget queues instead of getting -32003.
+    A budgeted call still queued for a slot when its budget ends is
+    cancelled instead: it holds nothing, and nobody will read its answer."""
 
     def setUp(self):
         fake_config = type("FakeConfig", (), {"backend": "postgres", "palace_path": "/srv/test"})()
@@ -242,16 +246,41 @@ class TestBudgetedCallsRespectReadConcurrency(unittest.IsolatedAsyncioTestCase):
             ]
             outs = await asyncio.gather(*budgeted)
             self.assertEqual([o["degraded"] for o in outs], ["bm25-fast"] * 3)
-            # Their workers are still parked behind the one read slot. A caller
-            # with no budget queues behind them and gets a real answer, never
-            # a -32003 refusal.
+            # One worker holds the read slot and runs on; the two calls that
+            # were still queued for it are cancelled. A caller with no budget
+            # queues behind the running one and gets a real answer, never a
+            # -32003 refusal.
             out = await main.search_hybrid(SearchHybridBody(query="pjsip"), x_api_key="k")
             self.assertNotIn("degraded", out)
             self.assertNotIn("error", out)
             self.assertEqual(out["results"][0]["id"], "v1")
             await self._drain()
         self.assertEqual(running["peak"], 1)
-        self.assertEqual(running["calls"], 4)
+        self.assertEqual(running["calls"], 2)
+        self.assertEqual(main._tool_inflight, 0)
+
+    async def test_budget_expiry_cancels_a_call_still_queued_for_a_slot(self):
+        calls = []
+
+        def handle_request(_req):
+            calls.append(1)
+            return _HYBRID_OK
+
+        fast_mock = AsyncMock(return_value=list(_FAST_HITS))
+        with patch.object(main._mp, "handle_request", handle_request), \
+                patch.object(main, "search_fast", fast_mock):
+            await main._read_sem.acquire()  # the one read slot is taken elsewhere
+            try:
+                out = await main.search_hybrid(
+                    SearchHybridBody(query="pjsip", budget_ms=50), x_api_key="k")
+                self.assertEqual(out["degraded"], "bm25-fast")
+                self.assertEqual(out["timings_ms"]["compute"], 0.0)
+            finally:
+                main._read_sem.release()
+            await self._drain()  # inside the patch: a surviving task would hit the fake
+        # The queued search never ran: its slot went to nobody and no thread
+        # was spent on an answer with no reader.
+        self.assertEqual(calls, [])
         self.assertEqual(main._tool_inflight, 0)
 
 
