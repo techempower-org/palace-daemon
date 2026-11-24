@@ -1872,3 +1872,71 @@ class UnitDrift(unittest.TestCase):
     def test_the_check_compares_against_the_unit_in_its_own_tree(self):
         self.assertEqual(udrift.REPO_UNIT, CHECKS.parent.parent / "palace-daemon.service")
         self.assertTrue(udrift.REPO_UNIT.is_file())
+
+
+class GsAuthHostOffline(unittest.TestCase):
+    """A desktop that is asleep or powered off is a warn ("asleep or off"), not a fail: the service
+    on it is not down, nothing on it can be restarted, and the next run reads it again. Only an ssh
+    CONNECT that gets no answer counts; a host that answers and refuses is still a fail."""
+
+    def _ssh(self, rc, stderr, stdout=""):
+        done = mock.Mock(returncode=rc, stdout=stdout, stderr=stderr)
+        with mock.patch.object(gs.subprocess, "run", return_value=done):
+            return gs.read_host("h1")
+
+    def test_a_connect_that_gets_no_answer_reads_offline(self):
+        for err in (
+            "ssh: connect to host 192.0.2.9 port 22: Connection timed out\r\n",
+            "ssh: connect to host 192.0.2.9 port 22: No route to host\r\n",
+            "ssh: connect to host 192.0.2.9 port 22: Host is down\r\n",
+            "ssh: connect to host 192.0.2.9 port 22: Network is unreachable\r\n",
+        ):
+            with self.subTest(err=err):
+                self.assertIs(self._ssh(255, err), gs.OFFLINE)
+
+    def test_a_host_that_answers_is_never_offline(self):
+        for err in (
+            "ssh: connect to host 192.0.2.9 port 22: Connection refused\r\n",
+            "jp@h1: Permission denied (publickey).\r\n",
+            "ssh: Could not resolve hostname h1: Name or service not known\r\n",
+            "",
+        ):
+            with self.subTest(err=err):
+                self.assertIsNone(self._ssh(255, err))
+        # a remote run that fails after connecting is not offline, even if a command it ran
+        # printed an ssh-shaped line (only ssh's own exit 255 is a connect failure)
+        self.assertIsNone(
+            self._ssh(1, "ssh: connect to host 192.0.2.9 port 22: Connection timed out\n")
+        )
+
+    def test_an_ssh_that_hangs_is_not_offline(self):
+        with mock.patch.object(
+            gs.subprocess, "run", side_effect=gs.subprocess.TimeoutExpired("ssh", 60)
+        ):
+            self.assertIsNone(gs.read_host("h1"))
+
+    def test_offline_warns_and_says_nothing_needs_doing(self):
+        out = gs.assess([("main", "required", _host(True)), ("second", "open", gs.OFFLINE)], NOW)
+        self.assertRegex(out, SHAPE)
+        self.assertTrue(out.startswith("CHECK palace-gs-auth warn"), out)
+        self.assertIn("second asleep or off", out)
+        self.assertNotIn("unreachable", out)
+        self.assertIn("next run reads it again", out)
+        self.assertNotIn("restart gnome-speaks", out)
+
+    def test_a_real_failure_elsewhere_still_fails(self):
+        out = gs.assess([("main", "required", None), ("second", "open", gs.OFFLINE)], NOW)
+        self.assertTrue(out.startswith("CHECK palace-gs-auth fail"), out)
+        self.assertIn("main unreachable", out)
+        self.assertIn("second asleep or off", out)
+
+    def test_offline_beside_another_warn_keeps_the_warn_advice(self):
+        caller = _host(True, [[900.0, "refused"]])
+        out = gs.assess([("main", "required", caller), ("second", "open", gs.OFFLINE)], NOW)
+        self.assertTrue(out.startswith("CHECK palace-gs-auth warn"), out)
+        self.assertIn("find the refused caller", out)
+
+    def test_the_line_never_carries_what_ssh_printed(self):
+        r = self._ssh(255, "ssh: connect to host 192.0.2.9 port 22: Connection timed out\r\n")
+        out = gs.assess([("second", "open", r)], NOW)
+        self.assertNotIn("192.0.2.9", out)

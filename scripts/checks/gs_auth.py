@@ -8,8 +8,11 @@ the unit's state; ``/status`` with the host's own token (curl -K, never argv), a
 curl config holds a header, so this check never sends a tokenless request; the "refused:" and
 start lines in the unit's journal; and whether the deployed service resolves ``bw`` beyond PATH.
 
-- fail: a host unreachable, the unit not active, no token config, or /status unreadable
-- warn: callers refused in the last ``WINDOW_HOURS``; the token state differs from the expected
+- fail: a host unreachable (it answered, but ssh or the read failed), the unit not active, no
+  token config, or /status unreadable
+- warn: a host asleep or off (its ssh connect got no answer: timed out, no route, host down; the
+  line shows the label only, never what ssh printed); callers refused in the last
+  ``WINDOW_HOURS``; the token state differs from the expected
   one; the journal could not be read; the deployed service predates the boot-PATH fix.
   Refusals within ``DEPLOY_GRACE`` s after a service start are a deploy's own tokenless probes
   (the restart recipe checks 401 right away): counted apart, not warned on. Starts are read from
@@ -37,6 +40,14 @@ NAME = "palace-gs-auth"
 WINDOW_HOURS = 24
 DEPLOY_GRACE = 60
 _HOST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
+# read_host's answer for a desktop whose ssh CONNECT got no answer (asleep or powered off). Not a
+# dict, so nothing the remote prints can produce it. "Connection refused" is an answer: not this.
+OFFLINE = "offline"
+_NO_ANSWER = re.compile(
+    r"^ssh: connect to host \S+ port \d+: "
+    r"(Connection timed out|No route to host|Host is down|Network is unreachable)\s*$",
+    re.M,
+)
 
 # Runs on the host (bash -s); prints one JSON object. No token in argv: curl reads curl.conf.
 REMOTE = r"""
@@ -119,6 +130,8 @@ def caller_refusals(
 def judge_host(host: str, want: str, r: dict | None) -> tuple[str, str]:
     """(state, fact) for one host; ``host`` here is the label the line may show."""
     host = label(host)
+    if r is OFFLINE:
+        return "warn", f"{host} asleep or off (no answer on ssh)"
     if not isinstance(r, dict):
         return "fail", f"{host} unreachable"
     if r.get("active") != "active":
@@ -172,6 +185,8 @@ def assess(results: list[tuple[str, str, dict | None]], now: dt.datetime) -> str
         "warn": "owner palace lane: find the refused caller in that host's journal, or align the unit/code",
         "fail": "owner palace lane: restart gnome-speaks on that host or restore its token config, then re-run this check",
     }[state]
+    if state == "warn" and all(r is OFFLINE for (_, _, r), (s, _) in zip(results, judged) if s == "warn"):
+        nxt = "owner palace lane: nothing to do while a desktop sleeps; the next run reads it again"
     return line(NAME, state, fact, nxt)
 
 
@@ -197,6 +212,8 @@ def read_host(host: str) -> dict | None:
             timeout=60,
             check=False,
         )
+        if p.returncode == 255 and _NO_ANSWER.search(p.stderr or ""):
+            return OFFLINE
         last = p.stdout.strip().splitlines()[-1] if p.stdout.strip() else ""
         doc = json.loads(last) if p.returncode == 0 and last else None
         return doc if isinstance(doc, dict) else None
