@@ -2339,6 +2339,28 @@ def _log_kg_writethrough_stages(env, logger) -> None:
     )
 
 
+def _start_needle_refresher(logger) -> bool:
+    """Keep the redact vault needles fresh off the write path (Flow 0ce300be): mempalace's refresher
+    thread fetches every half TTL and keeps each item's last good value, so one slow or locked vault
+    answer no longer refuses every palace write. An older mempalace without it: log and go on."""
+    try:
+        from mempalace import redact
+    except Exception as exc:  # noqa: BLE001 -- startup must not fail on this
+        logger.warning("redact needle refresher not started: %s", exc)
+        return False
+    start = getattr(redact, "start_vault_refresher", None)
+    if start is None:
+        logger.warning("redact needle refresher not started: mempalace has no start_vault_refresher")
+        return False
+    try:
+        started = start()
+    except Exception as exc:  # noqa: BLE001 -- same policy as a missing API: writes still fail closed
+        logger.warning("redact needle refresher not started: %s", type(exc).__name__)
+        return False
+    logger.info("redact needle refresher %s", "started" if started else "already running")
+    return True
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import logging
@@ -2368,6 +2390,8 @@ async def lifespan(app: FastAPI):
             pass
         except Exception:
             pass
+
+    _start_needle_refresher(logger)
 
     # Uvicorn installs its own SIGINT/SIGTERM handlers that shut down gracefully;
     # we don't need to override them. Calling sys.exit() from inside an asyncio
@@ -2588,6 +2612,9 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(wdog_task, timeout=3.0)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
+    # The redact needle refresher is not stopped here: it is a daemon thread, so it never holds the process,
+    # and a stop can wait behind a write-path vault fetch (xreview r2 on #355: a bounded await would still
+    # leave that wait on an executor thread that interpreter exit joins).
     # Terminate any active auto-mine subprocesses before stopping the watcher
     # (#136 problem B). Without this, systemd has to SIGKILL the cgroup at
     # TimeoutStopSec, leaving the child process to be reaped at the cgroup
