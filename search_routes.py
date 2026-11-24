@@ -357,8 +357,8 @@ async def search_hybrid(
     if body.budget_ms is None:
         result = await call
     else:
-        # Shielded: past the budget only THIS route stops waiting. The _call
-        # task runs on and keeps holding the read semaphore and its in-flight
+        # Shielded: past the budget only THIS route stops waiting. A _call
+        # task whose worker is submitted runs on, holding the read semaphore and its in-flight
         # slot until the worker thread finishes, so callers without a budget
         # keep queueing behind it exactly as before. Cancelling _call instead
         # would free the semaphore while the thread ran on, and a wave of
