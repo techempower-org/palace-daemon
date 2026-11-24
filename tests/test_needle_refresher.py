@@ -94,16 +94,22 @@ class NeedleRefresherStart(unittest.TestCase):
                     while "item-1" not in redact._vault_values and time.monotonic() < deadline:
                         time.sleep(0.01)
                     self.assertIn("item-1", redact._vault_values)
+                    self.assertEqual(redact._vault_values["item-1"][0], "hunter" + "pass42")
                     self.assertEqual(threads[0], "mempalace-vault-refresh")
                 finally:
                     redact.stop_vault_refresher()
                     redact._vault_values.clear()
                     redact._cache["key"] = None
 
-    def test_lifespan_exit_does_not_wait_on_the_refresher(self):
+    def test_static_guard_lifespan_exit_never_touches_the_refresher(self):
+        """A static guard, on purpose: the property is the ABSENCE of a call on the shutdown path (xreview r2 on
+        #355: any stop there can wait behind a write-path vault fetch on a thread interpreter exit joins). No
+        test here runs the real lifespan (it starts the palace, watchers and subprocesses), so the source after
+        ``yield`` is the instrument: it must not name the refresher in any form."""
         import inspect
 
-        self.assertNotIn("vault_refresher", inspect.getsource(main.lifespan).split("    yield", 1)[1])
+        shutdown = inspect.getsource(main.lifespan).split("    yield", 1)[1]
+        self.assertNotRegex(shutdown, r"(?<!#)[^\n#]*\b(stop_vault_refresher|_needle_refresher|vault_refresh)\b")
 
 
 if __name__ == "__main__":
