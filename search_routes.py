@@ -293,16 +293,20 @@ async def search_hybrid(
           "room":          "problems",          // optional, canonical only
           "limit":         10,
           "include_trace": false,               // optional, attaches per-source
-                                                // counts + latencies if true
+                                                // counts if true (no latencies)
           "budget_ms":     2000                 // optional (#284): past it, or when
                                                 // the daemon is busy, answer from
                                                 // BM25 /search/fast, marked
                                                 // "degraded": "bm25-fast"
         }
 
-    Every response carries ``timings_ms`` (``hybrid`` / ``rerank`` / ``total``,
-    or ``hybrid`` / ``fast`` / ``total`` when degraded), and the same numbers
-    go to the log, so a slow search under load says which stage paid.
+    Every response carries ``timings_ms``: ``hybrid`` (the whole tool call),
+    split into ``queue`` (waiting for a read slot and a tool thread) and
+    ``compute`` (mempalace's embed, vector, BM25, graph and fusion, as one
+    figure), then ``rerank`` and ``total``; ``fast`` replaces ``rerank`` when
+    degraded. The same numbers go to the log, so a slow search under load says
+    whether it waited or computed. The per-stage split inside mempalace is
+    still open on #284 (``include_trace`` carries counts, not latencies).
 
     Returns the same hit shape as /search; each hit has a `matched_via`
     field naming the source (vector, bm25_postgres, graph_seeded,
@@ -335,27 +339,36 @@ async def search_hybrid(
     if body.all_classes:
         args["all_classes"] = True
 
-    # #284: time the daemon-side stages. ``hybrid`` is the whole tool call —
-    # queueing for a read slot and a tool thread, then mempalace's embed,
-    # vector, BM25, graph and fusion (include_trace breaks that last part
-    # down) — and ``rerank`` is the cross-encoder. Under a mine drain this
-    # line is what tells "waited" from "computed" from "reranked".
+    # #284: time the daemon-side stages. _call stamps ``box`` (``entered``
+    # before the read semaphore, ``submitted`` after it, ``started`` from the
+    # worker thread when mempalace begins), so the log line splits ``queue``
+    # (semaphore + executor wait) from ``compute`` (mempalace's embed, vector,
+    # BM25, graph and fusion as one figure; the per-stage split inside
+    # mempalace is still open on #284, and include_trace carries per-source
+    # counts, not latencies). ``rerank`` is the cross-encoder.
     t0 = time.monotonic()
+    box: dict = {}
     call = main._call({
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
         "params": {"name": "mempalace_search", "arguments": args},
-    })
+    }, box=box)
     degraded_reason = None
     if body.budget_ms is None:
         result = await call
     else:
-        # A cancelled call keeps its tool slot until its thread finishes
-        # (_call's own contract), so an abandoned hybrid cannot pile up
-        # threads past PALACE_MCP_TOOL_MAX_INFLIGHT; once that bound is hit
-        # the refusal below degrades too.
+        # Shielded: past the budget only THIS route stops waiting. The _call
+        # task runs on and keeps holding the read semaphore and its in-flight
+        # slot until the worker thread finishes, so callers without a budget
+        # keep queueing behind it exactly as before. Cancelling _call instead
+        # would free the semaphore while the thread ran on, and a wave of
+        # budgeted hook calls could then run PALACE_MCP_TOOL_MAX_INFLIGHT
+        # hybrid threads at once instead of PALACE_MAX_READ_CONCURRENCY,
+        # adding CPU contention in exactly the mine drain this is for.
+        task = asyncio.ensure_future(call)
+        task.add_done_callback(_retrieve_abandoned)
         try:
-            result = await asyncio.wait_for(call, body.budget_ms / 1000)
+            result = await asyncio.wait_for(asyncio.shield(task), body.budget_ms / 1000)
         except asyncio.TimeoutError:
             result = None
             degraded_reason = f"hybrid exceeded budget_ms={body.budget_ms}"
@@ -363,22 +376,51 @@ async def search_hybrid(
             err = result.get("error") if isinstance(result, dict) else None
             if isinstance(err, dict) and err.get("code") in _HYBRID_DEGRADE_CODES:
                 degraded_reason = f"hybrid refused ({err.get('code')}): {err.get('message')}"
-    hybrid_ms = round((time.monotonic() - t0) * 1000, 1)
+    t_hybrid = time.monotonic()
+    hybrid_ms = _ms(t_hybrid - t0)
+    split = _stage_split(box, t_hybrid)
 
     if degraded_reason is not None:
-        return await _hybrid_degraded_to_fast(body, degraded_reason, hybrid_ms, t0, x_api_key)
+        return await _hybrid_degraded_to_fast(body, degraded_reason, hybrid_ms, split, t0, x_api_key)
 
     t1 = time.monotonic()
     response = main._rerank.rerank_response(body.query, main._unwrap(result), enabled=body.rerank)
-    rerank_ms = round((time.monotonic() - t1) * 1000, 1)
-    total_ms = round((time.monotonic() - t0) * 1000, 1)
+    rerank_ms = _ms(time.monotonic() - t1)
+    total_ms = _ms(time.monotonic() - t0)
     _log.info(
-        "/search/hybrid timings: hybrid=%.0fms rerank=%.0fms total=%.0fms",
-        hybrid_ms, rerank_ms, total_ms,
+        "/search/hybrid timings: hybrid=%.0fms (queue=%s compute=%s) rerank=%.0fms total=%.0fms",
+        hybrid_ms, split.get("queue", "?"), split.get("compute", "?"), rerank_ms, total_ms,
     )
     if isinstance(response, dict):
-        response["timings_ms"] = {"hybrid": hybrid_ms, "rerank": rerank_ms, "total": total_ms}
+        response["timings_ms"] = {"hybrid": hybrid_ms, **split, "rerank": rerank_ms, "total": total_ms}
     return response
+
+
+def _ms(seconds: float) -> float:
+    return round(seconds * 1000, 1)
+
+
+def _stage_split(box: dict, t_end: float) -> dict:
+    """``{"queue": ms, "compute": ms}`` from _call's stamps (#284).
+
+    Empty when the call never reached the slow path (a fast intercept, or a
+    test fake). A worker that has not started by ``t_end`` has queued the
+    whole time and computed nothing; one still running has computed so far.
+    """
+    entered = box.get("entered")
+    if entered is None:
+        return {}
+    started = box.get("started")
+    if started is None:
+        return {"queue": _ms(t_end - entered), "compute": 0.0}
+    return {"queue": _ms(started - entered), "compute": _ms(t_end - started)}
+
+
+def _retrieve_abandoned(task: asyncio.Future) -> None:
+    """Consume the outcome of a _call task its route stopped waiting for, so
+    asyncio never logs "exception was never retrieved" for it."""
+    if not task.cancelled():
+        task.exception()
 
 
 # JSON-RPC codes from main._call that mean "the hybrid leg did not run to an
@@ -387,7 +429,7 @@ async def search_hybrid(
 _HYBRID_DEGRADE_CODES = (-32003, -32001)
 
 
-async def _hybrid_degraded_to_fast(body, reason: str, hybrid_ms: float, t0: float, x_api_key):
+async def _hybrid_degraded_to_fast(body, reason: str, hybrid_ms: float, split: dict, t0: float, x_api_key):
     """Answer a budgeted /search/hybrid from BM25 /search/fast (#284).
 
     The fallback has no vector leg, no graph leg and no rerank; /search/fast
@@ -423,8 +465,8 @@ async def _hybrid_degraded_to_fast(body, reason: str, hybrid_ms: float, t0: floa
             break
     total_ms = round((time.monotonic() - t0) * 1000, 1)
     _log.warning(
-        "/search/hybrid degraded to bm25-fast: %s (hybrid=%.0fms fast=%.0fms total=%.0fms)",
-        reason, hybrid_ms, fast_ms, total_ms,
+        "/search/hybrid degraded to bm25-fast: %s (hybrid=%.0fms queue=%s compute=%s fast=%.0fms total=%.0fms)",
+        reason, hybrid_ms, split.get("queue", "?"), split.get("compute", "?"), fast_ms, total_ms,
     )
     return {
         "results": results,
@@ -435,7 +477,7 @@ async def _hybrid_degraded_to_fast(body, reason: str, hybrid_ms: float, t0: floa
             "(no vector or graph leg, no rerank)"
         ],
         "errors": [],
-        "timings_ms": {"hybrid": hybrid_ms, "fast": fast_ms, "total": total_ms},
+        "timings_ms": {"hybrid": hybrid_ms, **split, "fast": fast_ms, "total": total_ms},
     }
 
 

@@ -4,12 +4,13 @@
 
 ### Added — *`/search/hybrid` reports its stage timings and can answer within a budget (#284)*
 
-- **Every `/search/hybrid` response carries `timings_ms`** (`hybrid`, `rerank`, `total`), and the same numbers go to the log (`/search/hybrid timings: …`).
-  - `hybrid` covers queueing for a read slot and a tool thread, plus mempalace's embed, vector, BM25, graph and fusion stages. `include_trace` breaks down the mempalace stages.
-  - Under a mine drain, that log line shows whether the 24 s was spent waiting, computing or reranking.
+- **Every `/search/hybrid` response carries `timings_ms`** (`hybrid`, `queue`, `compute`, `rerank`, `total`), and the same numbers go to the log (`/search/hybrid timings: …`).
+  - `queue` is the wait for a read slot and a tool thread; `compute` is mempalace's embed, vector, BM25, graph and fusion stages as one figure (`_call` stamps them on a per-call `box`). Under a mine drain, that log line says whether the 24 s went to waiting, computing or reranking.
+  - Still open on #284: the per-stage split inside mempalace (embed / vector / bm25 / fusion). `include_trace` carries per-source counts, not latencies.
 - **Optional `budget_ms` in the body.** If the hybrid leg has not answered by then, or the daemon refuses it as busy (-32003) or timed out (-32001), the route answers from BM25 `/search/fast` with `"degraded": "bm25-fast"` and the reason in `warnings`.
   - The fallback has no vector leg, no graph leg and no rerank. A room-scoped request over-fetches and filters by room in the daemon.
   - If the fallback also fails, the route returns 504. Without `budget_ms`, behaviour is unchanged.
+  - Past the budget the hybrid call is abandoned, not cancelled (`asyncio.shield`): it keeps its read-semaphore slot until its thread finishes, so a wave of budgeted calls cannot run more hybrid threads than `PALACE_MAX_READ_CONCURRENCY`, and callers without a budget keep queueing behind them.
 
 ### Changed — *judged-parent indexes; the install script's show diff stops reporting noise*
 

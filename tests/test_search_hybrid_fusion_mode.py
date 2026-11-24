@@ -88,7 +88,7 @@ class TestSearchHybridFusionMode(unittest.IsolatedAsyncioTestCase):
 
         captured_args = {}
 
-        async def fake_call(envelope):
+        async def fake_call(envelope, **_kw):
             captured_args["args"] = envelope["params"]["arguments"]
             return {"jsonrpc": "2.0", "id": 1, "result": {
                 "content": [{"type": "text", "text": '{"results":[]}'}]
