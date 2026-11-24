@@ -1,0 +1,21 @@
+[Unit]
+Description=palace lane check: a step in palace-daemon's RSS + swap between two 5-minute samples (#323)
+Documentation=file://%h/Projects/palace-daemon/docs/CHECKS.md
+
+[Service]
+Type=oneshot
+# A user unit started at boot sees a bare PATH: name the dirs (systemctl).
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Paths and hosts only. Never a secrets file: systemd logs a line it cannot parse in full.
+EnvironmentFile=%h/.config/palace-checks/env
+ExecStart=%h/.local/share/palace-daemon/venv/bin/python %h/Projects/palace-daemon/scripts/checks/rss_step.py
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=1min
+NoNewPrivileges=yes
+UMask=0077
+LimitCORE=0
+ProtectSystem=strict
+# The line and the previous sample (.palace-rss-step.sample) both live here.
+ReadWritePaths=%h/.local/state/checks
+PrivateTmp=yes

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added — *CHECK palace-rss-step: a jump in the daemon's memory alerts (#323)*
+
+- **`scripts/checks/rss_step.py`** (`palace-check-rss-step.timer`, every 5 min) reads the daemon's MainPID and its `VmRSS` + `VmSwap`, and compares them with the previous sample from the same pid.
+  - **fail** on a step of 2 GiB or more (`PALACE_RSS_STEP_GIB`), or when no daemon process can be read; **warn** at 4 GiB or more (`PALACE_RSS_WARN_GIB`; MemoryHigh is 5G), and for 6 h after a step by the same process.
+  - Swap counts: above MemoryHigh, RSS alone falls while the process grows.
+  - On 2026-11-04 RSS went 1.19 → 5.38 GB between two samples 5 minutes apart; the only instrument was a hand-run log read after the restart. The other three #323 items shipped in #324 (save lane), #325 (no slow-path fallback) and #326 (stuck-worker log).
+- Tests: `RssStep` in `tests/test_palace_checks.py`.
+
 ### Changed — *judged-parent indexes; the install script's show diff stops reporting noise*
 
 - **Indexes:** `mempalace_drawers` gets `((metadata->>'parent_drawer_id'))` and `((metadata->>'parent_entry_id'))` (2026-11-21, 10 MB each).
