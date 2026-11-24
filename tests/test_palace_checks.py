@@ -41,6 +41,7 @@ pgt = _load("pg_timeouts")
 pbk = _load("palace_backup")
 pvac = _load("palace_vacuum")
 udrift = _load("unit_drift")
+drest = _load("daemon_restarts")
 
 NOW = dt.datetime(2026, 11, 15, 9, 0, tzinfo=dt.timezone(dt.timedelta(hours=-8)))
 SHAPE = r"^CHECK [a-z-]+ (ok|warn|fail) · .+ · .+$"
@@ -1872,3 +1873,57 @@ class UnitDrift(unittest.TestCase):
     def test_the_check_compares_against_the_unit_in_its_own_tree(self):
         self.assertEqual(udrift.REPO_UNIT, CHECKS.parent.parent / "palace-daemon.service")
         self.assertTrue(udrift.REPO_UNIT.is_file())
+
+
+class DaemonRestarts(unittest.TestCase):
+    """CHECK palace-daemon-restarts names each unrequested stop, and the trigger of the watchdog's own."""
+
+    T = 1795400000.0
+
+    def _j(self, dt_s, msg):
+        return f"{self.T + dt_s:.6f} palace-host systemd[1]: palace-daemon.service: {msg}"
+
+    def test_a_pinned_memory_request_is_named_with_its_trigger(self):
+        trig = {"trigger": "pinned-memory", "at": self.T - 5, "swap": 3 << 30, "swap_max": 3 << 30,
+                "pinned_s": 300, "high_events": 9}
+        lines = [self._j(0, "Watchdog request (last status: n/a)!"),
+                 self._j(1, "Failed with result 'watchdog'.")]
+        stops = drest.classify(lines, trig)
+        self.assertEqual([(k, d) for _a, k, d in stops],
+                         [("watchdog: pinned-memory", "swap 3072 of 3072 MiB, pinned 300 s")])
+        out = drest.build(stops, True)
+        self.assertRegex(out, SHAPE)
+        self.assertIn("warn", out.split(" · ")[0])
+        self.assertIn("watchdog: pinned-memory ×1", out)
+
+    def test_a_timeout_is_a_hang_and_an_old_trigger_file_does_not_name_it(self):
+        old = {"trigger": "pinned-memory", "at": self.T - 3600}
+        lines = [self._j(0, "Watchdog timeout (limit 3min)!"), self._j(1, "Failed with result 'watchdog'."),
+                 self._j(50, "Watchdog request (last status: n/a)!"),
+                 self._j(51, "Failed with result 'watchdog'.")]
+        kinds = [k for _a, k, _d in drest.classify(lines, old)]
+        self.assertEqual(kinds, ["watchdog: hang", "watchdog: requested"])
+
+    def test_other_results_count_and_three_stops_fail(self):
+        lines = [self._j(0, "Failed with result 'oom-kill'."), self._j(10, "Failed with result 'signal'."),
+                 self._j(20, "Watchdog timeout (limit 3min)!"), self._j(21, "Failed with result 'watchdog'."),
+                 "garbage line", self._j(30, "Started palace-daemon.service")]
+        stops = drest.classify(lines, None)
+        self.assertEqual([k for _a, k, _d in stops], ["oom-kill", "signal", "watchdog: hang"])
+        self.assertTrue(drest.build(stops, True).startswith("CHECK palace-daemon-restarts fail · 3 "))
+
+    def test_none_is_ok_and_an_unread_journal_is_not(self):
+        self.assertTrue(drest.build([], True).startswith("CHECK palace-daemon-restarts ok · "))
+        out = drest.build([], False, "rc 1: boom")
+        self.assertTrue(out.startswith("CHECK palace-daemon-restarts fail · "))
+        self.assertIn("rc 1: boom", out)
+
+    def test_it_reads_the_file_the_watchdog_writes(self):
+        import sd_watchdog
+
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "watchdog-trigger.json")
+            sd_watchdog.record_trigger("pinned-memory", {"pinned_s": 301, "swap": 1, "swap_max": 1}, p)
+            got = drest.read_trigger(Path(p))
+        self.assertEqual((got["trigger"], got["pinned_s"]), ("pinned-memory", 301))
+        self.assertEqual(Path(sd_watchdog.TRIGGER_PATH), drest.TRIGGER_PATH)

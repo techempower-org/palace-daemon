@@ -1,0 +1,12 @@
+[Unit]
+Description=palace lane check: palace-daemon stops nobody asked for in 24 h, each by kind and trigger
+Documentation=file://%h/Projects/palace-daemon/docs/CHECKS.md
+
+[Service]
+Type=oneshot
+# A user unit started at boot sees a bare PATH: name the dirs (systemctl).
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Paths and hosts only. Never a secrets file: systemd logs a line it cannot parse in full.
+EnvironmentFile=%h/.config/palace-checks/env
+ExecStart=%h/.local/share/palace-daemon/venv/bin/python %h/Projects/palace-daemon/scripts/checks/daemon_restarts.py
+Nice=15

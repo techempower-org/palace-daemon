@@ -155,6 +155,94 @@ def rebuild_stall_s() -> int:
 _clock = time.monotonic
 
 
+# Pinned memory (Flow 970b2e72). On Sun 2026-11-22 the daemon sat at MemoryHigh with swap at MemorySwapMax
+# from 03:54 to 05:46: reclaim throttled every allocation, /health still answered now and then, so the
+# keepalive kept the watchdog fed for ~2 h before a probe finally missed. A process pinned like that does
+# no useful work and will not recover by itself. When the unit's memory.high events keep rising AND its
+# swap is at the cap for PINNED_HOLD_S, the loop asks systemd for a watchdog restart (WATCHDOG=trigger)
+# instead of waiting for a probe to miss.
+PINNED_HOLD_S = 300
+SWAP_FULL_FRACTION = 0.98
+CGROUP_ROOT = "/sys/fs/cgroup"
+TRIGGER_PATH = os.path.join(os.path.expanduser("~"), ".cache", "palace-daemon", "watchdog-trigger.json")
+
+
+def cgroup_dir(proc_cgroup: str = "/proc/self/cgroup", root: str = CGROUP_ROOT) -> str | None:
+    """This process's cgroup v2 directory, or None (cgroup v1, or not readable)."""
+    try:
+        with open(proc_cgroup) as f:
+            for line in f:
+                if line.startswith("0::"):
+                    return root + line[3:].strip()
+    except OSError:
+        return None
+    return None
+
+
+def read_memory(cg: str | None) -> tuple[int, int, int | None] | None:
+    """(memory.events "high" count, memory.swap.current, memory.swap.max or None for "max"), or None when
+    any file is missing or unreadable: the trigger then never fires (it fails open to the old watchdog)."""
+    if not cg:
+        return None
+    try:
+        with open(os.path.join(cg, "memory.events")) as f:
+            high = next(int(v) for k, v in (ln.split() for ln in f if ln.strip()) if k == "high")
+        with open(os.path.join(cg, "memory.swap.current")) as f:
+            swap = int(f.read().strip())
+        with open(os.path.join(cg, "memory.swap.max")) as f:
+            raw = f.read().strip()
+        return high, swap, None if raw == "max" else int(raw)
+    except (OSError, ValueError, StopIteration):
+        return None
+
+
+class PinnedMemory:
+    """Seconds the unit has been pinned: each tick, memory.high events rose since the last tick and swap is
+    at SWAP_FULL_FRACTION of a finite MemorySwapMax. One tick that is not pinned starts the count again."""
+
+    def __init__(self, read=None, clock=None):
+        cg = cgroup_dir()
+        self._read = read or (lambda: read_memory(cg))
+        self._clock = clock or (lambda: _clock())
+        self._last_high = None
+        self._since = None
+        self.last = None  # the last sample, for the log line
+
+    def observe(self) -> float | None:
+        sample = self._read()
+        self.last = sample
+        if sample is None:
+            self._last_high = self._since = None
+            return None
+        high, swap, swap_max = sample
+        rising = self._last_high is not None and high > self._last_high
+        self._last_high = high
+        full = bool(swap_max) and swap >= SWAP_FULL_FRACTION * swap_max
+        if not (rising and full):
+            self._since = None
+            return None
+        now = self._clock()
+        if self._since is None:
+            self._since = now
+        return now - self._since
+
+
+def record_trigger(reason: str, detail: dict, path: str | None = None) -> None:
+    """Write why this process asked for a watchdog restart, for the CHECK to name after the restart. Best
+    effort: a write that fails must not stop the restart."""
+    import json
+
+    path = path or TRIGGER_PATH
+    try:
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            json.dump({"trigger": reason, "at": time.time(), "pid": os.getpid(), **detail}, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
 def _stamp(v) -> float | None:
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
@@ -187,11 +275,25 @@ async def watchdog_loop(interval_secs: int) -> None:
     #              of main._repair_state in tests/test_watchdog_rebuild.py.
     tick = watchdog_tick(interval_secs)
     rebuild_seen_at = None  # when this loop first saw the current rebuild: the fail-closed start (review r5)
+    pinned = PinnedMemory()
     while True:
         try:
             await asyncio.sleep(tick)
         except asyncio.CancelledError:
             return
+        # Pinned memory (970b2e72): never during a rebuild, which has its own stall bound and is the most
+        # destructive thing to kill (#135); everywhere else it ends the wait for a probe to miss.
+        pinned_s = pinned.observe()
+        rebuilding = main._repair_state.get("in_progress") and main._repair_state.get("mode") == "rebuild"
+        if pinned_s is not None and pinned_s >= PINNED_HOLD_S and not rebuilding:
+            high, swap, swap_max = pinned.last
+            main._log.critical(
+                "Watchdog: pinned-memory trigger: memory.high events rising and swap at %d of %d MiB for %ds:"
+                " WATCHDOG=trigger", swap >> 20, swap_max >> 20, int(pinned_s))
+            record_trigger("pinned-memory", {"pinned_s": int(pinned_s), "swap": swap, "swap_max": swap_max,
+                                             "high_events": high})
+            main._sd_notify("WATCHDOG=trigger\n")
+            continue
         # During mode=rebuild, /health is the wrong probe: a rebuild holds _exclusive_palace() with the
         # client/collection caches nulled (see the /repair handler), so _get_collection() can return None or
         # block for the whole operation, and a kill mid-rebuild is the most destructive kind (#135). Review

@@ -1,0 +1,10 @@
+[Unit]
+Description=palace lane check: palace-daemon unrequested stops (hourly)
+
+[Timer]
+OnCalendar=*-*-* *:17
+RandomizedDelaySec=2min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
