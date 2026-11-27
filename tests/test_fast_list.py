@@ -189,11 +189,18 @@ class _FakeDrawers:
         self.sql.append(sql)
         if sql.startswith("SET LOCAL"):
             return []
+        if sql == getattr(fast_intercept, "_UNFILTERED_ANCHOR_COUNT_SQL", None):
+            all_rows = len(self.rows)
+            chunk_rows = sum(1 for r in self.rows if self._parent(r) is not None)
+            return [(all_rows - chunk_rows,)]
         if sql.startswith("SELECT count(*)"):
             return [(len(self._filtered(sql, params)[0]),)]
         if " AS parent" in sql:
             cols = [c.strip() for c in sql.split("SELECT", 1)[1].split("FROM", 1)[0].split(",")]
             rows, _ = self._filtered(sql, params)
+            if "parent_drawer_id' = ANY(%s)" in sql:
+                wanted = set(params[0])
+                rows = [r for r in rows if self._parent(r) in wanted]
             rows.sort(key=lambda r: (self._parent(r), r["metadata"].get("chunk_index", 0), r["id"]))
             out = []
             for r in rows:
@@ -258,9 +265,15 @@ class _FakeDrawers:
         return Conn()
 
 
-def _palace(n_singles=3, n_groups=5, chunks=4):
+def _palace(n_singles=3, n_groups=5, chunks=4, n_legacy=0):
     rows = [{"id": f"s{i:03d}", "document": f"single {i}", "wing": "w", "room": "r", "metadata": {}}
             for i in range(n_singles)]
+    # legacy groups: a logical parent row (no parent_drawer_id: an anchor) plus its chunks
+    for g in range(n_legacy):
+        rows.append({"id": f"L{g:02d}", "document": f"legacy {g}", "wing": "w", "room": "r", "metadata": {}})
+        for c in range(chunks):
+            rows.append({"id": f"L{g:02d}-{c}", "document": f"legacy {g} chunk {c}", "wing": "w", "room": "r",
+                         "metadata": {"parent_drawer_id": f"L{g:02d}", "chunk_index": c}})
     for g in range(n_groups):
         for c in range(chunks):
             rows.append({"id": f"c{g:02d}-{c}", "document": f"group {g} chunk {c}", "wing": "w", "room": "r",
@@ -310,13 +323,53 @@ class TestChunkSweepBounded(unittest.TestCase):
         self.assertEqual([d["drawer_id"] for d in p["drawers"]], ["s002", "p00", "p01"])
         self.assertEqual(db.bodies_read, {"s002", "c00-0", "c01-0"})
 
-    def test_unfiltered_anchor_count_never_scans_for_null_parent(self):
+    def test_unfiltered_anchor_count_is_one_index_shaped_statement(self):
+        # #358 r1 finding 1/3: one statement (one snapshot: the difference cannot go stale or negative under
+        # concurrent writes), and never the "parent IS NULL" filter that seq-scans every row. Production
+        # EXPLAIN of this statement: an index-only scan on the primary key and a bitmap scan of the
+        # parent_drawer_id index (PR body).
         db = _FakeDrawers(_palace())
-        p = self._payload(db, limit=1, offset=0)
-        self.assertEqual(p["total"], 8)
-        counts = [s for s in db.sql if s.startswith("SELECT count(*)")]
-        self.assertTrue(counts)
-        self.assertFalse([s for s in counts if "IS NULL" in s], counts)
+        self._payload(db, limit=1, offset=0)
+        counts = [s for s in db.sql if "count(*)" in s]
+        self.assertEqual(len(counts), 1, counts)
+        self.assertEqual(counts, [getattr(fast_intercept, "_UNFILTERED_ANCHOR_COUNT_SQL", None)])
+        self.assertNotIn("IS NULL", counts[0])
+
+    def test_count_matches_a_fixture_with_legacy_groups(self):
+        # 4 singles + 2 legacy parent rows are anchors; their 8 chunk rows are not; 3 orphan groups follow
+        db = _FakeDrawers(_palace(n_singles=4, n_groups=3, n_legacy=2))
+        p = self._payload(db, limit=100, offset=0)
+        self.assertEqual(p["total"], 4 + 2 + 3)
+        ids = [d["drawer_id"] for d in p["drawers"]]
+        self.assertEqual(ids, ["L00", "L01", "s000", "s001", "s002", "s003", "p00", "p01", "p02"])
+        legacy = p["drawers"][0]
+        self.assertEqual(legacy["metadata"]["chunk_ids"], ["L00-0", "L00-1", "L00-2", "L00-3"])
+        self.assertEqual(legacy["content_preview"], "legacy 0")
+
+    def test_cached_and_cold_calls_build_entries_from_the_same_rows(self):
+        # #358 r1 finding 2: the cache decides only which groups exist and their order; every field of an
+        # entry is read in the call. So a call on a warm cache equals a cold call on the same data, also
+        # after the data changed under the cache.
+        db = _FakeDrawers(_palace(n_legacy=1))
+        cold = self._payload(db, limit=100, offset=0)
+        warm = self._payload(db, limit=100, offset=0)
+        self.assertEqual(warm, cold)
+        for r in db.rows:
+            if r["id"] == "c00-0":
+                r["document"], r["metadata"]["note"] = "edited first chunk", "new"
+        db.rows.append({"id": "c00-9", "document": "late chunk", "wing": "w", "room": "r",
+                        "metadata": {"parent_drawer_id": "p00", "chunk_index": 9}})
+        db.rows.append({"id": "L00-9", "document": "late legacy chunk", "wing": "w", "room": "r",
+                        "metadata": {"parent_drawer_id": "L00", "chunk_index": 9}})
+        warm = self._payload(db, limit=100, offset=0)  # the sweep is still cached
+        fast_intercept._chunk_group_cache.update({"at": 0.0, "groups": None})
+        cold = self._payload(db, limit=100, offset=0)
+        self.assertEqual(warm, cold)
+        p00 = next(d for d in warm["drawers"] if d["drawer_id"] == "p00")
+        self.assertEqual(p00["content_preview"], "edited first chunk")
+        self.assertEqual(p00["metadata"]["chunks"], 5)
+        l00 = next(d for d in warm["drawers"] if d["drawer_id"] == "L00")
+        self.assertEqual(l00["metadata"]["chunks"], 5)
 
     def test_wing_filtered_count_unchanged(self):
         db = _FakeDrawers(_palace())
