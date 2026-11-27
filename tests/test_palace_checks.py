@@ -1084,17 +1084,27 @@ class PalaceSecrets(unittest.TestCase):
 
         def daemon(method, path, key, *a, **k):
             deleted.append((method, path))
+            if method == "DELETE" and path.startswith("/memory/"):
+                db.execute("DELETE FROM mempalace_drawers WHERE id = ?", (path[len("/memory/"):],))
             return 200, {}
 
         with mock.patch.object(psec, "_daemon", daemon):
             self.assertEqual(psec.probe_cleanup(Conn(), "k", pdir, mine), 0)
+        # the survivors by id first, so a predicate that deletes too much goes red here (#359 ruling 7223457454)
+        survivors = sorted(r[0] for r in db.execute("SELECT id FROM mempalace_drawers"))
+        self.assertEqual(
+            survivors,
+            sorted(["other-wing-past-run", "in-wing-other-dir", "lookalike-dir", "wildcard-chars", "unrelated"]),
+        )
         self.assertEqual(
             sorted(deleted),
             sorted(("DELETE", f"/memory/{d}") for d in ("in-wing-past-run", "in-wing-this-run", "other-wing-this-run")),
         )
 
     def test_the_probe_always_mines_into_its_wing(self):
-        # the invariant probe_cleanup relies on: probe_start, the only writer under pdir, mines with PROBE_WING
+        # the invariant probe_cleanup relies on: probe_start, the only writer under pdir, mines with PROBE_WING.
+        # The wing the probe REQUESTS is the instrument on this side of the daemon boundary; that the daemon files
+        # a mine under the requested wing is the daemon's own contract, tested with the daemon.
         posts = []
 
         def daemon(method, path, key, body=None, *a, **k):
