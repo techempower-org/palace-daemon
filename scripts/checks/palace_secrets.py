@@ -428,15 +428,21 @@ def probe_files_cleanup(pdir: Path) -> int:
     return left
 
 
-def probe_cleanup(conn, key, pdir: Path) -> int:
-    """Delete every probe drawer (this run's and any a past run left); the number left (1 if it cannot look)."""
+def probe_cleanup(conn, key, pdir: Path, path: Path | None = None) -> int:
+    """Delete every probe drawer (this run's and any a past run left); the number left (1 if it cannot look).
+
+    Indexed (palace-daemon 4d141a62, 2026-11-27): starts_with() alone cannot use an index, so it scanned all
+    1.5M drawers on every run (7.9 s warm, into the statement timeout cold). The probe mines into PROBE_WING,
+    so the wing index narrows the prefix match to probe drawers; this run's own transcript is also matched by
+    its exact source_file (the source_file index), in any wing."""
     left = 0
     try:
         # a literal prefix: LIKE would read "_" and "%" in the path as wildcards
         rows = conn.execute(
             "SELECT id FROM mempalace_drawers "
-            "WHERE starts_with(metadata->>'source_file', %s)",
-            (str(pdir) + "/",),
+            "WHERE (wing = %s AND starts_with(metadata->>'source_file', %s)) "
+            "OR metadata->>'source_file' = %s",
+            (PROBE_WING, str(pdir) + "/", str(path) if path else None),
         ).fetchall()
     except Exception:  # noqa: BLE001 -- cannot see: count it as left
         return 1
@@ -648,6 +654,7 @@ def body() -> None:
     passes = placeholder = None
     verdict = ("not measured", "the check stopped first")
     conn = None
+    path = None
     try:
         passes, placeholder = strong_passes()
         fakes, path, early = probe_start(key, pdir)
@@ -685,7 +692,7 @@ def body() -> None:
                 conn.close()
         try:  # a fresh connection: the scan's may be the one that broke
             with psycopg.connect(dsn, connect_timeout=20, autocommit=True) as fresh:
-                leftovers += probe_cleanup(fresh, key, pdir)
+                leftovers += probe_cleanup(fresh, key, pdir, path)
         except Exception:  # noqa: BLE001 -- cannot look: count it as left
             leftovers += 1
     emit(

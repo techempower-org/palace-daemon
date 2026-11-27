@@ -1029,7 +1029,25 @@ class PalaceSecrets(unittest.TestCase):
         )
         self.assertIn("starts_with(", seen["sql"])
         self.assertNotIn("LIKE", seen["sql"])
-        self.assertEqual(seen["params"], ("/tmp/palace_probe/probe/",))
+        self.assertEqual(seen["params"], ("palace_probe", "/tmp/palace_probe/probe/", None))
+
+    def test_drawer_cleanup_is_index_served(self):
+        # 4d141a62: starts_with() alone scanned every drawer per run (7.9 s warm, into the timeout cold). The
+        # prefix match is ANDed with the probe wing (wing index), and this run's transcript is matched exactly
+        # (source_file index) in any wing.
+        seen = {}
+
+        class Conn:
+            def execute(self, sql, params):
+                seen["sql"], seen["params"] = sql, params
+                return mock.Mock(fetchall=list)
+
+        mine = Path("/tmp/palace_probe/probe/0123abcd.jsonl")
+        self.assertEqual(psec.probe_cleanup(Conn(), "k", mine.parent, mine), 0)
+        sql = " ".join(seen["sql"].split())
+        self.assertIn("(wing = %s AND starts_with(metadata->>'source_file', %s))", sql)
+        self.assertIn("OR metadata->>'source_file' = %s", sql)
+        self.assertEqual(seen["params"], (psec.PROBE_WING, "/tmp/palace_probe/probe/", str(mine)))
 
     def test_cleanup_that_cannot_look_counts_as_left(self):
         class Broken:
