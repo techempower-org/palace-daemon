@@ -1049,6 +1049,66 @@ class PalaceSecrets(unittest.TestCase):
         self.assertIn("OR metadata->>'source_file' = %s", sql)
         self.assertEqual(seen["params"], (psec.PROBE_WING, "/tmp/palace_probe/probe/", str(mine)))
 
+    @unittest.skipUnless(
+        tuple(int(x) for x in __import__("sqlite3").sqlite_version.split(".")[:2]) >= (3, 38),
+        "sqlite >= 3.38 for ->>",
+    )
+    def test_drawer_cleanup_deletes_exactly_the_probe_rows(self):
+        # #359 r1 finding 3: the cleanup's own SQL text, run against rows in and out of the probe wing (sqlite with
+        # starts_with registered; %s -> ?), and the DELETE calls it makes.
+        import sqlite3
+
+        pdir = Path("/tmp/palace_probe/probe")
+        mine = pdir / "0123abcd.jsonl"
+        rows = {
+            "in-wing-past-run": (psec.PROBE_WING, f"{pdir}/9999.jsonl"),  # a crash's leftover: deleted
+            "in-wing-this-run": (psec.PROBE_WING, str(mine)),
+            "other-wing-this-run": ("jp", str(mine)),  # this run's file mined elsewhere: deleted by exact path
+            "other-wing-past-run": ("jp", f"{pdir}/9999.jsonl"),  # the stated limit: not reached
+            "in-wing-other-dir": (psec.PROBE_WING, "/home/x/notes.jsonl"),
+            "lookalike-dir": (psec.PROBE_WING, f"{pdir}x/1.jsonl"),  # "probex/" is not "probe/"
+            "wildcard-chars": (psec.PROBE_WING, "/tmp/palaceXprobe/probe/1.jsonl"),  # "_" is literal
+            "unrelated": ("jp", "/home/x/y.md"),
+        }
+        db = sqlite3.connect(":memory:")
+        db.create_function("starts_with", 2, lambda s, p: s is not None and s.startswith(p))
+        db.execute("CREATE TABLE mempalace_drawers (id TEXT, wing TEXT, metadata TEXT)")
+        for did, (wing, sf) in rows.items():
+            db.execute("INSERT INTO mempalace_drawers VALUES (?, ?, ?)", (did, wing, json.dumps({"source_file": sf})))
+
+        class Conn:
+            def execute(self, sql, params):
+                return db.execute(sql.replace("%s", "?"), params)
+
+        deleted = []
+
+        def daemon(method, path, key, *a, **k):
+            deleted.append((method, path))
+            return 200, {}
+
+        with mock.patch.object(psec, "_daemon", daemon):
+            self.assertEqual(psec.probe_cleanup(Conn(), "k", pdir, mine), 0)
+        self.assertEqual(
+            sorted(deleted),
+            sorted(("DELETE", f"/memory/{d}") for d in ("in-wing-past-run", "in-wing-this-run", "other-wing-this-run")),
+        )
+
+    def test_the_probe_always_mines_into_its_wing(self):
+        # the invariant probe_cleanup relies on: probe_start, the only writer under pdir, mines with PROBE_WING
+        posts = []
+
+        def daemon(method, path, key, body=None, *a, **k):
+            posts.append((method, path, body))
+            return 200, {}
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(psec, "_daemon", daemon):
+            _fakes, path, _early = psec.probe_start("k", Path(d))
+            self.assertEqual(path.parent, Path(d))
+        mines = [b for m, p, b in posts if (m, p) == ("POST", "/mine")]
+        self.assertEqual(len(mines), 1)
+        self.assertEqual(mines[0]["wing"], psec.PROBE_WING)
+        self.assertEqual(mines[0]["dir"], str(path))
+
     def test_cleanup_that_cannot_look_counts_as_left(self):
         class Broken:
             def execute(self, *_a):

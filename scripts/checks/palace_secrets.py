@@ -432,9 +432,18 @@ def probe_cleanup(conn, key, pdir: Path, path: Path | None = None) -> int:
     """Delete every probe drawer (this run's and any a past run left); the number left (1 if it cannot look).
 
     Indexed (palace-daemon 4d141a62, 2026-11-27): starts_with() alone cannot use an index, so it scanned all
-    1.5M drawers on every run (7.9 s warm, into the statement timeout cold). The probe mines into PROBE_WING,
-    so the wing index narrows the prefix match to probe drawers; this run's own transcript is also matched by
-    its exact source_file (the source_file index), in any wing."""
+    1.5M drawers on every run (7.9 s warm, into the statement timeout cold). The predicate is
+    (wing = PROBE_WING AND starts_with(source_file, pdir/)) OR source_file = this run's path: the wing index
+    and the source_file expression index, a BitmapOr (1 ms in production).
+
+    Invariant this relies on: every probe drawer is in PROBE_WING, because probe_start is the only writer of
+    files under pdir and it always mines them with wing=PROBE_WING (tested). Production on 2026-11-27 held 0
+    rows with the pdir prefix outside PROBE_WING. A row outside the wing is still reached for the run that
+    wrote it, by its exact path; one an EARLIER run left outside the wing is not (the old full scan did).
+
+    It runs on a fresh autocommit connection after the probe, not inside the probe's transaction: if a run
+    crashes before or during cleanup, its drawers stay in PROBE_WING under pdir, and the next run's cleanup
+    reaches them through the wing half of the predicate."""
     left = 0
     try:
         # a literal prefix: LIKE would read "_" and "%" in the path as wildcards
