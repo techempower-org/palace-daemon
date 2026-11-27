@@ -156,5 +156,228 @@ class TestMcpListIntercept(unittest.TestCase):
         slow.assert_not_awaited()
 
 
+class _FakeDrawers:
+    """A tiny in-memory mempalace_drawers that answers the fast path's SQL.
+
+    Records which drawer ids had their ``document`` read by any query, and
+    every SQL text run. An unknown statement fails the test."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.bodies_read: set = set()
+        self.sql: list = []
+
+    @staticmethod
+    def _parent(r):
+        return r["metadata"].get("parent_drawer_id")
+
+    def _filtered(self, sql, params):
+        rows, p = list(self.rows), list(params or [])
+        if "parent_drawer_id' IS NULL" in sql:
+            rows = [r for r in rows if self._parent(r) is None]
+        if "parent_drawer_id' IS NOT NULL" in sql:
+            rows = [r for r in rows if self._parent(r) is not None]
+        if "wing = %s" in sql:
+            w = p.pop(0)
+            rows = [r for r in rows if r["wing"] == w]
+        if "room = %s" in sql:
+            rm = p.pop(0)
+            rows = [r for r in rows if r["room"] == rm]
+        return rows, p
+
+    def run(self, sql, params):
+        self.sql.append(sql)
+        if sql.startswith("SET LOCAL"):
+            return []
+        if sql == getattr(fast_intercept, "_UNFILTERED_ANCHOR_COUNT_SQL", None):
+            all_rows = len(self.rows)
+            chunk_rows = sum(1 for r in self.rows if self._parent(r) is not None)
+            return [(all_rows - chunk_rows,)]
+        if sql.startswith("SELECT count(*)"):
+            return [(len(self._filtered(sql, params)[0]),)]
+        if " AS parent" in sql:
+            cols = [c.strip() for c in sql.split("SELECT", 1)[1].split("FROM", 1)[0].split(",")]
+            rows, _ = self._filtered(sql, params)
+            if "parent_drawer_id' = ANY(%s)" in sql:
+                wanted = set(params[0])
+                rows = [r for r in rows if self._parent(r) in wanted]
+            rows.sort(key=lambda r: (self._parent(r), r["metadata"].get("chunk_index", 0), r["id"]))
+            out = []
+            for r in rows:
+                vals = []
+                for c in cols:
+                    if c.endswith("AS parent"):
+                        vals.append(self._parent(r))
+                    else:
+                        vals.append(r[c])
+                        if c == "document":
+                            self.bodies_read.add(r["id"])
+                out.append(tuple(vals))
+            return out
+        if sql.startswith("SELECT id FROM mempalace_drawers WHERE id = ANY"):
+            ids = set(params[0])
+            return [(r["id"],) for r in self.rows if r["id"] in ids]
+        if sql.startswith("SELECT id, document, metadata FROM mempalace_drawers WHERE id = ANY"):
+            ids = set(params[0])
+            hit = [r for r in self.rows if r["id"] in ids]
+            self.bodies_read.update(r["id"] for r in hit)
+            return [(r["id"], r["document"], r["metadata"]) for r in hit]
+        if "ORDER BY id LIMIT %s OFFSET %s" in sql:
+            rows, p = self._filtered(sql, params)
+            limit, offset = p
+            rows = sorted(rows, key=lambda r: r["id"])[offset : offset + limit]
+            self.bodies_read.update(r["id"] for r in rows)
+            return [(r["id"], r["document"], r["wing"], r["room"], r["metadata"]) for r in rows]
+        raise AssertionError(f"unexpected SQL in the fake: {sql}")
+
+    def connect(self, *a, **k):
+        db = self
+
+        class Cur:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *e):
+                return False
+
+            def execute(self, sql, params=None):
+                self._res = db.run(sql, params)
+
+            def fetchall(self):
+                return list(self._res)
+
+            def fetchone(self):
+                return self._res[0]
+
+        class Conn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *e):
+                return False
+
+            def cursor(self):
+                return Cur()
+
+            def close(self):
+                pass
+
+        return Conn()
+
+
+def _palace(n_singles=3, n_groups=5, chunks=4, n_legacy=0):
+    rows = [{"id": f"s{i:03d}", "document": f"single {i}", "wing": "w", "room": "r", "metadata": {}}
+            for i in range(n_singles)]
+    # legacy groups: a logical parent row (no parent_drawer_id: an anchor) plus its chunks
+    for g in range(n_legacy):
+        rows.append({"id": f"L{g:02d}", "document": f"legacy {g}", "wing": "w", "room": "r", "metadata": {}})
+        for c in range(chunks):
+            rows.append({"id": f"L{g:02d}-{c}", "document": f"legacy {g} chunk {c}", "wing": "w", "room": "r",
+                         "metadata": {"parent_drawer_id": f"L{g:02d}", "chunk_index": c}})
+    for g in range(n_groups):
+        for c in range(chunks):
+            rows.append({"id": f"c{g:02d}-{c}", "document": f"group {g} chunk {c}", "wing": "w", "room": "r",
+                         "metadata": {"parent_drawer_id": f"p{g:02d}", "chunk_index": c,
+                                      "aaak_source": "x" * 1000}})
+    return rows
+
+
+class TestChunkSweepBounded(unittest.TestCase):
+    """0a19023b / 8e81d5db (2026-11-27): the chunk-group sweep pulled every
+    chunk row's document and metadata (~24 KB of aaak_source each, 20k rows)
+    into Python: 1.5 GB RSS in 6 s on a cold cache. It now sweeps ids, wing
+    and room only, and reads the first chunk's body for the page's orphan
+    groups by id. The unfiltered anchor count no longer scans every row."""
+
+    def setUp(self):
+        fast_intercept._chunk_group_cache.update({"at": 0.0, "groups": None})
+        self.addCleanup(fast_intercept._chunk_group_cache.update, {"at": 0.0, "groups": None})
+
+    def _payload(self, db, **kw):
+        with patch("psycopg2.connect", db.connect), patch("postgres.postgres_dsn", return_value="dsn"):
+            return fast_intercept.fast_list_payload(**kw)
+
+    def test_sweep_holds_no_documents_or_metadata(self):
+        db = _FakeDrawers(_palace())
+        groups = fast_intercept._load_chunk_groups(db.connect().cursor())
+        self.assertEqual(len(groups), 5)
+        self.assertEqual(groups["p00"]["chunk_ids"], ["c00-0", "c00-1", "c00-2", "c00-3"])
+        held = json.dumps(groups, default=str)
+        self.assertNotIn("aaak_source", held)
+        self.assertNotIn("chunk 0", held)
+        self.assertEqual(db.bodies_read, set())
+
+    def test_orphan_page_reads_only_its_first_chunks(self):
+        db = _FakeDrawers(_palace())
+        p = self._payload(db, limit=2, offset=3)  # 3 singles, then orphan groups p00, p01
+        self.assertEqual(p["total"], 8)
+        self.assertEqual([d["drawer_id"] for d in p["drawers"]], ["p00", "p01"])
+        self.assertEqual(p["drawers"][0]["content_preview"], "group 0 chunk 0")
+        self.assertEqual(p["drawers"][1]["metadata"]["chunks"], 4)
+        self.assertEqual(p["drawers"][1]["metadata"]["chunk_ids"], ["c01-0", "c01-1", "c01-2", "c01-3"])
+        self.assertEqual(db.bodies_read, {"c00-0", "c01-0"})
+
+    def test_page_across_the_boundary_matches(self):
+        db = _FakeDrawers(_palace())
+        p = self._payload(db, limit=3, offset=2)
+        self.assertEqual([d["drawer_id"] for d in p["drawers"]], ["s002", "p00", "p01"])
+        self.assertEqual(db.bodies_read, {"s002", "c00-0", "c01-0"})
+
+    def test_unfiltered_anchor_count_is_one_index_shaped_statement(self):
+        # #358 r1 finding 1/3: one statement (one snapshot: the difference cannot go stale or negative under
+        # concurrent writes), and never the "parent IS NULL" filter that seq-scans every row. Production
+        # EXPLAIN of this statement: an index-only scan on the primary key and a bitmap scan of the
+        # parent_drawer_id index (PR body).
+        db = _FakeDrawers(_palace())
+        self._payload(db, limit=1, offset=0)
+        counts = [s for s in db.sql if "count(*)" in s]
+        self.assertEqual(len(counts), 1, counts)
+        self.assertEqual(counts, [getattr(fast_intercept, "_UNFILTERED_ANCHOR_COUNT_SQL", None)])
+        self.assertNotIn("IS NULL", counts[0])
+
+    def test_count_matches_a_fixture_with_legacy_groups(self):
+        # 4 singles + 2 legacy parent rows are anchors; their 8 chunk rows are not; 3 orphan groups follow
+        db = _FakeDrawers(_palace(n_singles=4, n_groups=3, n_legacy=2))
+        p = self._payload(db, limit=100, offset=0)
+        self.assertEqual(p["total"], 4 + 2 + 3)
+        ids = [d["drawer_id"] for d in p["drawers"]]
+        self.assertEqual(ids, ["L00", "L01", "s000", "s001", "s002", "s003", "p00", "p01", "p02"])
+        legacy = p["drawers"][0]
+        self.assertEqual(legacy["metadata"]["chunk_ids"], ["L00-0", "L00-1", "L00-2", "L00-3"])
+        self.assertEqual(legacy["content_preview"], "legacy 0")
+
+    def test_cached_and_cold_calls_build_entries_from_the_same_rows(self):
+        # #358 r1 finding 2: the cache decides only which groups exist and their order; every field of an
+        # entry is read in the call. So a call on a warm cache equals a cold call on the same data, also
+        # after the data changed under the cache.
+        db = _FakeDrawers(_palace(n_legacy=1))
+        cold = self._payload(db, limit=100, offset=0)
+        warm = self._payload(db, limit=100, offset=0)
+        self.assertEqual(warm, cold)
+        for r in db.rows:
+            if r["id"] == "c00-0":
+                r["document"], r["metadata"]["note"] = "edited first chunk", "new"
+        db.rows.append({"id": "c00-9", "document": "late chunk", "wing": "w", "room": "r",
+                        "metadata": {"parent_drawer_id": "p00", "chunk_index": 9}})
+        db.rows.append({"id": "L00-9", "document": "late legacy chunk", "wing": "w", "room": "r",
+                        "metadata": {"parent_drawer_id": "L00", "chunk_index": 9}})
+        warm = self._payload(db, limit=100, offset=0)  # the sweep is still cached
+        fast_intercept._chunk_group_cache.update({"at": 0.0, "groups": None})
+        cold = self._payload(db, limit=100, offset=0)
+        self.assertEqual(warm, cold)
+        p00 = next(d for d in warm["drawers"] if d["drawer_id"] == "p00")
+        self.assertEqual(p00["content_preview"], "edited first chunk")
+        self.assertEqual(p00["metadata"]["chunks"], 5)
+        l00 = next(d for d in warm["drawers"] if d["drawer_id"] == "L00")
+        self.assertEqual(l00["metadata"]["chunks"], 5)
+
+    def test_wing_filtered_count_unchanged(self):
+        db = _FakeDrawers(_palace())
+        p = self._payload(db, wing="w", limit=1, offset=0)
+        self.assertEqual(p["total"], 8)
+        db2 = _FakeDrawers(_palace())
+        self.assertEqual(self._payload(db2, wing="nope", limit=1, offset=0)["total"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

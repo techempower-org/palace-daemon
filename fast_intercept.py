@@ -300,14 +300,27 @@ def fast_mcp_kg_stats_cached() -> tuple[dict, bool]:
 # is only "approximates insertion order, not guaranteed", so a stable
 # alternative order is compliant.
 #
-# Chunk-group side data (parents, chunk ids, first-chunk preview) is tiny
-# and changes rarely, so it is swept once per ``_CHUNK_GROUP_TTL`` and
-# cached; the page query itself is ~2ms unfiltered / ~140ms wing-filtered.
+# Chunk-group side data (parents, chunk ids, wing, room) is small and
+# changes rarely, so it is swept once per ``_CHUNK_GROUP_TTL`` and cached;
+# the first chunk's document and metadata are fetched by id only for the
+# orphan groups on the requested page. The page query itself is ~2ms
+# unfiltered / ~140ms wing-filtered.
 
 _CHUNK_GROUP_TTL = 300.0
 _chunk_group_cache: dict = {"at": 0.0, "groups": None}
 
 _LIST_MAX_RESULTS = 100  # mirrors mempalace mcp_server._MAX_RESULTS
+
+# The unfiltered anchor count. "WHERE parent_drawer_id IS NULL" is a parallel
+# seq scan of every row (>10 s at 1.5M rows: the fast path timed out). All
+# rows (index-only scan on the primary key) minus chunk rows (the
+# parent_drawer_id index) is the same number in ~0.35 s. ONE statement, so both
+# subqueries read one snapshot and the difference cannot go stale or negative
+# under concurrent writes (#358 r1 finding 1).
+_UNFILTERED_ANCHOR_COUNT_SQL = (
+    "SELECT (SELECT count(*) FROM mempalace_drawers) - "
+    "(SELECT count(*) FROM mempalace_drawers WHERE metadata->>'parent_drawer_id' IS NOT NULL)"
+)
 
 
 def _tags_from_meta(meta: dict) -> list:
@@ -350,18 +363,22 @@ def _list_entry(drawer_id, document, wing, room, meta) -> dict:
 
 
 def _load_chunk_groups(cur) -> dict:
-    """Sweep the chunk side: parent -> group info. Cheap (146 rows today)."""
+    """Sweep the chunk side: parent -> {chunk_ids, wing, room, has_legacy_row}.
+
+    Only the small columns. The first chunk's document and metadata are
+    fetched per page for the orphan groups on it (``_first_chunk_bodies``):
+    at 20k chunk rows each chunk's metadata carries ~24 KB (``aaak_source``),
+    and sweeping it into Python peaked the daemon at 1.5 GB RSS in 6 s
+    (palace-daemon 0a19023b / 8e81d5db, 2026-11-27).
+    """
     cur.execute(
-        "SELECT metadata->>'parent_drawer_id' AS parent, id, document, wing, room, metadata "
+        "SELECT metadata->>'parent_drawer_id' AS parent, id, wing, room "
         "FROM mempalace_drawers WHERE metadata->>'parent_drawer_id' IS NOT NULL "
         "ORDER BY 1, NULLIF(metadata->>'chunk_index', '')::int NULLS LAST, id"
     )
     groups: dict = {}
-    for parent, cid, doc, wing, room, meta in cur.fetchall():
-        g = groups.setdefault(
-            parent,
-            {"chunk_ids": [], "wing": wing, "room": room, "document": doc, "metadata": meta},
-        )
+    for parent, cid, wing, room in cur.fetchall():
+        g = groups.setdefault(parent, {"chunk_ids": [], "wing": wing, "room": room})
         g["chunk_ids"].append(cid)
     if groups:
         cur.execute(
@@ -371,6 +388,59 @@ def _load_chunk_groups(cur) -> dict:
         for parent, g in groups.items():
             g["has_legacy_row"] = parent in legacy
     return groups
+
+
+def _fresh_groups(cur, parents: list) -> dict:
+    """parent -> {chunk_ids, wing, room} read now, for the given parents only
+    (one page: at most ``limit``), through the parent_drawer_id index.
+
+    The page's entries are built from this, never from the swept cache: the
+    cache only decides WHICH groups exist and in what order (pagination and
+    ``total``), so a cached call and a cold call build an entry from the same
+    rows (#358 r1 finding 2)."""
+    if not parents:
+        return {}
+    cur.execute(
+        "SELECT metadata->>'parent_drawer_id' AS parent, id, wing, room "
+        "FROM mempalace_drawers WHERE metadata->>'parent_drawer_id' = ANY(%s) "
+        "ORDER BY 1, NULLIF(metadata->>'chunk_index', '')::int NULLS LAST, id",
+        (list(parents),),
+    )
+    fresh: dict = {}
+    for parent, cid, wing, room in cur.fetchall():
+        g = fresh.setdefault(parent, {"chunk_ids": [], "wing": wing, "room": room})
+        g["chunk_ids"].append(cid)
+    return fresh
+
+
+def _first_chunk_bodies(cur, groups: dict) -> dict:
+    """first chunk id -> (document, metadata) for the given groups only, by
+    primary key."""
+    first_ids = [g["chunk_ids"][0] for g in groups.values() if g.get("chunk_ids")]
+    if not first_ids:
+        return {}
+    cur.execute(
+        "SELECT id, document, metadata FROM mempalace_drawers WHERE id = ANY(%s)", (first_ids,)
+    )
+    return {did: (doc, meta) for did, doc, meta in cur.fetchall()}
+
+
+def _orphan_entries(cur, parents: list) -> list:
+    """Envelope entries for the given orphan group parents, every field read
+    now. A group deleted since the sweep is left out of the page."""
+    fresh = _fresh_groups(cur, parents)
+    bodies = _first_chunk_bodies(cur, fresh)
+    out = []
+    for parent in parents:
+        g = fresh.get(parent)
+        if not g:
+            continue
+        doc, meta = bodies.get(g["chunk_ids"][0], (None, None))
+        entry = _list_entry(parent, doc, g["wing"], g["room"], meta)
+        entry["metadata"]["chunks"] = len(g["chunk_ids"])
+        entry["metadata"]["chunk_ids"] = list(g["chunk_ids"])
+        out.append(entry)
+    return out
 
 
 def _chunk_groups_cached(cur) -> dict:
@@ -428,10 +498,14 @@ def fast_list_payload(wing=None, room=None, limit=20, offset=0) -> dict:
                     params.append(room)
                 where_sql = " AND ".join(where)
 
-                cur.execute(
-                    f"SELECT count(*) FROM mempalace_drawers WHERE {where_sql}", params
-                )
-                anchor_total = cur.fetchone()[0]
+                if wing or room:
+                    cur.execute(
+                        f"SELECT count(*) FROM mempalace_drawers WHERE {where_sql}", params
+                    )
+                    anchor_total = cur.fetchone()[0]
+                else:
+                    cur.execute(_UNFILTERED_ANCHOR_COUNT_SQL)
+                    anchor_total = cur.fetchone()[0]
 
                 groups = _chunk_groups_cached(cur)
                 orphans = [
@@ -450,10 +524,14 @@ def fast_list_payload(wing=None, room=None, limit=20, offset=0) -> dict:
                         f"WHERE {where_sql} ORDER BY id LIMIT %s OFFSET %s",
                         [*params, limit, offset],
                     )
-                    for did, doc, w, r, meta in cur.fetchall():
+                    rows = cur.fetchall()
+                    # legacy logical rows of chunk groups: their chunks read
+                    # now, like the orphans' (#358 r1 finding 2)
+                    fresh = _fresh_groups(cur, [r[0] for r in rows])
+                    for did, doc, w, r, meta in rows:
                         entry = _list_entry(did, doc, w, r, meta)
-                        g = groups.get(did)
-                        if g:  # legacy logical row for a chunk group
+                        g = fresh.get(did)
+                        if g:
                             entry["metadata"]["chunks"] = len(g["chunk_ids"])
                             entry["metadata"]["chunk_ids"] = list(g["chunk_ids"])
                         page.append(entry)
@@ -462,13 +540,8 @@ def fast_list_payload(wing=None, room=None, limit=20, offset=0) -> dict:
                 if len(page) < limit:
                     o_start = max(0, offset - anchor_total)
                     o_take = limit - len(page)
-                    for parent, g in orphans[o_start : o_start + o_take]:
-                        entry = _list_entry(
-                            parent, g.get("document"), g.get("wing"), g.get("room"), g.get("metadata")
-                        )
-                        entry["metadata"]["chunks"] = len(g["chunk_ids"])
-                        entry["metadata"]["chunk_ids"] = list(g["chunk_ids"])
-                        page.append(entry)
+                    o_parents = [p for p, _g in orphans[o_start : o_start + o_take]]
+                    page.extend(_orphan_entries(cur, o_parents))
     except psycopg2.Error as e:
         # #108: query-time failures (statement timeout, dropped connection,
         # bad cast in the chunk sweep) must reach /health.db_errors too —
