@@ -300,9 +300,11 @@ def fast_mcp_kg_stats_cached() -> tuple[dict, bool]:
 # is only "approximates insertion order, not guaranteed", so a stable
 # alternative order is compliant.
 #
-# Chunk-group side data (parents, chunk ids, first-chunk preview) is tiny
-# and changes rarely, so it is swept once per ``_CHUNK_GROUP_TTL`` and
-# cached; the page query itself is ~2ms unfiltered / ~140ms wing-filtered.
+# Chunk-group side data (parents, chunk ids, wing, room) is small and
+# changes rarely, so it is swept once per ``_CHUNK_GROUP_TTL`` and cached;
+# the first chunk's document and metadata are fetched by id only for the
+# orphan groups on the requested page. The page query itself is ~2ms
+# unfiltered / ~140ms wing-filtered.
 
 _CHUNK_GROUP_TTL = 300.0
 _chunk_group_cache: dict = {"at": 0.0, "groups": None}
@@ -350,18 +352,22 @@ def _list_entry(drawer_id, document, wing, room, meta) -> dict:
 
 
 def _load_chunk_groups(cur) -> dict:
-    """Sweep the chunk side: parent -> group info. Cheap (146 rows today)."""
+    """Sweep the chunk side: parent -> {chunk_ids, wing, room, has_legacy_row}.
+
+    Only the small columns. The first chunk's document and metadata are
+    fetched per page for the orphan groups on it (``_first_chunk_bodies``):
+    at 20k chunk rows each chunk's metadata carries ~24 KB (``aaak_source``),
+    and sweeping it into Python peaked the daemon at 1.5 GB RSS in 6 s
+    (palace-daemon 0a19023b / 8e81d5db, 2026-11-27).
+    """
     cur.execute(
-        "SELECT metadata->>'parent_drawer_id' AS parent, id, document, wing, room, metadata "
+        "SELECT metadata->>'parent_drawer_id' AS parent, id, wing, room "
         "FROM mempalace_drawers WHERE metadata->>'parent_drawer_id' IS NOT NULL "
         "ORDER BY 1, NULLIF(metadata->>'chunk_index', '')::int NULLS LAST, id"
     )
     groups: dict = {}
-    for parent, cid, doc, wing, room, meta in cur.fetchall():
-        g = groups.setdefault(
-            parent,
-            {"chunk_ids": [], "wing": wing, "room": room, "document": doc, "metadata": meta},
-        )
+    for parent, cid, wing, room in cur.fetchall():
+        g = groups.setdefault(parent, {"chunk_ids": [], "wing": wing, "room": room})
         g["chunk_ids"].append(cid)
     if groups:
         cur.execute(
@@ -371,6 +377,18 @@ def _load_chunk_groups(cur) -> dict:
         for parent, g in groups.items():
             g["has_legacy_row"] = parent in legacy
     return groups
+
+
+def _first_chunk_bodies(cur, groups: list) -> dict:
+    """first chunk id -> (document, metadata) for the given (parent, group)
+    pairs only: at most one page of orphan groups, by primary key."""
+    first_ids = [g["chunk_ids"][0] for _, g in groups if g.get("chunk_ids")]
+    if not first_ids:
+        return {}
+    cur.execute(
+        "SELECT id, document, metadata FROM mempalace_drawers WHERE id = ANY(%s)", (first_ids,)
+    )
+    return {did: (doc, meta) for did, doc, meta in cur.fetchall()}
 
 
 def _chunk_groups_cached(cur) -> dict:
@@ -428,10 +446,23 @@ def fast_list_payload(wing=None, room=None, limit=20, offset=0) -> dict:
                     params.append(room)
                 where_sql = " AND ".join(where)
 
-                cur.execute(
-                    f"SELECT count(*) FROM mempalace_drawers WHERE {where_sql}", params
-                )
-                anchor_total = cur.fetchone()[0]
+                if wing or room:
+                    cur.execute(
+                        f"SELECT count(*) FROM mempalace_drawers WHERE {where_sql}", params
+                    )
+                    anchor_total = cur.fetchone()[0]
+                else:
+                    # Unfiltered, "parent IS NULL" is a parallel seq scan of
+                    # every row (>10 s at 1.5M rows: the fast path timed out).
+                    # All rows (index-only) minus chunk rows (parent index)
+                    # is the same number in ~0.35 s.
+                    cur.execute("SELECT count(*) FROM mempalace_drawers")
+                    all_rows = cur.fetchone()[0]
+                    cur.execute(
+                        "SELECT count(*) FROM mempalace_drawers "
+                        "WHERE metadata->>'parent_drawer_id' IS NOT NULL"
+                    )
+                    anchor_total = all_rows - cur.fetchone()[0]
 
                 groups = _chunk_groups_cached(cur)
                 orphans = [
@@ -462,10 +493,11 @@ def fast_list_payload(wing=None, room=None, limit=20, offset=0) -> dict:
                 if len(page) < limit:
                     o_start = max(0, offset - anchor_total)
                     o_take = limit - len(page)
-                    for parent, g in orphans[o_start : o_start + o_take]:
-                        entry = _list_entry(
-                            parent, g.get("document"), g.get("wing"), g.get("room"), g.get("metadata")
-                        )
+                    o_page = orphans[o_start : o_start + o_take]
+                    bodies = _first_chunk_bodies(cur, o_page)
+                    for parent, g in o_page:
+                        doc, meta = bodies.get(g["chunk_ids"][0], (None, None))
+                        entry = _list_entry(parent, doc, g.get("wing"), g.get("room"), meta)
                         entry["metadata"]["chunks"] = len(g["chunk_ids"])
                         entry["metadata"]["chunk_ids"] = list(g["chunk_ids"])
                         page.append(entry)

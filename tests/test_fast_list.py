@@ -156,5 +156,175 @@ class TestMcpListIntercept(unittest.TestCase):
         slow.assert_not_awaited()
 
 
+class _FakeDrawers:
+    """A tiny in-memory mempalace_drawers that answers the fast path's SQL.
+
+    Records which drawer ids had their ``document`` read by any query, and
+    every SQL text run. An unknown statement fails the test."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.bodies_read: set = set()
+        self.sql: list = []
+
+    @staticmethod
+    def _parent(r):
+        return r["metadata"].get("parent_drawer_id")
+
+    def _filtered(self, sql, params):
+        rows, p = list(self.rows), list(params or [])
+        if "parent_drawer_id' IS NULL" in sql:
+            rows = [r for r in rows if self._parent(r) is None]
+        if "parent_drawer_id' IS NOT NULL" in sql:
+            rows = [r for r in rows if self._parent(r) is not None]
+        if "wing = %s" in sql:
+            w = p.pop(0)
+            rows = [r for r in rows if r["wing"] == w]
+        if "room = %s" in sql:
+            rm = p.pop(0)
+            rows = [r for r in rows if r["room"] == rm]
+        return rows, p
+
+    def run(self, sql, params):
+        self.sql.append(sql)
+        if sql.startswith("SET LOCAL"):
+            return []
+        if sql.startswith("SELECT count(*)"):
+            return [(len(self._filtered(sql, params)[0]),)]
+        if " AS parent" in sql:
+            cols = [c.strip() for c in sql.split("SELECT", 1)[1].split("FROM", 1)[0].split(",")]
+            rows, _ = self._filtered(sql, params)
+            rows.sort(key=lambda r: (self._parent(r), r["metadata"].get("chunk_index", 0), r["id"]))
+            out = []
+            for r in rows:
+                vals = []
+                for c in cols:
+                    if c.endswith("AS parent"):
+                        vals.append(self._parent(r))
+                    else:
+                        vals.append(r[c])
+                        if c == "document":
+                            self.bodies_read.add(r["id"])
+                out.append(tuple(vals))
+            return out
+        if sql.startswith("SELECT id FROM mempalace_drawers WHERE id = ANY"):
+            ids = set(params[0])
+            return [(r["id"],) for r in self.rows if r["id"] in ids]
+        if sql.startswith("SELECT id, document, metadata FROM mempalace_drawers WHERE id = ANY"):
+            ids = set(params[0])
+            hit = [r for r in self.rows if r["id"] in ids]
+            self.bodies_read.update(r["id"] for r in hit)
+            return [(r["id"], r["document"], r["metadata"]) for r in hit]
+        if "ORDER BY id LIMIT %s OFFSET %s" in sql:
+            rows, p = self._filtered(sql, params)
+            limit, offset = p
+            rows = sorted(rows, key=lambda r: r["id"])[offset : offset + limit]
+            self.bodies_read.update(r["id"] for r in rows)
+            return [(r["id"], r["document"], r["wing"], r["room"], r["metadata"]) for r in rows]
+        raise AssertionError(f"unexpected SQL in the fake: {sql}")
+
+    def connect(self, *a, **k):
+        db = self
+
+        class Cur:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *e):
+                return False
+
+            def execute(self, sql, params=None):
+                self._res = db.run(sql, params)
+
+            def fetchall(self):
+                return list(self._res)
+
+            def fetchone(self):
+                return self._res[0]
+
+        class Conn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *e):
+                return False
+
+            def cursor(self):
+                return Cur()
+
+            def close(self):
+                pass
+
+        return Conn()
+
+
+def _palace(n_singles=3, n_groups=5, chunks=4):
+    rows = [{"id": f"s{i:03d}", "document": f"single {i}", "wing": "w", "room": "r", "metadata": {}}
+            for i in range(n_singles)]
+    for g in range(n_groups):
+        for c in range(chunks):
+            rows.append({"id": f"c{g:02d}-{c}", "document": f"group {g} chunk {c}", "wing": "w", "room": "r",
+                         "metadata": {"parent_drawer_id": f"p{g:02d}", "chunk_index": c,
+                                      "aaak_source": "x" * 1000}})
+    return rows
+
+
+class TestChunkSweepBounded(unittest.TestCase):
+    """0a19023b / 8e81d5db (2026-11-27): the chunk-group sweep pulled every
+    chunk row's document and metadata (~24 KB of aaak_source each, 20k rows)
+    into Python: 1.5 GB RSS in 6 s on a cold cache. It now sweeps ids, wing
+    and room only, and reads the first chunk's body for the page's orphan
+    groups by id. The unfiltered anchor count no longer scans every row."""
+
+    def setUp(self):
+        fast_intercept._chunk_group_cache.update({"at": 0.0, "groups": None})
+        self.addCleanup(fast_intercept._chunk_group_cache.update, {"at": 0.0, "groups": None})
+
+    def _payload(self, db, **kw):
+        with patch("psycopg2.connect", db.connect), patch("postgres.postgres_dsn", return_value="dsn"):
+            return fast_intercept.fast_list_payload(**kw)
+
+    def test_sweep_holds_no_documents_or_metadata(self):
+        db = _FakeDrawers(_palace())
+        groups = fast_intercept._load_chunk_groups(db.connect().cursor())
+        self.assertEqual(len(groups), 5)
+        self.assertEqual(groups["p00"]["chunk_ids"], ["c00-0", "c00-1", "c00-2", "c00-3"])
+        held = json.dumps(groups, default=str)
+        self.assertNotIn("aaak_source", held)
+        self.assertNotIn("chunk 0", held)
+        self.assertEqual(db.bodies_read, set())
+
+    def test_orphan_page_reads_only_its_first_chunks(self):
+        db = _FakeDrawers(_palace())
+        p = self._payload(db, limit=2, offset=3)  # 3 singles, then orphan groups p00, p01
+        self.assertEqual(p["total"], 8)
+        self.assertEqual([d["drawer_id"] for d in p["drawers"]], ["p00", "p01"])
+        self.assertEqual(p["drawers"][0]["content_preview"], "group 0 chunk 0")
+        self.assertEqual(p["drawers"][1]["metadata"]["chunks"], 4)
+        self.assertEqual(p["drawers"][1]["metadata"]["chunk_ids"], ["c01-0", "c01-1", "c01-2", "c01-3"])
+        self.assertEqual(db.bodies_read, {"c00-0", "c01-0"})
+
+    def test_page_across_the_boundary_matches(self):
+        db = _FakeDrawers(_palace())
+        p = self._payload(db, limit=3, offset=2)
+        self.assertEqual([d["drawer_id"] for d in p["drawers"]], ["s002", "p00", "p01"])
+        self.assertEqual(db.bodies_read, {"s002", "c00-0", "c01-0"})
+
+    def test_unfiltered_anchor_count_never_scans_for_null_parent(self):
+        db = _FakeDrawers(_palace())
+        p = self._payload(db, limit=1, offset=0)
+        self.assertEqual(p["total"], 8)
+        counts = [s for s in db.sql if s.startswith("SELECT count(*)")]
+        self.assertTrue(counts)
+        self.assertFalse([s for s in counts if "IS NULL" in s], counts)
+
+    def test_wing_filtered_count_unchanged(self):
+        db = _FakeDrawers(_palace())
+        p = self._payload(db, wing="w", limit=1, offset=0)
+        self.assertEqual(p["total"], 8)
+        db2 = _FakeDrawers(_palace())
+        self.assertEqual(self._payload(db2, wing="nope", limit=1, offset=0)["total"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
