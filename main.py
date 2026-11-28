@@ -20,6 +20,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import tempfile
 import sqlite3
 import sys
@@ -742,6 +743,59 @@ def _needle_seed():
     finally:
         if fd is not None:
             os.close(fd)
+
+
+# What a mine child may inherit from the daemon (Flow 3a002409, lead ruling on #360): an allowlist, so a vault
+# session, an API key or a needle value in the daemon's environment never reaches a mine. The miner needs its
+# MEMPALACE_* settings (backend, DSN, KG flags), PALACE_KG_* tuning, and PALACE_DAEMON_STRICT so that a config
+# file's daemon_url never routes the child's writes back into this daemon.
+_MINE_ENV_NAMES = frozenset({
+    "PATH", "HOME", "LANG", "LANGUAGE", "TZ", "USER", "LOGNAME", "TMPDIR",
+    "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
+    "BITWARDENCLI_APPDATA_DIR", "MALLOC_ARENA_MAX", "NO_COLOR",
+    "PALACE_DAEMON_URL", "PALACE_DAEMON_STRICT",
+})
+_MINE_ENV_PREFIXES = ("LC_", "MEMPALACE_", "PALACE_KG_", "HF_", "CUDA_", "OMP_")
+# Dropped even when allowlisted: a credential-shaped name.
+_MINE_ENV_DENY = re.compile(r"TOKEN|SECRET|KEY|PASSWORD|PASSWD|CREDENTIAL|SESSION|AUTH", re.I)
+
+
+def _mine_child_env(extra: dict | None = None) -> dict:
+    """The environment for one mine child: the allowlisted names from ``os.environ``, never a
+    credential-shaped name, never a value that holds a redact needle, plus ``extra`` (the phase file and
+    the seed fd, which the daemon sets itself)."""
+    needles: list[str] = []
+    try:
+        from mempalace import redact
+
+        held = getattr(redact, "_vault_values", None)
+        if isinstance(held, dict):
+            needles = [v for v, _t in list(held.values()) if isinstance(v, str) and len(v.strip()) >= 6]
+    except Exception:  # noqa: BLE001 -- the name filter still applies
+        needles = []
+    env = {}
+    for name, value in os.environ.items():
+        if name not in _MINE_ENV_NAMES and not name.startswith(_MINE_ENV_PREFIXES):
+            continue
+        if _MINE_ENV_DENY.search(name) or any(n in value for n in needles):
+            continue
+        env[name] = value
+    env.update(extra or {})
+    return env
+
+
+async def _spawn_mine(cmd: list[str], extra_env: dict | None = None):
+    """Every mine child is started here: low priority, an allowlisted environment, and the daemon's redact
+    needles handed over through one inherited pipe (``_needle_seed``), whose fd is closed here as soon as
+    the spawn returns or raises."""
+    with _needle_seed() as (seed_fds, seed_env):
+        return await asyncio.create_subprocess_exec(
+            *_low_priority(cmd),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=_mine_child_env({**(extra_env or {}), **seed_env}),
+            pass_fds=seed_fds,
+        )
 
 
 def _low_priority(cmd: list[str]) -> list[str]:
@@ -1790,14 +1844,7 @@ async def _drain_pending_mines() -> int:
                         continue
                     phase_file = _new_mine_phase_file()
                     try:
-                        with _needle_seed() as (seed_fds, seed_env):
-                            proc = await asyncio.create_subprocess_exec(
-                                *_low_priority(cmd),
-                                stdout=asyncio.subprocess.PIPE,
-                                stderr=asyncio.subprocess.PIPE,
-                                env={**os.environ, _MINE_PHASE_ENV: phase_file, **seed_env},
-                                pass_fds=seed_fds,
-                            )
+                        proc = await _spawn_mine(cmd, {_MINE_PHASE_ENV: phase_file})
                     except BaseException:
                         # A failed spawn (missing binary, ENOMEM) would
                         # otherwise leak the private directory.
@@ -2598,14 +2645,7 @@ async def lifespan(app: FastAPI):
             argv = [mempalace_bin, "mine", path, "--mode", "projects", "--wing", wing]
             # Same pattern as /mine endpoint: list-form argv, no shell.
             async with _mine_sem:
-                with _needle_seed() as (seed_fds, seed_env):
-                    proc = await asyncio.create_subprocess_exec(
-                        *_low_priority(argv),
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                        env={**os.environ, **seed_env},
-                        pass_fds=seed_fds,
-                    )
+                proc = await _spawn_mine(argv)
                 # Track the proc so the lifespan shutdown can terminate it
                 # cleanly (#136 problem B). discard() in finally is
                 # idempotent and tolerant of the proc already being gone.
@@ -4572,14 +4612,7 @@ async def mine(
         cmd += ["--no-tunnels"]
 
     async def _run_mine_subprocess():
-        with _needle_seed() as (seed_fds, seed_env):
-            proc = await asyncio.create_subprocess_exec(
-                *_low_priority(cmd),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env={**os.environ, **seed_env},
-                pass_fds=seed_fds,
-            )
+        proc = await _spawn_mine(cmd)
         # Track the proc so lifespan shutdown can terminate it cleanly
         # (#136 problem B). The watcher's auto-mine path tracks via the
         # same set in app.state.active_mines.

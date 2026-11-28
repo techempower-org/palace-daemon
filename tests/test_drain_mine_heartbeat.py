@@ -96,7 +96,7 @@ class DrainMineHeartbeat(unittest.TestCase):
         """The spawn passes MEMPALACE_MINE_PHASE_FILE, and the file is removed afterwards."""
         with open(main.__file__, encoding="utf-8") as f:
             src = f.read()
-        spawn_env = "env={**os.environ, _MINE_PHASE_ENV: phase_file, **seed_env}"
+        spawn_env = "_spawn_mine(cmd, {_MINE_PHASE_ENV: phase_file})"
         self.assertIn(spawn_env, src)
         self.assertIn("_drop_mine_phase_file(phase_file)", src)
         spawn = src.index(spawn_env)
