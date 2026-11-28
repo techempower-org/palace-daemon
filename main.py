@@ -713,6 +713,37 @@ def _stderr_excerpt(stderr: "bytes | None", limit: int = 600) -> str:
     return text[-limit:]
 
 
+@contextlib.contextmanager
+def _needle_seed():
+    """Yield ``(pass_fds, env)`` that hand this daemon's redact needles to ONE mine child (Flow 3a002409).
+
+    Each ``mempalace mine`` child used to fetch every vault needle itself (``bw get``, serially, 30 s
+    limit each); under a re-mine burst one fetch took ~8 s and some passed 30 s, so a child with no last
+    good value failed closed and filed nothing. The daemon's refresher already holds good values.
+    mempalace's ``needle_seed_fd()`` returns the read end of a pipe that already holds them (its write end
+    closed); the child gets that one fd through ``pass_fds`` and its number in the env, reads it once at
+    import and closes it. No value is in an argv, an env, a file or a log. This end is closed as soon as
+    the spawn returns. A mempalace without the seed (no ``NEEDLE_SEED_VERSION`` 1), or one that fails to
+    make it, yields ``((), {})``: the child fetches as before.
+    """
+    fd = None
+    env_name = None
+    try:
+        from mempalace import redact
+
+        if getattr(redact, "NEEDLE_SEED_VERSION", None) == 1:
+            env_name = redact.NEEDLE_SEED_ENV
+            fd = redact.needle_seed_fd()
+    except Exception as exc:  # noqa: BLE001 -- a seed is an optimisation; the child can still fetch
+        _log.warning("mine needle seed not made (%s); the child fetches", type(exc).__name__)
+        fd = None
+    try:
+        yield ((fd,), {env_name: str(fd)}) if fd is not None else ((), {})
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
 def _low_priority(cmd: list[str]) -> list[str]:
     """Prefix a mine argv with ``ionice -c2 -n7 nice -n 10``.
 
@@ -1759,12 +1790,14 @@ async def _drain_pending_mines() -> int:
                         continue
                     phase_file = _new_mine_phase_file()
                     try:
-                        proc = await asyncio.create_subprocess_exec(
-                            *_low_priority(cmd),
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE,
-                            env={**os.environ, _MINE_PHASE_ENV: phase_file},
-                        )
+                        with _needle_seed() as (seed_fds, seed_env):
+                            proc = await asyncio.create_subprocess_exec(
+                                *_low_priority(cmd),
+                                stdout=asyncio.subprocess.PIPE,
+                                stderr=asyncio.subprocess.PIPE,
+                                env={**os.environ, _MINE_PHASE_ENV: phase_file, **seed_env},
+                                pass_fds=seed_fds,
+                            )
                     except BaseException:
                         # A failed spawn (missing binary, ENOMEM) would
                         # otherwise leak the private directory.
@@ -2565,11 +2598,14 @@ async def lifespan(app: FastAPI):
             argv = [mempalace_bin, "mine", path, "--mode", "projects", "--wing", wing]
             # Same pattern as /mine endpoint: list-form argv, no shell.
             async with _mine_sem:
-                proc = await asyncio.create_subprocess_exec(
-                    *_low_priority(argv),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
+                with _needle_seed() as (seed_fds, seed_env):
+                    proc = await asyncio.create_subprocess_exec(
+                        *_low_priority(argv),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        env={**os.environ, **seed_env},
+                        pass_fds=seed_fds,
+                    )
                 # Track the proc so the lifespan shutdown can terminate it
                 # cleanly (#136 problem B). discard() in finally is
                 # idempotent and tolerant of the proc already being gone.
@@ -4536,11 +4572,14 @@ async def mine(
         cmd += ["--no-tunnels"]
 
     async def _run_mine_subprocess():
-        proc = await asyncio.create_subprocess_exec(
-            *_low_priority(cmd),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        with _needle_seed() as (seed_fds, seed_env):
+            proc = await asyncio.create_subprocess_exec(
+                *_low_priority(cmd),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env={**os.environ, **seed_env},
+                pass_fds=seed_fds,
+            )
         # Track the proc so lifespan shutdown can terminate it cleanly
         # (#136 problem B). The watcher's auto-mine path tracks via the
         # same set in app.state.active_mines.
